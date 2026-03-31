@@ -32,6 +32,15 @@ export const RESERVED_COMMAND_NAMES = new Set([
 
 export type PromptSource = "user" | "project";
 
+export interface DelegationLineupSlot {
+	agent: string;
+	model?: string;
+	task?: string;
+	taskSuffix?: string;
+	cwd?: string;
+	count?: number;
+}
+
 export interface PromptWithModel {
 	name: string;
 	description: string;
@@ -47,9 +56,14 @@ export interface PromptWithModel {
 	fresh?: boolean;
 	loop?: number | null;
 	converge?: boolean;
+	parallel?: number;
+	worktree?: boolean;
 	subagent?: true | string;
 	inheritContext?: boolean;
 	cwd?: string;
+	workers?: DelegationLineupSlot[];
+	reviewers?: DelegationLineupSlot[];
+	finalReviewer?: DelegationLineupSlot;
 	source: PromptSource;
 	subdir?: string;
 	filePath: string;
@@ -304,6 +318,294 @@ function normalizeLoop(
 	return undefined;
 }
 
+function normalizeParallel(
+	value: unknown,
+	filePath: string,
+	source: PromptSource,
+	diagnostics: PromptLoaderDiagnostic[],
+): number | undefined {
+	if (value === undefined) return undefined;
+
+	let normalizedValue: number | undefined;
+	if (typeof value === "number") {
+		normalizedValue = value;
+	} else if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+		normalizedValue = parseInt(value.trim(), 10);
+	}
+
+	if (normalizedValue !== undefined && Number.isInteger(normalizedValue) && normalizedValue >= 2) {
+		return normalizedValue;
+	}
+
+	diagnostics.push(
+		createDiagnostic(
+			"invalid-parallel",
+			filePath,
+			source,
+			`Ignoring invalid parallel value in ${filePath}: frontmatter field "parallel" must be an integer greater than or equal to 2.`,
+		),
+	);
+	return undefined;
+}
+
+function normalizeLineupSlot(
+	value: unknown,
+	field: "workers" | "reviewers" | "finalReviewer",
+	filePath: string,
+	source: PromptSource,
+	diagnostics: PromptLoaderDiagnostic[],
+	index: number,
+): DelegationLineupSlot | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		diagnostics.push(
+			createDiagnostic(
+				`invalid-${field}`,
+				filePath,
+				source,
+				`Ignoring invalid ${field} value in ${filePath}: slot ${index + 1} must be an object.`,
+			),
+		);
+		return undefined;
+	}
+
+	const slot = value as Record<string, unknown>;
+	if (slot.agent !== undefined && slot.subagent !== undefined) {
+		diagnostics.push(
+			createDiagnostic(
+				`invalid-${field}`,
+				filePath,
+				source,
+				`Ignoring invalid ${field} value in ${filePath}: slot ${index + 1} cannot combine "agent" and "subagent".`,
+			),
+		);
+		return undefined;
+	}
+
+	let agent: string | undefined;
+	if (typeof slot.agent === "string" && slot.agent.trim()) {
+		agent = slot.agent.trim();
+	} else if (slot.agent !== undefined) {
+		diagnostics.push(
+			createDiagnostic(
+				`invalid-${field}`,
+				filePath,
+				source,
+				`Ignoring invalid ${field} value in ${filePath}: slot ${index + 1} requires a non-empty string "agent".`,
+			),
+		);
+		return undefined;
+	}
+
+	if (!agent && slot.subagent !== undefined) {
+		if (slot.subagent === true) {
+			agent = field === "workers" ? "delegate" : "reviewer";
+		} else if (typeof slot.subagent === "string" && slot.subagent.trim()) {
+			agent = slot.subagent.trim();
+		} else {
+			diagnostics.push(
+				createDiagnostic(
+					`invalid-${field}`,
+					filePath,
+					source,
+					`Ignoring invalid ${field} value in ${filePath}: slot ${index + 1} requires "subagent" to be true or a non-empty string.`,
+				),
+			);
+			return undefined;
+		}
+	}
+
+	if (!agent) {
+		diagnostics.push(
+			createDiagnostic(
+				`invalid-${field}`,
+				filePath,
+				source,
+				`Ignoring invalid ${field} value in ${filePath}: slot ${index + 1} requires either a non-empty string "agent" or a valid "subagent".`,
+			),
+		);
+		return undefined;
+	}
+
+	const normalized: DelegationLineupSlot = {
+		agent,
+	};
+
+	if (slot.model !== undefined) {
+		if (typeof slot.model !== "string" || !slot.model.trim()) {
+			diagnostics.push(
+				createDiagnostic(
+					`invalid-${field}`,
+					filePath,
+					source,
+					`Ignoring invalid ${field} value in ${filePath}: slot ${index + 1} has an invalid "model".`,
+				),
+			);
+			return undefined;
+		}
+		const modelSpec = slot.model.trim();
+		if (!isValidModelSelectionSpec(modelSpec)) {
+			diagnostics.push(
+				createDiagnostic(
+					`invalid-${field}`,
+					filePath,
+					source,
+					`Ignoring invalid ${field} value in ${filePath}: slot ${index + 1} has invalid model spec ${JSON.stringify(modelSpec)}.`,
+				),
+			);
+			return undefined;
+		}
+		normalized.model = modelSpec;
+	}
+
+	if (slot.task !== undefined) {
+		if (typeof slot.task !== "string") {
+			diagnostics.push(
+				createDiagnostic(
+					`invalid-${field}`,
+					filePath,
+					source,
+					`Ignoring invalid ${field} value in ${filePath}: slot ${index + 1} has a non-string "task".`,
+				),
+			);
+			return undefined;
+		}
+		const task = slot.task.trim();
+		if (task) normalized.task = task;
+	}
+
+	if (slot.taskSuffix !== undefined) {
+		if (typeof slot.taskSuffix !== "string") {
+			diagnostics.push(
+				createDiagnostic(
+					`invalid-${field}`,
+					filePath,
+					source,
+					`Ignoring invalid ${field} value in ${filePath}: slot ${index + 1} has a non-string "taskSuffix".`,
+				),
+			);
+			return undefined;
+		}
+		const taskSuffix = slot.taskSuffix.trim();
+		if (taskSuffix) normalized.taskSuffix = taskSuffix;
+	}
+
+	if (slot.cwd !== undefined) {
+		if (typeof slot.cwd !== "string") {
+			diagnostics.push(
+				createDiagnostic(
+					`invalid-${field}`,
+					filePath,
+					source,
+					`Ignoring invalid ${field} value in ${filePath}: slot ${index + 1} has a non-string "cwd".`,
+				),
+			);
+			return undefined;
+		}
+		const cwdRaw = slot.cwd.trim();
+		if (cwdRaw) {
+			const expanded = expandCwdPath(cwdRaw);
+			if (!expanded) {
+				diagnostics.push(
+					createDiagnostic(
+						`invalid-${field}`,
+						filePath,
+						source,
+						`Ignoring invalid ${field} value in ${filePath}: slot ${index + 1} "cwd" must be an absolute path.`,
+					),
+				);
+				return undefined;
+			}
+			normalized.cwd = expanded;
+		}
+	}
+
+	if (slot.count !== undefined) {
+		let count: number | undefined;
+		if (typeof slot.count === "number") {
+			count = slot.count;
+		} else if (typeof slot.count === "string" && /^\d+$/.test(slot.count.trim())) {
+			count = parseInt(slot.count.trim(), 10);
+		}
+		if (count === undefined || !Number.isInteger(count) || count < 1) {
+			diagnostics.push(
+				createDiagnostic(
+					`invalid-${field}`,
+					filePath,
+					source,
+					`Ignoring invalid ${field} value in ${filePath}: slot ${index + 1} "count" must be an integer greater than or equal to 1.`,
+				),
+			);
+			return undefined;
+		}
+		normalized.count = count;
+	}
+
+	return normalized;
+}
+
+function normalizeLineup(
+	value: unknown,
+	field: "workers" | "reviewers",
+	filePath: string,
+	source: PromptSource,
+	diagnostics: PromptLoaderDiagnostic[],
+): DelegationLineupSlot[] | undefined {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value)) {
+		diagnostics.push(
+			createDiagnostic(
+				`invalid-${field}`,
+				filePath,
+				source,
+				`Ignoring invalid ${field} value in ${filePath}: expected an array of slot objects.`,
+			),
+		);
+		return undefined;
+	}
+	if (value.length === 0) {
+		diagnostics.push(
+			createDiagnostic(
+				`invalid-${field}`,
+				filePath,
+				source,
+				`Ignoring invalid ${field} value in ${filePath}: expected at least one slot.`,
+			),
+		);
+		return undefined;
+	}
+
+	const slots: DelegationLineupSlot[] = [];
+	for (let i = 0; i < value.length; i++) {
+		const normalized = normalizeLineupSlot(value[i], field, filePath, source, diagnostics, i);
+		if (!normalized) return undefined;
+		slots.push(normalized);
+	}
+	return slots;
+}
+
+function normalizeFinalReviewer(
+	value: unknown,
+	filePath: string,
+	source: PromptSource,
+	diagnostics: PromptLoaderDiagnostic[],
+): DelegationLineupSlot | undefined {
+	if (value === undefined) return undefined;
+	const normalized = normalizeLineupSlot(value, "finalReviewer", filePath, source, diagnostics, 0);
+	if (!normalized) return undefined;
+	if (normalized.count !== undefined) {
+		diagnostics.push(
+			createDiagnostic(
+				"invalid-final-reviewer",
+				filePath,
+				source,
+				`Ignoring invalid finalReviewer value in ${filePath}: slot 1 "count" is not supported.`,
+			),
+		);
+		return undefined;
+	}
+	return normalized;
+}
+
 function normalizeConverge(
 	value: unknown,
 	filePath: string,
@@ -327,6 +629,31 @@ function normalizeConverge(
 		),
 	);
 	return true;
+}
+
+function normalizeWorktree(
+	value: unknown,
+	filePath: string,
+	source: PromptSource,
+	diagnostics: PromptLoaderDiagnostic[],
+): boolean {
+	if (value === undefined) return false;
+	if (typeof value === "boolean") return value;
+	if (typeof value === "string") {
+		const normalized = value.trim().toLowerCase();
+		if (normalized === "true") return true;
+		if (normalized === "false") return false;
+	}
+
+	diagnostics.push(
+		createDiagnostic(
+			"invalid-worktree",
+			filePath,
+			source,
+			`Using default worktree=false for ${filePath}: frontmatter field "worktree" must be true or false.`,
+		),
+	);
+	return false;
 }
 
 function normalizeSubagent(
@@ -639,16 +966,19 @@ function loadPromptsWithModelFromDir(
 				if (!frontmatter) continue;
 				const { body } = parsed;
 				const chain = normalizeChain(frontmatter.chain, fullPath, source, diagnostics);
+				let parsedChainDeclarationResult:
+					| ReturnType<typeof parseChainDeclaration>
+					| undefined;
 				const chainContext = chain ? normalizeChainContext(frontmatter.chainContext, fullPath, source, diagnostics) : undefined;
 				if (chain && /\bparallel\s*\(/.test(chain)) {
-					const parsedChain = parseChainDeclaration(chain);
-					if (parsedChain.invalidSegments.length > 0 || parsedChain.steps.length === 0) {
+					parsedChainDeclarationResult = parseChainDeclaration(chain);
+					if (parsedChainDeclarationResult.invalidSegments.length > 0 || parsedChainDeclarationResult.steps.length === 0) {
 						diagnostics.push(
 							createDiagnostic(
 								"invalid-chain-declaration",
 								fullPath,
 								source,
-								`Skipping prompt template at ${fullPath}: invalid chain declaration segment ${JSON.stringify(parsedChain.invalidSegments[0] ?? chain)}.`,
+								`Skipping prompt template at ${fullPath}: invalid chain declaration segment ${JSON.stringify(parsedChainDeclarationResult.invalidSegments[0] ?? chain)}.`,
 							),
 						);
 						continue;
@@ -657,6 +987,13 @@ function loadPromptsWithModelFromDir(
 				let subagent = normalizeSubagent(frontmatter.subagent, fullPath, source, diagnostics);
 				const cwd = normalizeCwd(frontmatter.cwd, fullPath, source, diagnostics);
 				const inheritContext = normalizeInheritContext(frontmatter.inheritContext, fullPath, source, diagnostics);
+				const parallel = normalizeParallel(frontmatter.parallel, fullPath, source, diagnostics);
+				const workers = normalizeLineup(frontmatter.workers, "workers", fullPath, source, diagnostics);
+				const reviewers = normalizeLineup(frontmatter.reviewers, "reviewers", fullPath, source, diagnostics);
+				const finalReviewer = normalizeFinalReviewer(frontmatter.finalReviewer, fullPath, source, diagnostics);
+				let safeWorkers = workers;
+				let safeReviewers = reviewers;
+				let safeFinalReviewer = finalReviewer;
 				if (chain && subagent !== undefined) {
 					diagnostics.push(
 						createDiagnostic(
@@ -668,6 +1005,32 @@ function loadPromptsWithModelFromDir(
 					);
 					subagent = undefined;
 				}
+				if (chain && (safeWorkers !== undefined || safeReviewers !== undefined || safeFinalReviewer !== undefined)) {
+					diagnostics.push(
+						createDiagnostic(
+							"invalid-lineup-chain",
+							fullPath,
+							source,
+							`Ignoring compare lineup config in ${fullPath}: frontmatter fields "workers"/"reviewers"/"finalReviewer" cannot be combined with "chain".`,
+						),
+					);
+					safeWorkers = undefined;
+					safeReviewers = undefined;
+					safeFinalReviewer = undefined;
+				}
+				if (subagent !== undefined && (safeWorkers !== undefined || safeReviewers !== undefined || safeFinalReviewer !== undefined)) {
+					diagnostics.push(
+						createDiagnostic(
+							"invalid-lineup-subagent",
+							fullPath,
+							source,
+							`Ignoring compare lineup config in ${fullPath}: frontmatter fields "workers"/"reviewers"/"finalReviewer" cannot be combined with "subagent".`,
+						),
+					);
+					safeWorkers = undefined;
+					safeReviewers = undefined;
+					safeFinalReviewer = undefined;
+				}
 				if (subagent === undefined && inheritContext) {
 					diagnostics.push(
 						createDiagnostic(
@@ -678,13 +1041,50 @@ function loadPromptsWithModelFromDir(
 						),
 					);
 				}
-				if (!chain && subagent === undefined && cwd) {
+				let safeParallel = parallel;
+				if (safeParallel !== undefined && chain) {
+					diagnostics.push(
+						createDiagnostic(
+							"invalid-parallel",
+							fullPath,
+							source,
+							`Ignoring parallel in ${fullPath}: frontmatter field "parallel" cannot be combined with "chain".`,
+						),
+					);
+					safeParallel = undefined;
+				}
+				if (safeParallel !== undefined && subagent === undefined) {
+					diagnostics.push(
+						createDiagnostic(
+							"invalid-parallel",
+							fullPath,
+							source,
+							`Ignoring parallel in ${fullPath}: frontmatter field "parallel" requires "subagent".`,
+						),
+					);
+					safeParallel = undefined;
+				}
+				if (safeParallel !== undefined && (safeWorkers !== undefined || safeReviewers !== undefined || safeFinalReviewer !== undefined)) {
+					diagnostics.push(
+						createDiagnostic(
+							"invalid-lineup-parallel",
+							fullPath,
+							source,
+							`Ignoring compare lineup config in ${fullPath}: frontmatter fields "workers"/"reviewers"/"finalReviewer" cannot be combined with "parallel".`,
+						),
+					);
+					safeWorkers = undefined;
+					safeReviewers = undefined;
+					safeFinalReviewer = undefined;
+				}
+				const hasLineup = safeWorkers !== undefined || safeReviewers !== undefined || safeFinalReviewer !== undefined;
+				if (!chain && subagent === undefined && !hasLineup && cwd) {
 					diagnostics.push(
 						createDiagnostic(
 							"invalid-cwd",
 							fullPath,
 							source,
-							`Ignoring cwd in ${fullPath}: frontmatter field "cwd" requires "subagent".`,
+							`Ignoring cwd in ${fullPath}: frontmatter field "cwd" requires "subagent", "chain", or compare lineups ("workers"/"reviewers"/"finalReviewer").`,
 						),
 					);
 				}
@@ -708,7 +1108,7 @@ function loadPromptsWithModelFromDir(
 				}
 
 				const safeInheritContext = subagent !== undefined && inheritContext;
-				const safeCwd = (chain || subagent !== undefined) ? cwd : undefined;
+				const safeCwd = (chain || subagent !== undefined || hasLineup) ? cwd : undefined;
 				const description = normalizeStringField("description", frontmatter.description, fullPath, source, diagnostics) ?? "";
 				const skill = chain ? undefined : normalizeStringField("skill", frontmatter.skill, fullPath, source, diagnostics);
 				let thinking: ThinkingLevel | undefined;
@@ -724,6 +1124,39 @@ function loadPromptsWithModelFromDir(
 				const fresh = normalizeFresh(frontmatter.fresh, fullPath, source, diagnostics);
 				const loop = normalizeLoop(frontmatter.loop, fullPath, source, diagnostics);
 				const converge = normalizeConverge(frontmatter.converge, fullPath, source, diagnostics);
+				const worktree = normalizeWorktree(frontmatter.worktree, fullPath, source, diagnostics);
+				let safeWorktree: boolean | undefined;
+				if (worktree) {
+					if (chain) {
+						const parsedChain = parsedChainDeclarationResult ?? parseChainDeclaration(chain);
+						const hasParallelStep = parsedChain.steps.some((step) => "parallel" in step);
+						if (parsedChain.invalidSegments.length > 0 || parsedChain.steps.length === 0 || !hasParallelStep) {
+							diagnostics.push(
+								createDiagnostic(
+									"invalid-worktree",
+									fullPath,
+									source,
+									`Ignoring worktree in ${fullPath}: frontmatter field "worktree" requires either "chain" with at least one parallel() step, "subagent" with frontmatter field "parallel", or compare lineups ("workers"/"reviewers"/"finalReviewer").`,
+								),
+							);
+						} else {
+							safeWorktree = true;
+						}
+					} else if (subagent !== undefined && safeParallel !== undefined) {
+						safeWorktree = true;
+					} else if (hasLineup) {
+						safeWorktree = true;
+					} else {
+						diagnostics.push(
+							createDiagnostic(
+								"invalid-worktree",
+								fullPath,
+								source,
+								`Ignoring worktree in ${fullPath}: frontmatter field "worktree" requires either "chain" with at least one parallel() step, "subagent" with frontmatter field "parallel", or compare lineups ("workers"/"reviewers"/"finalReviewer").`,
+							),
+						);
+					}
+				}
 				const hasModelConditionalDirectives = /<if-model(?:\s|>)|<else(?:\s|>)|<\/if-model\s*>|<\/else(?:\s|>)/.test(body);
 				const hasExtensionSpecificConfig =
 					skill !== undefined ||
@@ -731,6 +1164,9 @@ function loadPromptsWithModelFromDir(
 					fresh === true ||
 					loop !== undefined ||
 					converge === false ||
+					safeParallel !== undefined ||
+					hasLineup ||
+					safeWorktree === true ||
 					subagent !== undefined ||
 					safeInheritContext ||
 					hasModelConditionalDirectives;
@@ -753,9 +1189,14 @@ function loadPromptsWithModelFromDir(
 					fresh: fresh || undefined,
 					loop: loop !== undefined ? loop : undefined,
 					converge: converge === false ? false : undefined,
+					parallel: safeParallel,
+					worktree: safeWorktree,
 					subagent,
 					inheritContext: safeInheritContext || undefined,
 					cwd: safeCwd || undefined,
+					workers: safeWorkers,
+					reviewers: safeReviewers,
+					finalReviewer: safeFinalReviewer,
 					source,
 					subdir: subdir || undefined,
 					filePath: fullPath,
@@ -828,12 +1269,17 @@ export function loadPromptsWithModel(cwd: string): LoadPromptsWithModelResult {
 	return { prompts: promptMap, diagnostics };
 }
 
+function effectiveLineupCount(slots: DelegationLineupSlot[] | undefined): number {
+	return slots?.reduce((total, slot) => total + (slot.count ?? 1), 0) ?? 0;
+}
+
 export function buildPromptCommandDescription(prompt: PromptWithModel): string {
 	const sourceLabel = prompt.subdir ? `(${prompt.source}:${prompt.subdir})` : `(${prompt.source})`;
 	if (prompt.chain) {
 		const chainContextLabel = prompt.chainContext ? ` ${prompt.chainContext}` : "";
 		const cwdLabel = prompt.cwd ? ` cwd:${prompt.cwd}` : "";
-		const details = `[chain: ${prompt.chain}${chainContextLabel}${cwdLabel}] ${sourceLabel}`;
+		const worktreeLabel = prompt.worktree ? " worktree" : "";
+		const details = `[chain: ${prompt.chain}${chainContextLabel}${cwdLabel}${worktreeLabel}] ${sourceLabel}`;
 		return prompt.description ? `${prompt.description} ${details}` : details;
 	}
 	const modelLabel = prompt.models.length > 0 ? prompt.models.map((model) => model.split("/").pop() || model).join("|") : "current";
@@ -843,9 +1289,15 @@ export function buildPromptCommandDescription(prompt: PromptWithModel): string {
 	const thinkingLabel = thinkingValue ? ` ${thinkingValue}` : "";
 	const loopLabel = prompt.loop !== undefined ? ` loop:${prompt.loop === null ? "unlimited" : prompt.loop}` : "";
 	const subagentLabel = prompt.subagent ? ` subagent:${prompt.subagent === true ? "delegate" : prompt.subagent}` : "";
+	const parallelLabel = prompt.parallel !== undefined ? ` parallel:${prompt.parallel}` : "";
+	const workersLabel = prompt.workers ? ` workers:${effectiveLineupCount(prompt.workers)}` : "";
+	const reviewersLabel = prompt.reviewers ? ` reviewers:${effectiveLineupCount(prompt.reviewers)}` : "";
+	const finalReviewerLabel = prompt.finalReviewer ? " final-reviewer" : "";
 	const cwdLabel = prompt.cwd ? ` cwd:${prompt.cwd}` : "";
 	const inheritContextLabel = prompt.inheritContext ? " fork" : "";
-	const details = `[${modelLabel}${rotateLabel}${thinkingLabel}${skillLabel}${loopLabel}${subagentLabel}${cwdLabel}${inheritContextLabel}] ${sourceLabel}`;
+	const worktreeLabel = prompt.worktree ? " worktree" : "";
+	const details =
+		`[${modelLabel}${rotateLabel}${thinkingLabel}${skillLabel}${loopLabel}${subagentLabel}${parallelLabel}${workersLabel}${reviewersLabel}${finalReviewerLabel}${cwdLabel}${inheritContextLabel}${worktreeLabel}] ${sourceLabel}`;
 	return prompt.description ? `${prompt.description} ${details}` : details;
 }
 

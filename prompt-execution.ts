@@ -1,7 +1,6 @@
 import type { Model } from "@mariozechner/pi-ai";
-import type { ModelRegistry } from "@mariozechner/pi-coding-agent";
 import { substituteArgs } from "./args.js";
-import { getResolvedModelRef, selectModelCandidate, type SelectedModelCandidate } from "./model-selection.js";
+import { getResolvedModelRef, selectModelCandidate, type RegistryLike, type SelectedModelCandidate } from "./model-selection.js";
 import type { PromptWithModel } from "./prompt-loader.js";
 import { renderTemplateConditionals } from "./template-conditionals.js";
 
@@ -54,7 +53,7 @@ export async function preparePromptExecution(
 	prompt: Pick<PromptWithModel, "name" | "content" | "models">,
 	args: string[],
 	currentModel: Model<any> | undefined,
-	modelRegistry: Pick<ModelRegistry, "find" | "getAll" | "getAvailable" | "getApiKey" | "isUsingOAuth">,
+	modelRegistry: RegistryLike,
 	options?: PromptExecutionOptions,
 ): Promise<PreparedPromptExecution | EmptyPromptAbort | undefined> {
 	const selectedModel =

@@ -13,11 +13,14 @@ import {
 	getDelegatedLiveState,
 } from "../subagent-runtime.js";
 
-function withRuntime(run: (root: string) => Promise<void>) {
+function withRuntime(
+	run: (root: string) => Promise<void>,
+	agentsSource = "export function discoverAgents(){ return { agents: [{ name: 'delegate' }, { name: 'reviewer' }] }; }",
+) {
 	const root = mkdtempSync(join(tmpdir(), "pi-prompt-subagent-step-"));
 	const runtimeRoot = join(root, "subagent");
 	mkdirSync(runtimeRoot, { recursive: true });
-	writeFileSync(join(runtimeRoot, "agents.js"), "export function discoverAgents(){ return { agents: [{ name: 'delegate' }, { name: 'reviewer' }] }; }");
+	writeFileSync(join(runtimeRoot, "agents.js"), agentsSource);
 	const previous = process.env.PI_SUBAGENT_RUNTIME_ROOT;
 	process.env.PI_SUBAGENT_RUNTIME_ROOT = runtimeRoot;
 	return run(root).finally(() => {
@@ -192,6 +195,37 @@ test("executeSubagentPromptStep forwards prompt cwd to delegated request", async
 	});
 });
 
+test("executeSubagentPromptStep resolves project agents from the delegated cwd", async () => {
+	await withRuntime(
+		async (root) => {
+			const pi = createPi();
+			const ctx = createCtx(join(root, "host-project"));
+			const delegatedCwd = join(root, "delegated-project");
+			mkdirSync(delegatedCwd, { recursive: true });
+
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+				const request = data as any;
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [{ role: "assistant", content: [{ type: "text", text: "Done." }] }],
+					isError: false,
+				});
+			});
+
+			const result = await executeSubagentPromptStep({
+				pi,
+				prompt: { ...prompt, subagent: "special", cwd: delegatedCwd },
+				args: [],
+				ctx,
+				currentModel: ctx.model,
+			});
+			assert.equal(result?.agent, "special");
+		},
+		"export function discoverAgents(cwd){ if (cwd.endsWith('delegated-project')) return { agents: [{ name: 'special' }] }; return { agents: [{ name: 'delegate' }] }; }",
+	);
+});
+
 test("executeSubagentPromptStep fails on delegated error response", async () => {
 	await withRuntime(async (root) => {
 		const pi = createPi();
@@ -341,11 +375,61 @@ test("executeSubagentPromptStep emits cancel on escape in UI mode", async () => 
 	});
 });
 
-test("executeSubagentPromptStep delegates parallel prompts with tasks payload", async () => {
+test("executeSubagentPromptStep emits cancel on abort signal", async () => {
 	await withRuntime(async (root) => {
 		const pi = createPi();
 		const ctx = createCtx(root);
-		let requestTasks: Array<{ agent: string; task: string; model?: string }> | undefined;
+		const controller = new AbortController();
+		let cancelledRequestId: string | undefined;
+
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT, (data) => {
+			cancelledRequestId = (data as { requestId?: string }).requestId;
+		});
+
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+			const request = data as any;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			setTimeout(() => controller.abort(), 0);
+		});
+
+		await assert.rejects(
+			() =>
+				executeSubagentPromptStep({
+					pi,
+					prompt,
+					args: [],
+					ctx,
+					currentModel: ctx.model,
+					signal: controller.signal,
+				}),
+			/cancelled/i,
+		);
+		assert.ok(cancelledRequestId);
+	});
+});
+
+test("executeSubagentPromptStep delegates parallel prompts with per-task cwd, taskPrefix, and aggregate text", async () => {
+	await withRuntime(async (root) => {
+		const pi = createPi();
+		const ctx = createCtx(root);
+		const workerA = join(root, "worker-a");
+		const workerB = join(root, "worker-b");
+		mkdirSync(workerA, { recursive: true });
+		mkdirSync(workerB, { recursive: true });
+		const contentText = [
+			"2/2 succeeded",
+			"",
+			"=== Parallel Task 1 (delegate) ===",
+			"Frontend issues.",
+			"",
+			"=== Parallel Task 2 (reviewer) ===",
+			"Backend issues.",
+			"",
+			"=== Worktree Changes ===",
+			"",
+			"--- Task 1 (delegate): 2 files changed, +2 -0 ---",
+		].join("\n");
+		let requestTasks: Array<{ agent: string; task: string; model?: string; cwd?: string }> | undefined;
 
 		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
 			const request = data as any;
@@ -374,6 +458,7 @@ test("executeSubagentPromptStep delegates parallel prompts with tasks payload", 
 						isError: false,
 					},
 				],
+				contentText,
 				isError: false,
 			});
 		});
@@ -381,18 +466,51 @@ test("executeSubagentPromptStep delegates parallel prompts with tasks payload", 
 		const result = await executeSubagentPromptStep({
 			pi,
 			parallel: [
-				{ prompt, args: [] },
-				{ prompt: { ...prompt, name: "review", subagent: "reviewer" }, args: [] },
+				{ prompt: { ...prompt, cwd: workerA }, args: [], taskPrefix: "[Parallel subagent 1/2]" },
+				{ prompt: { ...prompt, name: "review", subagent: "reviewer", cwd: workerB }, args: [] },
 			],
 			ctx,
 			currentModel: ctx.model,
+			taskPreamble: "[Previous chain steps]",
 		});
+
 		assert.equal(Array.isArray(requestTasks), true);
 		assert.equal(requestTasks?.length, 2);
-		assert.equal(requestTasks?.[0]?.model, "anthropic/claude-sonnet-4-20250514");
-		assert.equal(requestTasks?.[1]?.model, "anthropic/claude-sonnet-4-20250514");
+		assert.deepEqual(requestTasks?.map((task) => task.agent), ["delegate", "reviewer"]);
+		assert.deepEqual(requestTasks?.map((task) => task.model), ["anthropic/claude-sonnet-4-20250514", "anthropic/claude-sonnet-4-20250514"]);
+		assert.equal(requestTasks?.[0]?.cwd, workerA);
+		assert.equal(requestTasks?.[1]?.cwd, workerB);
+		assert.equal(requestTasks?.[0]?.task, "[Parallel subagent 1/2]\n\n[Previous chain steps]\n\n---\n\ndo work");
+		assert.equal(requestTasks?.[1]?.task, "[Previous chain steps]\n\n---\n\ndo work");
+		assert.equal(result?.text, contentText);
 		assert.equal(result?.changed, true);
-		assert.equal(pi.customMessages.length, 1);
+		assert.equal((pi.customMessages[0] as { content: string }).content, contentText);
+	});
+});
+
+test("executeSubagentPromptStep rejects mixed cwd values when worktree is enabled", async () => {
+	await withRuntime(async (root) => {
+		const pi = createPi();
+		const ctx = createCtx(root);
+		const workerA = join(root, "worker-a");
+		const workerB = join(root, "worker-b");
+		mkdirSync(workerA, { recursive: true });
+		mkdirSync(workerB, { recursive: true });
+
+		await assert.rejects(
+			() =>
+				executeSubagentPromptStep({
+					pi,
+					worktree: true,
+					parallel: [
+						{ prompt: { ...prompt, cwd: workerA }, args: [] },
+						{ prompt: { ...prompt, name: "review", subagent: "reviewer", cwd: workerB }, args: [] },
+					],
+					ctx,
+					currentModel: ctx.model,
+				}),
+			/worktree enabled must share the same cwd/i,
+		);
 	});
 });
 

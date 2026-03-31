@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.6.10] - 2026-03-30
+
+### Added
+- Added lineup-based compare frontmatter for prompt templates: `workers` and `reviewers` slot lists (`agent` or `subagent`, optional `model`, optional `task`, optional `taskSuffix`, optional `cwd`, optional `count`), plus optional `finalReviewer` for one final synthesis step.
+- Added a two-phase compare execution flow for lineup templates: parallel worker phase first, then reviewer phase fed by aggregated worker output.
+- Added runtime lineup override flags for compare templates: `--workers`, `--reviewers`, `--workers-append`, `--reviewers-append`, and `--final-reviewer`.
+- Added compare lineup `count: N` shorthand so one worker or reviewer slot can expand into repeated identical runs without manually duplicating entries.
+- Added an example compare prompt template under `examples/`: `best-of-n`, intended for manual installation into `~/.pi/agent/prompts/`.
+- Added compare-lineup `subagent` shorthand so prompt authors can use `subagent: true` for default worker/reviewer slots instead of spelling the internal `delegate` / `reviewer` agent names directly.
+
+### Changed
+- Removed fixed three-worker compare assumptions from docs and prompt guidance; compare lineups are now caller-defined and duplicate slots are preserved.
+- The shipped `best-of-n` example now shows mixed workers, mixed reviewers, and an optional final arbiter, while the runtime fallback still stays at one worker when `workers` is omitted.
+- Parallel delegated task contract now supports per-task `cwd` passthrough end-to-end across the prompt-template bridge.
+- README now explains same-model vs multi-model best-of-N configuration explicitly.
+
+### Fixed
+- Compare execution now uses partial-success-by-phase behavior: worker and reviewer phases continue as long as at least one slot succeeds, and `finalReviewer` can fall back to worker-only synthesis if reviewer slots all fail.
+- Compare lineup slots now support `taskSuffix` so shared worker/reviewer instructions can stay in the prompt body while slots add small per-model suffixes such as output-file paths.
+- Documented the current compare worktree constraint explicitly: when `worktree: true` is enabled, all worker slots must resolve to the same `cwd`.
+
+## [0.6.9] - 2026-03-28
+
+### Added
+- Added `worktree: true` frontmatter and `--worktree` runtime flag for chain templates with parallel steps. When enabled, each parallel subagent runs in its own git worktree to avoid file conflicts during concurrent execution. Requires a chain with at least one `parallel()` step.
+- Added `parallel: N` frontmatter for delegated prompts. This expands one delegated prompt into `N` parallel `pi-subagents` tasks targeting the same agent, with automatic slot headers like `[Parallel subagent 2/3]` prepended to each task.
+
+### Changed
+- Bumped `@mariozechner/pi-agent-core`, `@mariozechner/pi-ai`, `@mariozechner/pi-coding-agent`, and `@mariozechner/pi-tui` to `^0.64.0`.
+- Delegated prompt execution now forwards `ctx.signal` into subagent runs so turn cancellation can stop in-flight delegated work for both single delegated prompts and delegated parallel chain steps.
+- `worktree: true` now also works on delegated prompts that use `parallel: N`, not just chain templates with `parallel()` steps.
+
 ## [0.6.8] - 2026-03-28
 
 ### Added

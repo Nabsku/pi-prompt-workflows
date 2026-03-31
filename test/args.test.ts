@@ -1,6 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractChainContextFlag, extractLoopCount, extractLoopFlags, extractSubagentOverride, parseCommandArgs, substituteArgs } from "../args.js";
+import {
+	extractChainContextFlag,
+	extractLineupOverrides,
+	extractLoopCount,
+	extractLoopFlags,
+	extractSubagentOverride,
+	extractWorktreeFlag,
+	parseCommandArgs,
+	substituteArgs,
+} from "../args.js";
 
 test("parseCommandArgs respects quoted segments", () => {
 	assert.deepEqual(parseCommandArgs('alpha "two words" beta'), ["alpha", "two words", "beta"]);
@@ -198,6 +207,20 @@ test("extractChainContextFlag composes with chain-style args and shared args sep
 	});
 });
 
+test("extractWorktreeFlag strips bare tokens and preserves quoted values", () => {
+	assert.deepEqual(extractWorktreeFlag("parallel(scan,review) --worktree"), {
+		args: "parallel(scan,review)",
+		worktree: true,
+	});
+	assert.deepEqual(extractWorktreeFlag("--worktree chain-a -> chain-b --worktree"), {
+		args: "chain-a -> chain-b",
+		worktree: true,
+	});
+	const extracted = extractWorktreeFlag('"--worktree" parallel(scan,review) --worktree');
+	assert.equal(extracted.worktree, true);
+	assert.deepEqual(parseCommandArgs(extracted.args), ["--worktree", "parallel(scan,review)"]);
+});
+
 test("extractSubagentOverride parses bare and named runtime overrides", () => {
 	assert.deepEqual(extractSubagentOverride("--subagent task"), {
 		args: "task",
@@ -286,4 +309,117 @@ test("extractSubagentOverride preserves quoted --fork", () => {
 	assert.deepEqual(extractSubagentOverride('"--fork" task'), {
 		args: '"--fork" task',
 	});
+});
+
+test("extractLineupOverrides parses worker/reviewer/final-reviewer slot aliases for unquoted and quoted JSON payloads", () => {
+	const cases = [
+		{
+			input: 'task --workers=[{"subagent":true,"count":3},{"subagent":"delegate","model":"openai/gpt-5.4","taskSuffix":"save to notes.md"}] --reviewers-append=[{"subagent":true,"cwd":"/tmp/repo","count":2}]',
+			expected: [
+				{
+					target: "workers",
+					mode: "replace",
+					slots: [
+						{ agent: "delegate", count: 3 },
+						{ agent: "delegate", model: "openai/gpt-5.4", taskSuffix: "save to notes.md" },
+					],
+				},
+				{
+					target: "reviewers",
+					mode: "append",
+					slots: [{ agent: "reviewer", cwd: "/tmp/repo", count: 2 }],
+				},
+			],
+		},
+		{
+			input: 'task --workers=[{"subagent":true, "task":"fix bug", "taskSuffix":"write findings"}, {"agent":"delegate","model":"openai/gpt-5.4"}] --reviewers=[{"subagent":true, "task":"rank variants", "count":2}]',
+			expected: [
+				{
+					target: "workers",
+					mode: "replace",
+					slots: [
+						{ agent: "delegate", task: "fix bug", taskSuffix: "write findings" },
+						{ agent: "delegate", model: "openai/gpt-5.4" },
+					],
+				},
+				{
+					target: "reviewers",
+					mode: "replace",
+					slots: [{ agent: "reviewer", task: "rank variants", count: 2 }],
+				},
+			],
+		},
+		{
+			input: `task --workers='[{"subagent":true,"task":"fix bug"}]' --reviewers-append='[{"subagent":true}]'`,
+			expected: [
+				{
+					target: "workers",
+					mode: "replace",
+					slots: [{ agent: "delegate", task: "fix bug" }],
+				},
+				{
+					target: "reviewers",
+					mode: "append",
+					slots: [{ agent: "reviewer" }],
+				},
+			],
+		},
+		{
+			input: 'task --final-reviewer={"subagent":true,"model":"openai-codex/gpt-5.4:low","taskSuffix":"Prefer merge plans when they beat any single worker."}',
+			expected: [
+				{
+					target: "finalReviewer",
+					mode: "replace",
+					slots: [{ agent: "reviewer", model: "openai-codex/gpt-5.4:low", taskSuffix: "Prefer merge plans when they beat any single worker." }],
+				},
+			],
+		},
+	] as const;
+
+	for (const testCase of cases) {
+		const extracted = extractLineupOverrides(testCase.input);
+		assert.equal(extracted.args, "task");
+		assert.equal(extracted.errors.length, 0);
+		assert.deepEqual(extracted.actions, testCase.expected);
+	}
+});
+
+test("extractLineupOverrides reports invalid slot payloads and strips known flags", () => {
+	const cases = [
+		{
+			input: 'task --workers=not-json --reviewers=[{"subagent":false}]',
+			errorCount: 2,
+			patterns: [/valid JSON/, /requires "subagent" to be true or a non-empty string/],
+		},
+		{
+			input: 'task --workers=[{"agent":"delegate","subagent":true}]',
+			errorCount: 1,
+			patterns: [/cannot combine "agent" and "subagent"/],
+		},
+		{
+			input: 'task --workers=[{"agent":"delegate","count":"2"}] --reviewers=[{"subagent":true,"count":0}]',
+			errorCount: 2,
+			patterns: [/"count" must be an integer greater than or equal to 1/, /"count" must be an integer greater than or equal to 1/],
+		},
+		{
+			input: 'task --final-reviewer=[{"subagent":true},{"subagent":true}]',
+			errorCount: 1,
+			patterns: [/one-element JSON array/],
+		},
+		{
+			input: 'task --final-reviewer={"subagent":true,"count":2}',
+			errorCount: 1,
+			patterns: [/"count" is not supported/],
+		},
+	] as const;
+
+	for (const testCase of cases) {
+		const extracted = extractLineupOverrides(testCase.input);
+		assert.equal(extracted.args, "task");
+		assert.equal(extracted.actions.length, 0);
+		assert.equal(extracted.errors.length, testCase.errorCount);
+		for (let i = 0; i < testCase.patterns.length; i++) {
+			assert.match(extracted.errors[i] ?? "", testCase.patterns[i]);
+		}
+	}
 });

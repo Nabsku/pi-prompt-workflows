@@ -740,6 +740,272 @@ test("resolveSkillPath falls back to ~/.agents/skills", () => {
 	});
 });
 
+test("loadPromptsWithModel validates parallel/worktree frontmatter combinations", () => {
+	withTempHome((root) => {
+		const cases = [
+			{
+				name: "parallel-review",
+				content: '---\nmodel: claude-sonnet-4-20250514\nsubagent: simplifier\ninheritContext: true\nparallel: 3\n---\nbody',
+				check(result: ReturnType<typeof loadPromptsWithModel>) {
+					const prompt = result.prompts.get("parallel-review");
+					assert.ok(prompt);
+					assert.equal(prompt.parallel, 3);
+					assert.equal(prompt.subagent, "simplifier");
+					assert.equal(prompt.inheritContext, true);
+					assert.equal(result.diagnostics.filter((d) => d.message.includes("parallel")).length, 0);
+				},
+			},
+			{
+				name: "bad-parallel",
+				content: '---\nmodel: claude-sonnet-4-20250514\nsubagent: simplifier\nparallel: 1\n---\nbody',
+				check(result: ReturnType<typeof loadPromptsWithModel>) {
+					const prompt = result.prompts.get("bad-parallel");
+					assert.ok(prompt);
+					assert.equal(prompt.parallel, undefined);
+					assert.ok(result.diagnostics.some((d) => d.message.includes("parallel") && d.message.includes("greater than or equal to 2")));
+				},
+			},
+			{
+				name: "plain-parallel",
+				content: '---\nmodel: claude-sonnet-4-20250514\nparallel: 3\n---\nbody',
+				check(result: ReturnType<typeof loadPromptsWithModel>) {
+					const prompt = result.prompts.get("plain-parallel");
+					assert.ok(prompt);
+					assert.equal(prompt.parallel, undefined);
+					assert.ok(result.diagnostics.some((d) => d.message.includes("parallel") && d.message.includes('requires "subagent"')));
+				},
+			},
+			{
+				name: "chain-parallel-field",
+				content: '---\nchain: "review -> fix"\nparallel: 3\n---\nignored',
+				check(result: ReturnType<typeof loadPromptsWithModel>) {
+					const prompt = result.prompts.get("chain-parallel-field");
+					assert.ok(prompt);
+					assert.equal(prompt.parallel, undefined);
+					assert.ok(result.diagnostics.some((d) => d.message.includes("parallel") && d.message.includes('cannot be combined with "chain"')));
+				},
+			},
+			{
+				name: "parallel-worktree",
+				content: '---\nmodel: claude-sonnet-4-20250514\nsubagent: simplifier\nparallel: 3\nworktree: true\n---\nbody',
+				check(result: ReturnType<typeof loadPromptsWithModel>) {
+					const prompt = result.prompts.get("parallel-worktree");
+					assert.ok(prompt);
+					assert.equal(prompt.parallel, 3);
+					assert.equal(prompt.worktree, true);
+					assert.equal(result.diagnostics.filter((d) => d.message.includes("worktree")).length, 0);
+				},
+			},
+			{
+				name: "parallel-desc",
+				content: '---\ndescription: "Parallel simplify"\nmodel: claude-sonnet-4-20250514\nsubagent: simplifier\nparallel: 3\nworktree: true\n---\nbody',
+				check(result: ReturnType<typeof loadPromptsWithModel>) {
+					const prompt = result.prompts.get("parallel-desc");
+					assert.ok(prompt);
+					const desc = buildPromptCommandDescription(prompt);
+					assert.match(desc, /parallel:3/);
+					assert.match(desc, /subagent:simplifier/);
+					assert.match(desc, /worktree/);
+				},
+			},
+			{
+				name: "wt-pipeline",
+				content: '---\nchain: "parallel(scan-fe, scan-be) -> review"\nworktree: true\n---\nignored',
+				check(result: ReturnType<typeof loadPromptsWithModel>) {
+					const prompt = result.prompts.get("wt-pipeline");
+					assert.ok(prompt);
+					assert.equal(prompt.worktree, true);
+					assert.equal(result.diagnostics.filter((d) => d.message.includes("worktree")).length, 0);
+				},
+			},
+			{
+				name: "plain",
+				content: '---\nmodel: claude-sonnet-4-20250514\nworktree: true\n---\nbody',
+				check(result: ReturnType<typeof loadPromptsWithModel>) {
+					const prompt = result.prompts.get("plain");
+					assert.ok(prompt);
+					assert.equal(prompt.worktree, undefined);
+					assert.ok(result.diagnostics.some((d) => d.message.includes("worktree") && d.message.includes("requires")));
+				},
+			},
+			{
+				name: "seq-chain",
+				content: '---\nchain: "analyze -> fix"\nworktree: true\n---\nignored',
+				check(result: ReturnType<typeof loadPromptsWithModel>) {
+					const prompt = result.prompts.get("seq-chain");
+					assert.ok(prompt);
+					assert.equal(prompt.worktree, undefined);
+					assert.ok(result.diagnostics.some((d) => d.message.includes("worktree") && d.message.includes("parallel")));
+				},
+			},
+			{
+				name: "bad-wt",
+				content: '---\nchain: "parallel(a, b) -> c"\nworktree: 42\n---\nignored',
+				check(result: ReturnType<typeof loadPromptsWithModel>) {
+					const prompt = result.prompts.get("bad-wt");
+					assert.ok(prompt);
+					assert.equal(prompt.worktree, undefined);
+					assert.ok(result.diagnostics.some((d) => d.message.includes("worktree") && d.message.includes("must be true or false")));
+				},
+			},
+			{
+				name: "wt-only",
+				content: '---\nchain: "parallel(a, b)"\nworktree: true\n---\nignored',
+				check(result: ReturnType<typeof loadPromptsWithModel>) {
+					assert.ok(result.prompts.has("wt-only"));
+				},
+			},
+			{
+				name: "wt-desc",
+				content: '---\nchain: "parallel(scan-fe, scan-be) -> review"\nworktree: true\ndescription: "Parallel scan"\n---\nignored',
+				check(result: ReturnType<typeof loadPromptsWithModel>) {
+					const prompt = result.prompts.get("wt-desc");
+					assert.ok(prompt);
+					const desc = buildPromptCommandDescription(prompt);
+					assert.match(desc, /worktree/);
+					assert.match(desc, /\[chain:.*worktree\]/);
+				},
+			},
+		] as const;
+
+		for (const testCase of cases) {
+			const cwd = join(root, testCase.name);
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", `${testCase.name}.md`), testCase.content);
+			testCase.check(loadPromptsWithModel(cwd));
+		}
+	});
+});
+
+test("loadPromptsWithModel validates compare lineups and invalid combinations", () => {
+	withTempHome((root) => {
+		const cases = [
+			{
+				name: "compare",
+				content: [
+					"---",
+					"description: Compare",
+					"workers:",
+					"  - subagent: true",
+					"    model: openai/gpt-5.4",
+					"    taskSuffix: Save findings to notes/a.md",
+					"    count: 3",
+					"  - subagent: delegate",
+					"reviewers:",
+					"  - subagent: true",
+					"    taskSuffix: Prefer findings files over prose summaries.",
+					"    cwd: /tmp/repo",
+					"    count: 2",
+					"finalReviewer:",
+					"  subagent: true",
+					"  model: openai-codex/gpt-5.4:low",
+					"  taskSuffix: Prefer merge plans over narrow wins when the diffs justify it.",
+					"worktree: true",
+					"---",
+					"$@",
+				].join("\n"),
+				check(result: ReturnType<typeof loadPromptsWithModel>) {
+					const prompt = result.prompts.get("compare");
+					assert.ok(prompt);
+					assert.equal(prompt.workers?.length, 2);
+					assert.equal(prompt.workers?.[0]?.agent, "delegate");
+					assert.equal(prompt.workers?.[0]?.model, "openai/gpt-5.4");
+					assert.equal(prompt.workers?.[0]?.taskSuffix, "Save findings to notes/a.md");
+					assert.equal(prompt.workers?.[0]?.count, 3);
+					assert.equal(prompt.workers?.[1]?.agent, "delegate");
+					assert.equal(prompt.reviewers?.length, 1);
+					assert.equal(prompt.reviewers?.[0]?.agent, "reviewer");
+					assert.equal(prompt.reviewers?.[0]?.taskSuffix, "Prefer findings files over prose summaries.");
+					assert.equal(prompt.reviewers?.[0]?.cwd, "/tmp/repo");
+					assert.equal(prompt.reviewers?.[0]?.count, 2);
+					assert.equal(prompt.finalReviewer?.agent, "reviewer");
+					assert.equal(prompt.finalReviewer?.model, "openai-codex/gpt-5.4:low");
+					assert.equal(prompt.finalReviewer?.taskSuffix, "Prefer merge plans over narrow wins when the diffs justify it.");
+					assert.equal(prompt.worktree, true);
+					assert.match(buildPromptCommandDescription(prompt), /workers:4/);
+					assert.match(buildPromptCommandDescription(prompt), /reviewers:2/);
+					assert.match(buildPromptCommandDescription(prompt), /final-reviewer/);
+				},
+			},
+			{
+				name: "bad-compare",
+				content: [
+					"---",
+					"model: claude-sonnet-4-20250514",
+					"workers:",
+					"  agent: delegate",
+					"reviewers:",
+					"  - agent: reviewer",
+					"    subagent: true",
+					"---",
+					"$@",
+				].join("\n"),
+				check(result: ReturnType<typeof loadPromptsWithModel>) {
+					const prompt = result.prompts.get("bad-compare");
+					assert.ok(prompt);
+					assert.equal(prompt.workers, undefined);
+					assert.equal(prompt.reviewers, undefined);
+					assert.ok(result.diagnostics.some((d) => d.message.includes("workers")));
+					assert.ok(result.diagnostics.some((d) => d.message.includes("reviewers") && d.message.includes('cannot combine "agent" and "subagent"')));
+				},
+			},
+			{
+				name: "bad-count",
+				content: [
+					"---",
+					"workers:",
+					"  - subagent: true",
+					"    count: 0",
+					"reviewers:",
+					"  - subagent: true",
+					"finalReviewer:",
+					"  subagent: true",
+					"  count: 2",
+					"---",
+					"$@",
+				].join("\n"),
+				check(result: ReturnType<typeof loadPromptsWithModel>) {
+					const prompt = result.prompts.get("bad-count");
+					assert.ok(prompt);
+					assert.equal(prompt.workers, undefined);
+					assert.equal(prompt.reviewers?.length, 1);
+					assert.equal(prompt.finalReviewer, undefined);
+					assert.ok(result.diagnostics.some((d) => d.message.includes("count") && d.message.includes("greater than or equal to 1")));
+					assert.ok(result.diagnostics.some((d) => d.message.includes("finalReviewer") && d.message.includes("count") && d.message.includes("not supported")));
+				},
+			},
+			{
+				name: "compare-subagent",
+				content: [
+					"---",
+					"model: claude-sonnet-4-20250514",
+					"subagent: true",
+					"workers:",
+					"  - agent: delegate",
+					"finalReviewer:",
+					"  subagent: true",
+					"---",
+					"$@",
+				].join("\n"),
+				check(result: ReturnType<typeof loadPromptsWithModel>) {
+					const prompt = result.prompts.get("compare-subagent");
+					assert.ok(prompt);
+					assert.equal(prompt.workers, undefined);
+					assert.equal(prompt.finalReviewer, undefined);
+					assert.ok(result.diagnostics.some((d) => d.message.includes("finalReviewer") && d.message.includes("subagent")));
+				},
+			},
+		] as const;
+
+		for (const testCase of cases) {
+			const cwd = join(root, testCase.name);
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", `${testCase.name}.md`), testCase.content);
+			testCase.check(loadPromptsWithModel(cwd));
+		}
+	});
+});
+
 test("reserved built-in command mirror is explicit", () => {
 	assert.deepEqual([...RESERVED_COMMAND_NAMES].sort(), [
 		"chain-prompts",

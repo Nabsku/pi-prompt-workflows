@@ -24,6 +24,27 @@ export interface SubagentOverrideExtraction {
 	fork?: boolean;
 }
 
+export interface LineupOverrideSlot {
+	agent: string;
+	model?: string;
+	task?: string;
+	taskSuffix?: string;
+	cwd?: string;
+	count?: number;
+}
+
+export interface LineupOverrideAction {
+	target: "workers" | "reviewers" | "finalReviewer";
+	mode: "replace" | "append";
+	slots: LineupOverrideSlot[];
+}
+
+export interface LineupOverrideExtraction {
+	args: string;
+	actions: LineupOverrideAction[];
+	errors: string[];
+}
+
 export function extractLoopCount(argsString: string): LoopExtraction | null {
 	let loopCount: number | null = null;
 	let loopFound = false;
@@ -165,8 +186,8 @@ export function extractLoopFlags(argsString: string): LoopFlags {
 	return { args: cleaned.trim(), fresh, converge: !noConverge };
 }
 
-export function extractChainContextFlag(argsString: string): { args: string; chainContext: boolean } {
-	let chainContext = false;
+function extractBooleanFlag(argsString: string, flag: string): { args: string; found: boolean } {
+	let found = false;
 	const tokensToRemove: Array<{ start: number; end: number }> = [];
 
 	let i = 0;
@@ -190,14 +211,14 @@ export function extractChainContextFlag(argsString: string): { args: string; cha
 		while (i < argsString.length && !/\s/.test(argsString[i])) i++;
 		const token = argsString.slice(tokenStart, i);
 
-		if (token === "--chain-context") {
-			chainContext = true;
+		if (token === flag) {
+			found = true;
 			tokensToRemove.push({ start: tokenStart, end: i });
 		}
 	}
 
 	if (tokensToRemove.length === 0) {
-		return { args: argsString.trim(), chainContext: false };
+		return { args: argsString.trim(), found: false };
 	}
 
 	tokensToRemove.sort((a, b) => b.start - a.start);
@@ -206,7 +227,17 @@ export function extractChainContextFlag(argsString: string): { args: string; cha
 		cleaned = cleaned.slice(0, start) + cleaned.slice(end);
 	}
 
-	return { args: cleaned.trim(), chainContext };
+	return { args: cleaned.trim(), found };
+}
+
+export function extractChainContextFlag(argsString: string): { args: string; chainContext: boolean } {
+	const { args, found } = extractBooleanFlag(argsString, "--chain-context");
+	return { args, chainContext: found };
+}
+
+export function extractWorktreeFlag(argsString: string): { args: string; worktree: boolean } {
+	const { args, found } = extractBooleanFlag(argsString, "--worktree");
+	return { args, worktree: found };
 }
 
 export function extractSubagentOverride(argsString: string): SubagentOverrideExtraction {
@@ -288,6 +319,271 @@ export function extractSubagentOverride(argsString: string): SubagentOverrideExt
 		...(modelRaw !== undefined ? { model: modelRaw } : {}),
 		...(fork ? { fork: true } : {}),
 	};
+}
+
+function parseLineupOverrideSlots(
+	raw: string,
+	target: "workers" | "reviewers" | "finalReviewer",
+	mode: "replace" | "append",
+	errors: string[],
+): LineupOverrideAction | undefined {
+	const label = `--${target === "finalReviewer" ? "final-reviewer" : `${target}${mode === "append" ? "-append" : ""}`}`;
+	if (!raw) {
+		errors.push(`Invalid ${label}: expected ${target === "finalReviewer" ? "a slot object or a one-element JSON array" : "a JSON array of slot objects"}.`);
+		return undefined;
+	}
+
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		errors.push(`Invalid ${label}: expected valid JSON (${message}).`);
+		return undefined;
+	}
+	const entries = target === "finalReviewer"
+		? (Array.isArray(parsed)
+			? parsed.length === 1
+				? parsed
+				: null
+			: [parsed])
+		: (Array.isArray(parsed) && parsed.length > 0 ? parsed : null);
+	if (!entries) {
+		errors.push(
+			target === "finalReviewer"
+				? `Invalid ${label}: expected a slot object or a one-element JSON array.`
+				: `Invalid ${label}: expected a non-empty JSON array.`,
+		);
+		return undefined;
+	}
+
+	const slots: LineupOverrideSlot[] = [];
+	for (let i = 0; i < entries.length; i++) {
+		const entry = entries[i];
+		if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+			errors.push(`Invalid ${label}: slot ${i + 1} must be an object.`);
+			return undefined;
+		}
+		const slot = entry as Record<string, unknown>;
+		if (slot.agent !== undefined && slot.subagent !== undefined) {
+			errors.push(`Invalid ${label}: slot ${i + 1} cannot combine "agent" and "subagent".`);
+			return undefined;
+		}
+
+		let agent: string | undefined;
+		if (typeof slot.agent === "string" && slot.agent.trim()) {
+			agent = slot.agent.trim();
+		} else if (slot.agent !== undefined) {
+			errors.push(`Invalid ${label}: slot ${i + 1} requires a non-empty string "agent".`);
+			return undefined;
+		}
+
+		if (!agent && slot.subagent !== undefined) {
+			if (slot.subagent === true) {
+				agent = target === "workers" ? "delegate" : "reviewer";
+			} else if (typeof slot.subagent === "string" && slot.subagent.trim()) {
+				agent = slot.subagent.trim();
+			} else {
+				errors.push(`Invalid ${label}: slot ${i + 1} requires "subagent" to be true or a non-empty string.`);
+				return undefined;
+			}
+		}
+
+		if (!agent) {
+			errors.push(`Invalid ${label}: slot ${i + 1} requires "agent" or "subagent".`);
+			return undefined;
+		}
+		const model = typeof slot.model === "string" && slot.model.trim() ? slot.model.trim() : undefined;
+		const task = typeof slot.task === "string" && slot.task.trim() ? slot.task.trim() : undefined;
+		const taskSuffix = typeof slot.taskSuffix === "string" && slot.taskSuffix.trim() ? slot.taskSuffix.trim() : undefined;
+		const cwd = typeof slot.cwd === "string" && slot.cwd.trim() ? slot.cwd.trim() : undefined;
+		let count: number | undefined;
+		if (slot.count !== undefined) {
+			if (target === "finalReviewer") {
+				errors.push(`Invalid ${label}: slot ${i + 1} "count" is not supported.`);
+				return undefined;
+			}
+			const rawCount = slot.count;
+			if (typeof rawCount !== "number" || !Number.isInteger(rawCount) || rawCount < 1) {
+				errors.push(`Invalid ${label}: slot ${i + 1} "count" must be an integer greater than or equal to 1.`);
+				return undefined;
+			}
+			count = rawCount;
+		}
+		slots.push({
+			agent,
+			...(model ? { model } : {}),
+			...(task ? { task } : {}),
+			...(taskSuffix ? { taskSuffix } : {}),
+			...(cwd ? { cwd } : {}),
+			...(count !== undefined ? { count } : {}),
+		});
+	}
+
+	return { target, mode, slots };
+}
+
+interface LineupOverrideFlagSpec {
+	flag: string;
+	target: "workers" | "reviewers" | "finalReviewer";
+	mode: "replace" | "append";
+}
+
+const LINEUP_OVERRIDE_FLAGS: LineupOverrideFlagSpec[] = [
+	{ flag: "--workers-append=", target: "workers", mode: "append" },
+	{ flag: "--reviewers-append=", target: "reviewers", mode: "append" },
+	{ flag: "--workers=", target: "workers", mode: "replace" },
+	{ flag: "--reviewers=", target: "reviewers", mode: "replace" },
+	{ flag: "--final-reviewer=", target: "finalReviewer", mode: "replace" },
+];
+
+function readQuotedValue(input: string, start: number): { value: string; end: number } | undefined {
+	const quote = input[start];
+	if (quote !== `"` && quote !== `'`) return undefined;
+
+	let i = start + 1;
+	while (i < input.length) {
+		const char = input[i];
+		if (char === "\\") {
+			i += 2;
+			continue;
+		}
+		if (char === quote) {
+			return {
+				value: input.slice(start + 1, i),
+				end: i + 1,
+			};
+		}
+		i++;
+	}
+
+	return undefined;
+}
+
+function readBalancedValue(
+	input: string,
+	start: number,
+	open: string,
+	close: string,
+): { value: string; end: number } | undefined {
+	if (input[start] !== open) return undefined;
+
+	let depth = 0;
+	let inQuote: string | null = null;
+
+	for (let i = start; i < input.length; i++) {
+		const char = input[i];
+		if (inQuote) {
+			if (char === "\\") {
+				i++;
+				continue;
+			}
+			if (char === inQuote) inQuote = null;
+			continue;
+		}
+
+		if (char === `"` || char === `'`) {
+			inQuote = char;
+			continue;
+		}
+		if (char === open) {
+			depth++;
+			continue;
+		}
+		if (char !== close) continue;
+
+		depth--;
+		if (depth === 0) {
+			return {
+				value: input.slice(start, i + 1),
+				end: i + 1,
+			};
+		}
+	}
+
+	return undefined;
+}
+
+function readLineupOverrideValue(input: string, start: number): { value: string; end: number } {
+	if (start >= input.length) return { value: "", end: start };
+
+	const bracketed = readBalancedValue(input, start, "[", "]");
+	if (bracketed) return bracketed;
+
+	const braced = readBalancedValue(input, start, "{", "}");
+	if (braced) return braced;
+
+	const quoted = readQuotedValue(input, start);
+	if (quoted) return quoted;
+
+	let end = start;
+	while (end < input.length && !/\s/.test(input[end])) end++;
+	return {
+		value: input.slice(start, end),
+		end,
+	};
+}
+
+function parseLineupOverrideToken(
+	input: string,
+	start: number,
+): { target: "workers" | "reviewers" | "finalReviewer"; mode: "replace" | "append"; raw: string; end: number } | undefined {
+	for (const spec of LINEUP_OVERRIDE_FLAGS) {
+		if (!input.startsWith(spec.flag, start)) continue;
+		const valueStart = start + spec.flag.length;
+		const parsedValue = readLineupOverrideValue(input, valueStart);
+		return {
+			target: spec.target,
+			mode: spec.mode,
+			raw: parsedValue.value,
+			end: parsedValue.end,
+		};
+	}
+
+	return undefined;
+}
+
+export function extractLineupOverrides(argsString: string): LineupOverrideExtraction {
+	const actions: LineupOverrideAction[] = [];
+	const errors: string[] = [];
+	const tokensToRemove: Array<{ start: number; end: number }> = [];
+
+	let i = 0;
+	while (i < argsString.length) {
+		const char = argsString[i];
+
+		if (char === '"' || char === "'") {
+			const quote = char;
+			i++;
+			while (i < argsString.length && argsString[i] !== quote) i++;
+			if (i < argsString.length) i++;
+			continue;
+		}
+
+		if (/\s/.test(char)) {
+			i++;
+			continue;
+		}
+
+		const token = parseLineupOverrideToken(argsString, i);
+		if (token) {
+			tokensToRemove.push({ start: i, end: token.end });
+			const action = parseLineupOverrideSlots(token.raw, token.target, token.mode, errors);
+			if (action) actions.push(action);
+			i = token.end;
+			continue;
+		}
+
+		while (i < argsString.length && !/\s/.test(argsString[i])) i++;
+	}
+
+	tokensToRemove.sort((a, b) => b.start - a.start);
+	let cleaned = argsString;
+	for (const { start, end } of tokensToRemove) {
+		cleaned = cleaned.slice(0, start) + cleaned.slice(end);
+	}
+
+	return { args: cleaned.trim(), actions, errors };
 }
 
 export function splitByUnquotedSeparator(input: string, separator: string): string[] {

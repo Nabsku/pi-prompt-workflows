@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { AssistantMessage, Message } from "@mariozechner/pi-ai";
-import type { ExtensionAPI, ExtensionContext, ModelRegistry } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { Model } from "@mariozechner/pi-ai";
 import { Key, matchesKey } from "@mariozechner/pi-tui";
 import { preparePromptExecution } from "./prompt-execution.js";
@@ -39,6 +39,8 @@ interface DelegatedPromptBaseOptions {
 	signal?: AbortSignal;
 	inheritedModel?: Model<any>;
 	taskPreamble?: string;
+	worktree?: boolean;
+	allowPartialFailures?: boolean;
 }
 
 interface DelegatedSinglePromptOptions extends DelegatedPromptBaseOptions {
@@ -50,6 +52,7 @@ interface DelegatedSinglePromptOptions extends DelegatedPromptBaseOptions {
 interface DelegatedParallelTaskInput {
 	prompt: PromptWithModel;
 	args: string[];
+	taskPrefix?: string;
 }
 
 interface DelegatedParallelPromptOptions extends DelegatedPromptBaseOptions {
@@ -60,10 +63,19 @@ interface DelegatedParallelPromptOptions extends DelegatedPromptBaseOptions {
 
 type DelegatedPromptOptions = DelegatedSinglePromptOptions | DelegatedParallelPromptOptions;
 
+export interface DelegatedPromptParallelResult {
+	agent: string;
+	text: string;
+	messages: Message[];
+	isError: boolean;
+	errorText?: string;
+}
+
 export interface DelegatedPromptOutcome {
 	changed: boolean;
 	text: string;
 	agent: string;
+	parallelResults?: DelegatedPromptParallelResult[];
 }
 
 function extractTextFromBlocks(content: AssistantMessage["content"]): string {
@@ -103,19 +115,18 @@ function coerceMessages(messages: unknown[]): Message[] {
 	return messages as Message[];
 }
 
-function coerceParallelResults(parallelResults: DelegatedSubagentParallelResult[] | undefined): Array<{
-	agent: string;
-	messages: Message[];
-	isError: boolean;
-	errorText?: string;
-}> {
+function coerceParallelResults(parallelResults: DelegatedSubagentParallelResult[] | undefined): DelegatedPromptParallelResult[] {
 	if (!Array.isArray(parallelResults)) return [];
-	return parallelResults.map((result) => ({
-		agent: result.agent,
-		messages: coerceMessages(result.messages),
-		isError: result.isError === true,
-		errorText: result.errorText,
-	}));
+	return parallelResults.map((result) => {
+		const messages = coerceMessages(result.messages);
+		return {
+			agent: result.agent,
+			text: extractDelegatedText(messages),
+			messages,
+			isError: result.isError === true,
+			errorText: result.errorText,
+		};
+	});
 }
 
 function renderParallelDelegatedText(
@@ -128,7 +139,7 @@ function renderParallelDelegatedText(
 		.map((result, index) => {
 			const text = extractDelegatedText(result.messages);
 			const body = text || "(no assistant text)";
-			return `=== Task ${index + 1}: ${result.agent} ===\n${body}`;
+			return `=== Parallel Task ${index + 1} (${result.agent}) ===\n${body}`;
 		})
 		.join("\n\n");
 }
@@ -164,13 +175,17 @@ async function prepareDelegatedTask(
 	if (!requestedAgent) {
 		throw new Error(`Prompt \`${task.prompt.name}\` is not configured for delegated execution.`);
 	}
-	const agent = resolveDelegatedAgent(runtime, ctx.cwd, requestedAgent);
+	const effectiveCwd = task.prompt.cwd ?? ctx.cwd;
+	if (effectiveCwd !== ctx.cwd && !existsSync(effectiveCwd)) {
+		throw new Error(`cwd directory does not exist: ${effectiveCwd}`);
+	}
+	const agent = resolveDelegatedAgent(runtime, effectiveCwd, requestedAgent);
 	const preparationOptions = inheritedModel === undefined ? undefined : { inheritedModel };
 	const prepared = await preparePromptExecution(
 		task.prompt,
 		task.args,
 		currentModel,
-		ctx.modelRegistry as Pick<ModelRegistry, "find" | "getAll" | "getAvailable" | "getApiKey" | "isUsingOAuth">,
+		ctx.modelRegistry,
 		preparationOptions,
 	);
 	if (!prepared) {
@@ -181,13 +196,12 @@ async function prepareDelegatedTask(
 		throw new Error(prepared.message);
 	}
 	if (prepared.warning) notify(ctx, prepared.warning, "warning");
-	const effectiveCwd = task.prompt.cwd ?? ctx.cwd;
-	if (effectiveCwd !== ctx.cwd && !existsSync(effectiveCwd)) {
-		throw new Error(`cwd directory does not exist: ${effectiveCwd}`);
-	}
 	let taskText = prepared.content;
 	if (!task.prompt.inheritContext && taskPreamble) {
 		taskText = `${taskPreamble}\n\n---\n\n${prepared.content}`;
+	}
+	if (task.taskPrefix) {
+		taskText = `${task.taskPrefix}\n\n${taskText}`;
 	}
 
 	return {
@@ -523,7 +537,7 @@ async function requestDelegatedRun(
 }
 
 export async function executeSubagentPromptStep(options: DelegatedPromptOptions): Promise<DelegatedPromptOutcome | undefined> {
-	const { pi, ctx, currentModel, override, signal, inheritedModel, taskPreamble } = options;
+	const { pi, ctx, currentModel, override, signal, inheritedModel, taskPreamble, allowPartialFailures } = options;
 	const runtime = await ensureSubagentRuntime(ctx.cwd);
 	const isParallelRequest = "parallel" in options;
 
@@ -544,8 +558,8 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 		if (preparedTask.context !== requestContext) {
 			throw new Error("Parallel delegated prompts must share the same inheritContext setting.");
 		}
-		if (preparedTask.cwd !== requestCwd) {
-			throw new Error("Parallel delegated prompts must share the same cwd setting.");
+		if (options.worktree === true && preparedTask.cwd !== requestCwd) {
+			throw new Error("Parallel delegated prompts with worktree enabled must share the same cwd setting.");
 		}
 	}
 
@@ -559,12 +573,14 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 					agent: task.agent,
 					task: task.task,
 					model: task.model,
+					cwd: task.cwd,
 				})),
 			}
 			: {}),
 		context: requestContext,
 		model: preparedTasks[0]!.model,
 		cwd: requestCwd,
+		...(options.worktree ? { worktree: true } : {}),
 	};
 
 	const promptLabel = preparedTasks.map((task) => task.promptName).join(", ");
@@ -595,14 +611,17 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 				throw new Error("Delegated parallel execution returned no results.");
 			}
 			const failures = parallelResults.filter((result) => result.isError);
-			if (failures.length > 0) {
+			if (!allowPartialFailures && failures.length > 0) {
 				const failureText = failures
 					.map((failure) => `${failure.agent}: ${failure.errorText || "unknown delegated error"}`)
 					.join("; ");
 				throw new Error(`Delegated parallel execution failed: ${failureText}`);
 			}
 
-			const text = renderParallelDelegatedText(parallelResults);
+			const text = response.contentText?.trim() || renderParallelDelegatedText(parallelResults);
+			const changed =
+				parallelResults.some((result) => delegatedMessagesChanged(result.messages))
+				|| text.includes("=== Worktree Changes ===");
 			pi.sendMessage({
 				customType: PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE,
 				content: text,
@@ -615,15 +634,18 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 					model: response.model,
 					messages: [],
 					parallelResults,
+					text,
+					changed,
 					isError: false,
 					errorText: response.errorText,
 				},
 			});
 
 			return {
-				changed: parallelResults.some((result) => delegatedMessagesChanged(result.messages)),
+				changed,
 				text,
 				agent: request.agent,
+				parallelResults,
 			};
 		}
 
@@ -633,6 +655,7 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 			throw new Error("Delegated subagent returned no assistant text.");
 		}
 
+		const changed = delegatedMessagesChanged(messages);
 		pi.sendMessage({
 			customType: PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE,
 			content: text,
@@ -644,13 +667,15 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 				context: response.context,
 				model: response.model,
 				messages,
+				text,
+				changed,
 				isError: false,
 				errorText: response.errorText,
 			},
 		});
 
 		return {
-			changed: delegatedMessagesChanged(messages),
+			changed,
 			text,
 			agent: preparedTasks[0]!.agent,
 		};

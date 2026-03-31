@@ -75,7 +75,7 @@ function withTempHome(run: (root: string) => Promise<void>) {
 	process.env.HOME = root;
 	const runtimeRoot = join(root, "runtime-subagent");
 	mkdirSync(runtimeRoot, { recursive: true });
-	writeFileSync(join(runtimeRoot, "agents.js"), "export function discoverAgents(){ return { agents: [{ name: 'delegate' }, { name: 'reviewer' }, { name: 'worker' }] }; }");
+	writeFileSync(join(runtimeRoot, "agents.js"), "export function discoverAgents(){ return { agents: [{ name: 'delegate' }, { name: 'reviewer' }, { name: 'worker' }, { name: 'simplifier' }] }; }");
 	const prevRuntime = process.env.PI_SUBAGENT_RUNTIME_ROOT;
 	process.env.PI_SUBAGENT_RUNTIME_ROOT = runtimeRoot;
 	return run(root).finally(() => {
@@ -168,63 +168,113 @@ function respondWithDelegatedResult(pi: FakePi, setup?: (request: any) => void) 
 	});
 }
 
-test("delegated prompt uses event bus and does not switch parent model", async () => {
-	await withTempHome(async (root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "simplify.md"), "---\nmodel: anthropic/claude-sonnet-4-20250514\nsubagent: true\n---\nwork");
-
-		const pi = new FakePi();
-		const { ctx } = createContext(cwd, pi);
-		promptModelExtension(pi as never);
-		await pi.emit("session_start", {}, ctx);
-		respondWithDelegatedResult(pi, (request) => {
-			assert.equal(request.agent, "delegate");
-			assert.equal(request.context, "fresh");
+function respondWithParallelDelegatedResult(pi: FakePi, setup?: (request: any) => void) {
+	pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+		const request = payload as any;
+		setup?.(request);
+		pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+		pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+			...request,
+			parallelResults: (request.tasks ?? []).map((task: any, index: number) => ({
+				agent: task.agent,
+				messages: [
+					{
+						role: "assistant",
+						content: [
+							{ type: "toolCall", id: `${index + 1}`, name: "write", arguments: { path: `src/${index + 1}.ts` } },
+							{ type: "text", text: `Done ${index + 1}` },
+						],
+					},
+				],
+				isError: false,
+			})),
+			isError: false,
 		});
+	});
+}
 
-		await pi.commands.get("simplify")!.handler("", ctx);
-		assert.deepEqual(pi.setModelCalls, []);
-		assert.equal(pi.customMessages.length, 1);
+test("delegated prompts honor default agent, runtime override, and inheritContext", async () => {
+	await withTempHome(async (root) => {
+		const cases = [
+			{
+				name: "default",
+				frontmatter: "---\nmodel: anthropic/claude-sonnet-4-20250514\nsubagent: true\n---\nwork",
+				args: "",
+				checkRequest(request: any) {
+					assert.equal(request.agent, "delegate");
+					assert.equal(request.context, "fresh");
+				},
+				after(pi: FakePi) {
+					assert.deepEqual(pi.setModelCalls, []);
+					assert.equal(pi.customMessages.length, 1);
+				},
+			},
+			{
+				name: "override",
+				frontmatter: "---\nmodel: anthropic/claude-sonnet-4-20250514\nsubagent: worker\n---\nwork",
+				args: "--subagent:reviewer",
+				checkRequest(request: any) {
+					assert.equal(request.agent, "reviewer");
+				},
+			},
+			{
+				name: "fork",
+				frontmatter: "---\nmodel: anthropic/claude-sonnet-4-20250514\nsubagent: true\ninheritContext: true\n---\nwork",
+				args: "",
+				checkRequest(request: any) {
+					assert.equal(request.context, "fork");
+				},
+			},
+		] as const;
+
+		for (const testCase of cases) {
+			const cwd = join(root, testCase.name);
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", "simplify.md"), testCase.frontmatter);
+
+			const pi = new FakePi();
+			const { ctx } = createContext(cwd, pi);
+			promptModelExtension(pi as never);
+			await pi.emit("session_start", {}, ctx);
+			respondWithDelegatedResult(pi, (request) => {
+				testCase.checkRequest(request);
+			});
+
+			await pi.commands.get("simplify")!.handler(testCase.args, ctx);
+			testCase.after?.(pi);
+		}
 	});
 });
 
-test("runtime --subagent override takes precedence", async () => {
-	await withTempHome(async (root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "simplify.md"), "---\nmodel: anthropic/claude-sonnet-4-20250514\nsubagent: worker\n---\nwork");
-
-		const pi = new FakePi();
-		const { ctx } = createContext(cwd, pi);
-		promptModelExtension(pi as never);
-		await pi.emit("session_start", {}, ctx);
-		respondWithDelegatedResult(pi, (request) => {
-			assert.equal(request.agent, "reviewer");
-		});
-
-		await pi.commands.get("simplify")!.handler("--subagent:reviewer", ctx);
-	});
-});
-
-test("inheritContext delegated prompts request fork context", async () => {
+test("parallel delegated prompts expand to repeated tasks with slot headers", async () => {
 	await withTempHome(async (root) => {
 		const cwd = join(root, "project");
 		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 		writeFileSync(
-			join(cwd, ".pi", "prompts", "simplify.md"),
-			"---\nmodel: anthropic/claude-sonnet-4-20250514\nsubagent: true\ninheritContext: true\n---\nwork",
+			join(cwd, ".pi", "prompts", "simplify-parallel.md"),
+			"---\nmodel: anthropic/claude-sonnet-4-20250514\nsubagent: simplifier\ninheritContext: true\nparallel: 3\nworktree: true\n---\nReview changed files and fix issues.",
 		);
 
 		const pi = new FakePi();
 		const { ctx } = createContext(cwd, pi);
 		promptModelExtension(pi as never);
 		await pi.emit("session_start", {}, ctx);
-		respondWithDelegatedResult(pi, (request) => {
+		respondWithParallelDelegatedResult(pi, (request) => {
 			assert.equal(request.context, "fork");
+			assert.equal(request.worktree, true);
+			assert.equal(request.tasks?.length, 3);
+			assert.deepEqual(
+				request.tasks?.map((task: { agent: string }) => task.agent),
+				["simplifier", "simplifier", "simplifier"],
+			);
+			assert.match(request.tasks?.[0]?.task ?? "", /^\[Parallel subagent 1\/3\]\n\nReview changed files and fix issues\.$/);
+			assert.match(request.tasks?.[1]?.task ?? "", /^\[Parallel subagent 2\/3\]\n\nReview changed files and fix issues\.$/);
+			assert.match(request.tasks?.[2]?.task ?? "", /^\[Parallel subagent 3\/3\]\n\nReview changed files and fix issues\.$/);
 		});
 
-		await pi.commands.get("simplify")!.handler("", ctx);
+		await pi.commands.get("simplify-parallel")!.handler("", ctx);
+		assert.equal(pi.customMessages.length, 1);
+		assert.match(pi.customMessages[0].content, /=== Parallel Task 1 \(simplifier\) ===/);
 	});
 });
 
@@ -332,7 +382,7 @@ test("parallel chain step delegates with tasks payload", async () => {
 		assert.equal(pi.userMessages.length, 1);
 		assert.equal(
 			pi.userMessages[0],
-			"[Delegated chain complete: parallel(scan-fe, scan-be)]\n\n=== Task 1: delegate ===\nfe done\n\n=== Task 2: reviewer ===\nbe done",
+			"[Delegated chain complete: parallel(scan-fe, scan-be)]\n\n=== Parallel Task 1 (delegate) ===\nfe done\n\n=== Parallel Task 2 (reviewer) ===\nbe done",
 		);
 	});
 });
@@ -414,7 +464,7 @@ test("successful parallel step continues to next sequential step", async () => {
 		assert.equal(pi.userMessages[0], "review findings");
 		assert.equal(
 			pi.userMessages[1],
-			"[Delegated chain complete: parallel(scan-fe, scan-be) -> review]\n\n=== Task 1: delegate ===\nfe done\n\n=== Task 2: delegate ===\nbe done",
+			"[Delegated chain complete: parallel(scan-fe, scan-be) -> review]\n\n=== Parallel Task 1 (delegate) ===\nfe done\n\n=== Parallel Task 2 (delegate) ===\nbe done",
 		);
 	});
 });
@@ -498,5 +548,370 @@ test("chain-prompts CLI command handles parallel() syntax", async () => {
 		assert.equal(Array.isArray(requestTasks), true);
 		assert.equal(requestTasks?.length, 2);
 		assert.equal(pi.customMessages.length, 1);
+	});
+});
+
+test("compare prompt expands count, applies taskSuffix, and runs a final reviewer after partial reviewer success", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "compare.md"),
+			[
+				"---",
+				"workers:",
+				"  - subagent: true",
+				"    model: anthropic/claude-sonnet-4-20250514",
+				"    taskSuffix: Save findings to `.compare-findings/w1.md`.",
+				"    count: 2",
+				"  - subagent: delegate",
+				"reviewers:",
+				"  - subagent: true",
+				"    taskSuffix: Mention `.compare-findings/w1.md` in the recommendation.",
+				"    count: 2",
+				"finalReviewer:",
+				"  subagent: true",
+				"  model: anthropic/claude-sonnet-4-20250514",
+				"  taskSuffix: Produce one clean final recommendation.",
+				"---",
+				"Implement: $@",
+			].join("\n"),
+		);
+
+		const pi = new FakePi();
+		const { ctx } = createContext(cwd, pi);
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+
+		let phase = 0;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+			const request = payload as any;
+			phase++;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			if (phase === 1) {
+				assert.equal(request.tasks?.length, 3);
+				assert.deepEqual(request.tasks?.map((task: any) => task.agent), ["delegate", "delegate", "delegate"]);
+				assert.deepEqual(
+					request.tasks?.map((task: any) => task.model),
+					[
+						"anthropic/claude-sonnet-4-20250514",
+						"anthropic/claude-sonnet-4-20250514",
+						"anthropic/claude-sonnet-4-20250514",
+					],
+				);
+				assert.match(request.tasks?.[0]?.task ?? "", /^Implement: fix bug\n\nSave findings to `\.compare-findings\/w1\.md`\.$/);
+				assert.match(request.tasks?.[1]?.task ?? "", /^Implement: fix bug\n\nSave findings to `\.compare-findings\/w1\.md`\.$/);
+				assert.match(request.tasks?.[2]?.task ?? "", /^Implement: fix bug$/);
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [],
+					contentText: [
+						"3/3 succeeded",
+						"",
+						"=== Task 1: delegate ===",
+						"w1",
+						"",
+						"=== Task 2: delegate ===",
+						"w2",
+						"",
+						"=== Task 3: delegate ===",
+						"w3",
+						"",
+						"=== Worktree Changes ===",
+						"",
+						"--- Task 1 (delegate): 1 files changed, +1 -0 ---",
+						"README.md | 1 +",
+					].join("\n"),
+					parallelResults: [
+						{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "w1" }] }], isError: false },
+						{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "w2" }] }], isError: false },
+						{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "w3" }] }], isError: false },
+					],
+					isError: false,
+				});
+				return;
+			}
+
+			if (phase === 2) {
+				assert.equal(request.tasks?.length, 2);
+				assert.match(request.tasks?.[0]?.task ?? "", /\[Worker outputs and worktree summaries\]/);
+				assert.match(request.tasks?.[0]?.task ?? "", /=== Worker 1 \(delegate, anthropic\/claude-sonnet-4-20250514\) ===\nw1/);
+				assert.match(request.tasks?.[0]?.task ?? "", /=== Worktree Changes ===/);
+				assert.match(request.tasks?.[0]?.task ?? "", /--- Task 1 \(delegate\): 1 files changed, \+1 -0 ---/);
+				assert.match(request.tasks?.[0]?.task ?? "", /Mention `\.compare-findings\/w1\.md` in the recommendation\./);
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [],
+					parallelResults: [
+						{ agent: "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: "Winner: worker 2" }] }], isError: false },
+						{ agent: "reviewer", messages: [], isError: true, errorText: "quota" },
+					],
+					isError: false,
+				});
+				return;
+			}
+
+			assert.equal(phase, 3);
+			assert.equal(request.agent, "reviewer");
+			assert.equal(request.model, "anthropic/claude-sonnet-4-20250514");
+			assert.match(request.task ?? "", /Produce one clean final recommendation\./);
+			assert.match(request.task ?? "", /\[Reviewer outputs\]/);
+			assert.match(request.task ?? "", /Winner: worker 2/);
+			assert.match(request.task ?? "", /\[Reviewer failures\]/);
+			assert.match(request.task ?? "", /quota/);
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [{ role: "assistant", content: [{ type: "text", text: "Final: combine worker 2 with worker 1's tests." }] }],
+				isError: false,
+			});
+		});
+
+		await pi.commands.get("compare")!.handler("fix bug", ctx);
+		assert.equal(phase, 3);
+		assert.equal(pi.userMessages.length, 1);
+		assert.match(pi.userMessages[0]!, /\[Compare review complete: compare\]/);
+		assert.match(pi.userMessages[0]!, /Final: combine worker 2 with worker 1's tests\./);
+	});
+});
+
+test("compare prompts handle partial-success policy, final-reviewer fallback, overrides, and at-path cwd", async () => {
+	await withTempHome(async (root) => {
+		const cases = [
+			{
+				name: "compare-override",
+				command: 'compare-override --workers=[{"agent":"delegate","count":2}] --reviewers-append=[{"agent":"reviewer","count":2}] fix',
+				content: [
+					"---",
+					"workers:",
+					"  - agent: delegate",
+					"reviewers:",
+					"  - agent: reviewer",
+					"---",
+					"$@",
+				].join("\n"),
+				handle(request: any, phase: number) {
+					if (phase === 1) {
+						assert.equal(request.tasks?.length, 2);
+						assert.deepEqual(request.tasks?.map((task: any) => task.agent), ["delegate", "delegate"]);
+						return {
+							messages: [],
+							contentText: [
+								"1/2 succeeded",
+								"",
+								"=== Task 1: delegate ===",
+								"failed output",
+								"",
+								"=== Task 2: delegate ===",
+								"w2",
+								"",
+								"=== Worktree Changes ===",
+								"",
+								"--- Task 1 (delegate): 1 files changed, +1 -0 ---",
+								"bad.txt | 1 +",
+								"",
+								"--- Task 2 (delegate): 1 files changed, +1 -0 ---",
+								"good.txt | 1 +",
+							].join("\n"),
+							parallelResults: [
+								{ agent: "delegate", messages: [], isError: true, errorText: "quota" },
+								{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "w2" }] }], isError: false },
+							],
+							isError: false,
+						};
+					}
+					assert.equal(request.tasks?.length, 3);
+					assert.match(request.tasks?.[0]?.task ?? "", /\[Worker failures\]/);
+					assert.match(request.tasks?.[0]?.task ?? "", /quota/);
+					assert.match(request.tasks?.[0]?.task ?? "", /good\.txt \| 1 \+/);
+					assert.doesNotMatch(request.tasks?.[0]?.task ?? "", /bad\.txt \| 1 \+/);
+					return {
+						messages: [],
+						parallelResults: [
+							{ agent: "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: "r1" }] }], isError: false },
+							{ agent: "reviewer", messages: [], isError: true, errorText: "timeout" },
+							{ agent: "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: "r3" }] }], isError: false },
+						],
+						isError: false,
+					};
+				},
+				assert(pi: FakePi, phase: number) {
+					assert.equal(phase, 2);
+					assert.equal(pi.userMessages.length, 1);
+					assert.match(pi.userMessages[0]!, /r1/);
+					assert.match(pi.userMessages[0]!, /r3/);
+					assert.match(pi.userMessages[0]!, /\[Reviewer failures\]/);
+					assert.doesNotMatch(pi.userMessages[0]!, /timeout.*timeout/s);
+				},
+			},
+			{
+				name: "compare-all-workers-fail",
+				command: "compare-all-workers-fail fix",
+				content: [
+					"---",
+					"workers:",
+					"  - agent: delegate",
+					"  - agent: delegate",
+					"reviewers:",
+					"  - agent: reviewer",
+					"---",
+					"$@",
+				].join("\n"),
+				handle() {
+					return {
+						messages: [],
+						parallelResults: [
+							{ agent: "delegate", messages: [], isError: true, errorText: "worker failed" },
+							{ agent: "delegate", messages: [], isError: true, errorText: "still failed" },
+						],
+						isError: false,
+					};
+				},
+				assert(pi: FakePi, phase: number) {
+					assert.equal(phase, 1);
+					assert.equal(pi.userMessages.length, 0);
+				},
+			},
+			{
+				name: "compare-no-reviewer-success",
+				command: "compare-no-reviewer-success fix",
+				content: [
+					"---",
+					"workers:",
+					"  - agent: delegate",
+					"reviewers:",
+					"  - agent: reviewer",
+					"  - agent: reviewer",
+					"---",
+					"$@",
+				].join("\n"),
+				handle(_request: any, phase: number) {
+					if (phase === 1) {
+						return {
+							messages: [],
+							parallelResults: [{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "worker" }] }], isError: false }],
+							isError: false,
+						};
+					}
+					return {
+						messages: [],
+						parallelResults: [
+							{ agent: "reviewer", messages: [], isError: true, errorText: "timeout" },
+							{ agent: "reviewer", messages: [], isError: true, errorText: "quota" },
+						],
+						isError: false,
+					};
+				},
+				assert(pi: FakePi, phase: number) {
+					assert.equal(phase, 2);
+					assert.equal(pi.userMessages.length, 0);
+				},
+			},
+			{
+				name: "compare-reviewer-fallback",
+				command: "compare-reviewer-fallback fix",
+				content: [
+					"---",
+					"workers:",
+					"  - agent: delegate",
+					"reviewers:",
+					"  - agent: reviewer",
+					"finalReviewer:",
+					"  agent: reviewer",
+					"  taskSuffix: Synthesize directly from workers if reviewers fail.",
+					"---",
+					"$@",
+				].join("\n"),
+				handle(request: any, phase: number) {
+					if (phase === 1) {
+						return {
+							messages: [],
+							parallelResults: [{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "worker" }] }], isError: false }],
+							isError: false,
+						};
+					}
+					if (phase === 2) {
+						return {
+							messages: [],
+							parallelResults: [{ agent: "reviewer", messages: [], isError: true, errorText: "quota" }],
+							isError: false,
+						};
+					}
+					assert.match(request.task ?? "", /All reviewer runs failed\. Synthesize directly from the worker variants\./);
+					assert.match(request.task ?? "", /\[Reviewer failures\]/);
+					assert.match(request.task ?? "", /Synthesize directly from workers if reviewers fail\./);
+					return {
+						messages: [{ role: "assistant", content: [{ type: "text", text: "Fallback final review" }] }],
+						isError: false,
+					};
+				},
+				assert(pi: FakePi, phase: number) {
+					assert.equal(phase, 3);
+					assert.equal(pi.userMessages.length, 1);
+					assert.match(pi.userMessages[0]!, /Fallback final review/);
+				},
+			},
+			{
+				name: "parallel-patch-compare-at-path",
+				command: `parallel-patch-compare-at-path ${join(root, "other-repo")} fix bug`,
+				content: [
+					"---",
+					"workers:",
+					"  - agent: delegate",
+					"reviewers:",
+					"  - agent: reviewer",
+					"---",
+					"$@",
+				].join("\n"),
+				handle(request: any, phase: number) {
+					const repoPath = join(root, "other-repo");
+					if (phase === 1) {
+						assert.equal(request.cwd, repoPath);
+						assert.equal(request.tasks?.[0]?.cwd, repoPath);
+						assert.doesNotMatch(request.tasks?.[0]?.task ?? "", new RegExp(repoPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+						assert.match(request.tasks?.[0]?.task ?? "", /fix bug/);
+						return {
+							messages: [],
+							parallelResults: [{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "worker" }] }], isError: false }],
+							isError: false,
+						};
+					}
+					return {
+						messages: [],
+						parallelResults: [{ agent: "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: "review" }] }], isError: false }],
+						isError: false,
+					};
+				},
+				assert(_pi: FakePi, phase: number) {
+					assert.equal(phase, 2);
+				},
+			},
+		] as const;
+
+		mkdirSync(join(root, "other-repo"), { recursive: true });
+		for (const testCase of cases) {
+			const cwd = join(root, testCase.name);
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", `${testCase.name}.md`), testCase.content);
+
+			const pi = new FakePi();
+			const { ctx } = createContext(cwd, pi);
+			promptModelExtension(pi as never);
+			await pi.emit("session_start", {}, ctx);
+
+			let phase = 0;
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+				const request = payload as any;
+				phase++;
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					...testCase.handle(request, phase),
+				});
+			});
+
+			const [commandName, ...commandArgs] = testCase.command.split(" ");
+			await pi.commands.get(commandName)!.handler(commandArgs.join(" "), ctx);
+			testCase.assert(pi, phase);
+		}
 	});
 });

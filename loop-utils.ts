@@ -5,6 +5,8 @@ import { PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE } from "./subagent-runtime.js";
 interface DelegatedMessageDetails {
 	messages?: Message[];
 	parallelResults?: Array<{ messages?: Message[] }>;
+	text?: string;
+	changed?: boolean;
 }
 
 interface CollectedSummaryData {
@@ -73,6 +75,9 @@ function collectSummaryData(entries: SessionEntry[]): CollectedSummaryData {
 			commandCount += collected.commandCount;
 			if (collected.lastText) lastAssistantText = collected.lastText;
 		}
+		if (typeof delegated.text === "string" && delegated.text.trim()) {
+			lastAssistantText = delegated.text;
+		}
 	}
 
 	return {
@@ -129,6 +134,7 @@ export function didIterationMakeChanges(entries: SessionEntry[]): boolean {
 
 		const delegated = delegatedDetails(entry);
 		if (!delegated) continue;
+		if (delegated.changed === true) return true;
 		const delegatedGroups =
 			delegated.parallelResults && delegated.parallelResults.length > 0
 				? delegated.parallelResults.map((result) => result.messages ?? [])

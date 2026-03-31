@@ -2193,3 +2193,173 @@ test("delegated loop convergence still triggers and injects after convergence ev
 		});
 	});
 });
+
+function parallelResponse(request: any) {
+	const tasks = request.tasks ?? [{ agent: request.agent }];
+	return {
+		...request,
+		parallelResults: tasks.map((t: any) => ({
+			agent: t.agent ?? "delegate",
+			messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
+			isError: false,
+		})),
+		isError: false,
+	};
+}
+
+function singleResponse(request: any) {
+	return {
+		...request,
+		messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
+		isError: false,
+	};
+}
+
+test("chain template worktree: true passes worktree flag to parallel subagent request", async () => {
+	await withTempHome(async (root) => {
+		await withSubagentRuntime(root, async () => {
+			const cwd = join(root, "project");
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", "wt-pipeline.md"), '---\nchain: "parallel(scan-fe, scan-be) -> review"\nworktree: true\n---\nignored');
+			writeFileSync(join(cwd, ".pi", "prompts", "scan-fe.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSCAN-FE`);
+			writeFileSync(join(cwd, ".pi", "prompts", "scan-be.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSCAN-BE`);
+			writeFileSync(join(cwd, ".pi", "prompts", "review.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nREVIEW`);
+
+			const pi = new FakePi();
+			const { ctx } = createBranchingContext(cwd, pi);
+			promptModelExtension(pi as never);
+			await pi.emit("session_start", {}, ctx);
+
+			const requests: any[] = [];
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+				const request = payload as any;
+				requests.push(request);
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				const response = request.tasks ? parallelResponse(request) : singleResponse(request);
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, response);
+			});
+
+			await pi.commands.get("wt-pipeline")!.handler("", ctx);
+			assert.equal(requests.length, 2);
+			assert.equal(requests[0].worktree, true, "parallel step should have worktree: true");
+			assert.equal(requests[1].worktree, undefined, "sequential step should not have worktree");
+		});
+	});
+});
+
+test("chain-prompts --worktree passes worktree flag to parallel subagent request", async () => {
+	await withTempHome(async (root) => {
+		await withSubagentRuntime(root, async () => {
+			const cwd = join(root, "project");
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", "scan-fe.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSCAN-FE`);
+			writeFileSync(join(cwd, ".pi", "prompts", "scan-be.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSCAN-BE`);
+			writeFileSync(join(cwd, ".pi", "prompts", "review.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nREVIEW`);
+
+			const pi = new FakePi();
+			const { ctx } = createBranchingContext(cwd, pi);
+			promptModelExtension(pi as never);
+			await pi.emit("session_start", {}, ctx);
+
+			const requests: any[] = [];
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+				const request = payload as any;
+				requests.push(request);
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				const response = request.tasks ? parallelResponse(request) : singleResponse(request);
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, response);
+			});
+
+			await pi.commands.get("chain-prompts")!.handler("parallel(scan-fe, scan-be) -> review --worktree", ctx);
+			assert.equal(requests.length, 2);
+			assert.equal(requests[0].worktree, true, "parallel step should have worktree: true");
+			assert.equal(requests[1].worktree, undefined, "sequential step should not have worktree");
+		});
+	});
+});
+
+test("chain template CLI --worktree overrides missing frontmatter worktree", async () => {
+	await withTempHome(async (root) => {
+		await withSubagentRuntime(root, async () => {
+			const cwd = join(root, "project");
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", "no-wt.md"), '---\nchain: "parallel(scan-fe, scan-be)"\n---\nignored');
+			writeFileSync(join(cwd, ".pi", "prompts", "scan-fe.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSCAN-FE`);
+			writeFileSync(join(cwd, ".pi", "prompts", "scan-be.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSCAN-BE`);
+
+			const pi = new FakePi();
+			const { ctx } = createBranchingContext(cwd, pi);
+			promptModelExtension(pi as never);
+			await pi.emit("session_start", {}, ctx);
+
+			const requests: any[] = [];
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+				const request = payload as any;
+				requests.push(request);
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, parallelResponse(request));
+			});
+
+			await pi.commands.get("no-wt")!.handler("--worktree", ctx);
+			assert.equal(requests.length, 1);
+			assert.equal(requests[0].worktree, true);
+		});
+	});
+});
+
+test("chain-prompts --worktree warns when chain has no parallel steps", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "analyze.md"), `---\nmodel: ${MODEL_ID}\n---\nANALYZE`);
+		writeFileSync(join(cwd, ".pi", "prompts", "fix.md"), `---\nmodel: ${MODEL_ID}\n---\nFIX`);
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const { ctx, getNotifications } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("chain-prompts")!.handler("analyze -> fix --worktree", ctx);
+		assert.ok(getNotifications().some((n) => n.includes("--worktree ignored")));
+	});
+});
+
+test("parallel chain loops treat delegated worktree diffs as changes", async () => {
+	await withTempHome(async (root) => {
+		await withSubagentRuntime(root, async () => {
+			const cwd = join(root, "project");
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "parallel(scan-fe, scan-be)"\n---\nignored');
+			writeFileSync(join(cwd, ".pi", "prompts", "scan-fe.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSCAN-FE`);
+			writeFileSync(join(cwd, ".pi", "prompts", "scan-be.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSCAN-BE`);
+
+			const pi = new FakePi();
+			const { ctx } = createBranchingContext(cwd, pi);
+			promptModelExtension(pi as never);
+			await pi.emit("session_start", {}, ctx);
+
+			let requestCount = 0;
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+				const request = payload as any;
+				requestCount++;
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [],
+					parallelResults: [
+						{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "frontend done" }] }], isError: false },
+						{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "backend done" }] }], isError: false },
+					],
+					contentText:
+						requestCount === 1
+							? "2/2 succeeded\n\n=== Parallel Task 1 (delegate) ===\nfrontend done\n\n=== Parallel Task 2 (delegate) ===\nbackend done\n\n=== Worktree Changes ===\n\n--- Task 1 (delegate): 1 file changed, +1 -0 ---"
+							: "2/2 succeeded\n\n=== Parallel Task 1 (delegate) ===\nfrontend done\n\n=== Parallel Task 2 (delegate) ===\nbackend done",
+					isError: false,
+				});
+			});
+
+			await pi.commands.get("pipeline")!.handler("--loop 2", ctx);
+			assert.equal(requestCount, 2);
+		});
+	});
+});

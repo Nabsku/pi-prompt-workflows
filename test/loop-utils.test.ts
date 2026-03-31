@@ -18,6 +18,36 @@ const delegatedEntry = {
 				],
 			},
 		],
+		text: "Updated file.",
+		changed: true,
+	},
+} as any;
+
+const delegatedWorktreeEntry = {
+	id: "delegated-2",
+	type: "custom_message",
+	customType: "prompt-template-subagent",
+	content: "2/2 succeeded\n\n=== Worktree Changes ===\n\n--- Task 1 (simplifier): 1 file changed, +1 -0 ---",
+	display: true,
+	details: {
+		messages: [
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "Done." }],
+			},
+		],
+		parallelResults: [
+			{
+				messages: [
+					{
+						role: "assistant",
+						content: [{ type: "text", text: "Done." }],
+					},
+				],
+			},
+		],
+		text: "2/2 succeeded\n\n=== Worktree Changes ===\n\n--- Task 1 (simplifier): 1 file changed, +1 -0 ---",
+		changed: true,
 	},
 } as any;
 
@@ -72,6 +102,15 @@ test("generateChainStepSummary includes delegated custom-message data", () => {
 	assert.match(summary, /^Step 1 — parallel\(scan-fe, scan-be\):/);
 	assert.match(summary, /Actions: modified src\/a\.ts\./);
 	assert.match(summary, /Outcome: Updated file\./);
+});
+
+test("didIterationMakeChanges respects delegated changed flag for worktree-only results", () => {
+	assert.equal(didIterationMakeChanges([delegatedWorktreeEntry]), true);
+});
+
+test("generateIterationSummary uses delegated aggregate text when present", () => {
+	const summary = generateIterationSummary([delegatedWorktreeEntry], "simplify-parallel", 1, 2);
+	assert.match(summary, /Outcome: 2\/2 succeeded .*=== Worktree Changes ===/);
 });
 
 test("generateChainStepSummary supports text-only steps without action lines", () => {

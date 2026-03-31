@@ -1,16 +1,38 @@
+import { existsSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
 import type { Model } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
-import { extractChainContextFlag, extractLoopCount, extractLoopFlags, extractSubagentOverride, parseCommandArgs, type SubagentOverride } from "./args.js";
+import {
+	extractChainContextFlag,
+	extractLineupOverrides,
+	extractLoopCount,
+	extractLoopFlags,
+	extractSubagentOverride,
+	extractWorktreeFlag,
+	parseCommandArgs,
+	substituteArgs,
+	type LineupOverrideAction,
+	type SubagentOverride,
+} from "./args.js";
 import { parseChainSteps, parseChainDeclaration, type ChainStep, type ChainStepOrParallel, type ParallelChainStep } from "./chain-parser.js";
 import { generateChainStepSummary, generateIterationSummary, didIterationMakeChanges, getIterationEntries, wasIterationAborted } from "./loop-utils.js";
+import { selectModelCandidate } from "./model-selection.js";
 import { notify, summarizePromptDiagnostics, diagnosticsFingerprint } from "./notifications.js";
-import { preparePromptExecution } from "./prompt-execution.js";
-import { buildPromptCommandDescription, expandCwdPath, loadPromptsWithModel, readSkillContent, resolveSkillPath, type PromptWithModel } from "./prompt-loader.js";
+import { preparePromptExecution, renderPromptForResolvedModel } from "./prompt-execution.js";
+import {
+	buildPromptCommandDescription,
+	expandCwdPath,
+	loadPromptsWithModel,
+	readSkillContent,
+	resolveSkillPath,
+	type DelegationLineupSlot,
+	type PromptWithModel,
+} from "./prompt-loader.js";
 import { renderSkillLoaded, type SkillLoadedDetails } from "./skill-loaded-renderer.js";
 import { createToolManager } from "./tool-manager.js";
-import { executeSubagentPromptStep } from "./subagent-step.js";
-import { PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE } from "./subagent-runtime.js";
+import { executeSubagentPromptStep, type DelegatedPromptParallelResult } from "./subagent-step.js";
+import { DEFAULT_SUBAGENT_NAME, PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE } from "./subagent-runtime.js";
 import { renderDelegatedSubagentResult } from "./subagent-renderer.js";
 
 interface LoopState {
@@ -47,6 +69,27 @@ interface PromptStepResult {
 	changed: boolean;
 	text?: string;
 }
+
+const DEFAULT_COMPARE_REVIEWER_TASK = [
+	"Review the worker variants and select the strongest patch.",
+	"Required output:",
+	"1. Rank every variant from best to worst with concise rationale.",
+	"2. Name a winner and explain why it is preferred.",
+	"3. Cite concrete patch/diff evidence, including worktree change summaries when present.",
+	"4. Call out correctness risks and regression risks.",
+	"5. Extract cherry-pick ideas from non-winning variants.",
+	"6. End with one manual next command to apply the recommended patch.",
+].join("\n");
+
+const DEFAULT_COMPARE_FINAL_REVIEWER_TASK = [
+	"Compare the reviewer outputs and produce one final recommendation.",
+	"Required output:",
+	"1. Strip repetition and discard low-value review noise.",
+	"2. Reconcile disagreements between reviewers using the worker variants as ground truth.",
+	"3. Recommend either the best single variant or a concrete merge plan that combines the best elements.",
+	"4. Call out any unresolved risk that still needs human review.",
+	"5. End with one clear manual next command.",
+].join("\n");
 
 export default function promptModelExtension(pi: ExtensionAPI) {
 	let prompts = new Map<string, PromptWithModel>();
@@ -205,16 +248,34 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	): Promise<PromptStepResult | "aborted"> {
 		if (shouldDelegatePrompt(prompt, override)) {
 			try {
-				const delegated = await executeSubagentPromptStep({
-					pi,
-					prompt,
-					args,
-					ctx,
-					currentModel,
-					override,
-					inheritedModel,
-					taskPreamble,
-				});
+				const delegated =
+					prompt.parallel && prompt.parallel > 1
+						? await executeSubagentPromptStep({
+							pi,
+							ctx,
+							currentModel,
+							override,
+							signal: ctx.signal,
+							inheritedModel,
+							taskPreamble,
+							parallel: Array.from({ length: prompt.parallel }, (_, index) => ({
+								prompt,
+								args,
+								taskPrefix: `[Parallel subagent ${index + 1}/${prompt.parallel}]`,
+							})),
+							worktree: prompt.worktree === true,
+						})
+						: await executeSubagentPromptStep({
+							pi,
+							prompt,
+							args,
+							ctx,
+							currentModel,
+							override,
+							signal: ctx.signal,
+							inheritedModel,
+							taskPreamble,
+						});
 				if (!delegated) {
 					notify(ctx, `Prompt \`${prompt.name}\` is not configured for delegated execution.`, "error");
 					return "aborted";
@@ -387,6 +448,433 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 	}
 
+	function cloneLineup(slots: DelegationLineupSlot[] | undefined): DelegationLineupSlot[] | undefined {
+		return slots?.map((slot) => ({ ...slot }));
+	}
+
+	function expandLineupCounts(slots: DelegationLineupSlot[]): DelegationLineupSlot[] {
+		const expanded: DelegationLineupSlot[] = [];
+		for (const slot of slots) {
+			const { count, ...concreteSlot } = slot;
+			for (let index = 0; index < (count ?? 1); index++) {
+				expanded.push({ ...concreteSlot });
+			}
+		}
+		return expanded;
+	}
+
+	function applyLineupActions(
+		defaultSlots: DelegationLineupSlot[] | undefined,
+		actions: LineupOverrideAction[],
+		target: "workers" | "reviewers",
+	): DelegationLineupSlot[] | undefined {
+		let lineup = cloneLineup(defaultSlots);
+		for (const action of actions) {
+			if (action.target !== target) continue;
+			const incoming = action.slots.map((slot) => ({ ...slot }));
+			lineup = action.mode === "replace" ? incoming : [...(lineup ?? []), ...incoming];
+		}
+		return lineup;
+	}
+
+	function applyFinalReviewerAction(
+		defaultSlot: DelegationLineupSlot | undefined,
+		actions: LineupOverrideAction[],
+	): DelegationLineupSlot | undefined {
+		let slot = defaultSlot ? { ...defaultSlot } : undefined;
+		for (const action of actions) {
+			if (action.target !== "finalReviewer") continue;
+			slot = action.slots[0] ? { ...action.slots[0] } : undefined;
+		}
+		return slot;
+	}
+
+	async function resolveCompareBaseModel(
+		prompt: PromptWithModel,
+		currentModel: Model<any> | undefined,
+		ctx: ExtensionCommandContext,
+		modelOverride?: string,
+	): Promise<Model<any> | undefined> {
+		const requestedModels = modelOverride ? [modelOverride] : prompt.models;
+		if (requestedModels.length > 0) {
+			const selected = await selectModelCandidate(requestedModels, currentModel, ctx.modelRegistry);
+			if (!selected) {
+				notify(ctx, `No available model from: ${requestedModels.join(", ")}`, "error");
+				return undefined;
+			}
+			return selected.model;
+		}
+		if (currentModel) return currentModel;
+		notify(ctx, `Prompt \`${prompt.name}\` requires an active model or a runtime --model override.`, "error");
+		return undefined;
+	}
+
+	function resolveCompareCwd(raw: string, ctx: ExtensionCommandContext): string {
+		return expandCwdPath(raw) ?? resolvePath(ctx.cwd, raw);
+	}
+
+	function normalizeLineupCwds(
+		slots: DelegationLineupSlot[],
+		defaultCwd: string,
+		ctx: ExtensionCommandContext,
+	): DelegationLineupSlot[] | undefined {
+		const normalized: DelegationLineupSlot[] = [];
+		for (const slot of slots) {
+			const slotCwd = slot.cwd ? resolveCompareCwd(slot.cwd, ctx) : defaultCwd;
+			if (!existsSync(slotCwd)) {
+				notify(ctx, `cwd directory does not exist: ${slotCwd}`, "error");
+				return undefined;
+			}
+			normalized.push({
+				...slot,
+				cwd: slotCwd,
+			});
+		}
+		return normalized;
+	}
+
+	function normalizeSingleSlotCwd(
+		slot: DelegationLineupSlot | undefined,
+		defaultCwd: string,
+		ctx: ExtensionCommandContext,
+	): DelegationLineupSlot | undefined {
+		if (!slot) return undefined;
+		const slotCwd = slot.cwd ? resolveCompareCwd(slot.cwd, ctx) : defaultCwd;
+		if (!existsSync(slotCwd)) {
+			notify(ctx, `cwd directory does not exist: ${slotCwd}`, "error");
+			return undefined;
+		}
+		return {
+			...slot,
+			cwd: slotCwd,
+		};
+	}
+
+	function formatCompareSlotLabel(slot: DelegationLineupSlot, fallbackAgent: string): string {
+		return slot.model ? `${fallbackAgent}, ${slot.model}` : fallbackAgent;
+	}
+
+	function renderComparePhaseResults(
+		label: string,
+		entries: Array<{ index: number; slot: DelegationLineupSlot; result: DelegatedPromptParallelResult }>,
+	): string {
+		return entries
+			.map(({ index, slot, result }) => {
+				const body = result.text || "(no assistant text)";
+				return `=== ${label} ${index + 1} (${formatCompareSlotLabel(slot, result.agent)}) ===\n${body}`;
+			})
+			.join("\n\n");
+	}
+
+	function formatPhaseFailureSummary(
+		label: string,
+		entries: Array<{ index: number; slot: DelegationLineupSlot; result: DelegatedPromptParallelResult }>,
+	): string | undefined {
+		if (entries.length === 0) return undefined;
+		return [
+			`[${label} failures]`,
+			...entries.map(({ index, slot, result }) =>
+				`- ${label} ${index + 1} (${formatCompareSlotLabel(slot, result.agent)}): ${result.errorText || "unknown delegated error"}`,
+			),
+		].join("\n");
+	}
+
+	function extractSuccessfulWorktreeChanges(aggregateText: string | undefined, successfulIndexes: number[]): string | undefined {
+		if (!aggregateText) return undefined;
+		const marker = "=== Worktree Changes ===";
+		const markerIndex = aggregateText.indexOf(marker);
+		if (markerIndex < 0) return undefined;
+		const worktreeText = aggregateText.slice(markerIndex + marker.length).trim();
+		if (!worktreeText) return undefined;
+		const successfulTaskNumbers = new Set(successfulIndexes.map((index) => index + 1));
+		const sections = worktreeText
+			.split(/\n(?=--- Task \d+ \()/)
+			.map((section) => section.trim())
+			.filter(Boolean)
+			.filter((section) => {
+				const match = section.match(/^--- Task (\d+) \(/);
+				return match ? successfulTaskNumbers.has(parseInt(match[1]!, 10)) : false;
+			});
+		if (sections.length === 0) return undefined;
+		return `${marker}\n\n${sections.join("\n\n")}`;
+	}
+
+	function buildReviewerPreamble(sharedTask: string, workerAggregation: string, workerFailureSummary?: string): string {
+		return [
+			"[Original implementation task]",
+			sharedTask,
+			"",
+			"[Worker outputs and worktree summaries]",
+			workerAggregation,
+			...(workerFailureSummary ? ["", workerFailureSummary] : []),
+		].join("\n");
+	}
+
+	function buildFinalReviewerPreamble(
+		sharedTask: string,
+		workerAggregation: string,
+		workerFailureSummary?: string,
+		reviewerAggregation?: string,
+		reviewerFailureSummary?: string,
+	): string {
+		return [
+			"[Original implementation task]",
+			sharedTask,
+			"",
+			"[Worker outputs and worktree summaries]",
+			workerAggregation,
+			...(workerFailureSummary ? ["", workerFailureSummary] : []),
+			"",
+			"[Reviewer outputs]",
+			reviewerAggregation ?? "All reviewer runs failed. Synthesize directly from the worker variants.",
+			...(reviewerFailureSummary ? ["", reviewerFailureSummary] : []),
+		].join("\n");
+	}
+
+	function buildLineupSlotTask(
+		baseTask: string,
+		slot: DelegationLineupSlot,
+		taskArgs: string[],
+	): string {
+		const effectiveBaseTask = slot.task ? substituteArgs(slot.task, taskArgs) : baseTask;
+		if (!slot.taskSuffix) return effectiveBaseTask;
+		return `${effectiveBaseTask}\n\n${substituteArgs(slot.taskSuffix, taskArgs)}`;
+	}
+
+	function buildComparePrompt(
+		base: PromptWithModel,
+		options: {
+			name: string;
+			agent: string;
+			task: string;
+			model?: string;
+			cwd: string;
+			inheritContext?: boolean;
+		},
+	): PromptWithModel {
+		return {
+			...base,
+			name: options.name,
+			content: options.task,
+			models: options.model ? [options.model] : [],
+			chain: undefined,
+			chainContext: undefined,
+			parallel: undefined,
+			worktree: undefined,
+			subagent: options.agent,
+			inheritContext: options.inheritContext ? true : undefined,
+			cwd: options.cwd,
+			workers: undefined,
+			reviewers: undefined,
+			finalReviewer: undefined,
+		};
+	}
+
+	async function runComparePrompt(
+		name: string,
+		prompt: PromptWithModel,
+		args: string,
+		ctx: ExtensionCommandContext,
+		currentModel: Model<any> | undefined,
+		runtime: { cwd?: string; model?: string; subagentOverride?: SubagentOverride; fork?: boolean },
+	) {
+		if (runtime.subagentOverride) {
+			notify(ctx, `--subagent is not supported for compare prompts (ignored)`, "warning");
+		}
+		if (runtime.fork) {
+			notify(ctx, `--fork is not supported for compare prompts (ignored)`, "warning");
+		}
+
+		const lineupExtraction = extractLineupOverrides(args);
+		if (lineupExtraction.errors.length > 0) {
+			for (const error of lineupExtraction.errors) {
+				notify(ctx, error, "error");
+			}
+			return;
+		}
+
+		let taskArgs = parseCommandArgs(lineupExtraction.args);
+		let compareCwd = runtime.cwd ?? prompt.cwd ?? ctx.cwd;
+		if (name === "parallel-patch-compare-at-path") {
+			if (taskArgs.length === 0) {
+				notify(ctx, "parallel-patch-compare-at-path requires a repo path as the first argument.", "error");
+				return;
+			}
+			if (runtime.cwd) {
+				notify(ctx, "--cwd is ignored for parallel-patch-compare-at-path (using first positional path).", "warning");
+			}
+			compareCwd = resolveCompareCwd(taskArgs[0]!, ctx);
+			taskArgs = taskArgs.slice(1);
+			if (taskArgs.length === 0) {
+				notify(ctx, "parallel-patch-compare-at-path requires an implementation task after the repo path.", "error");
+				return;
+			}
+		}
+
+		if (!existsSync(compareCwd)) {
+			notify(ctx, `cwd directory does not exist: ${compareCwd}`, "error");
+			return;
+		}
+
+		const baseModel = await resolveCompareBaseModel(prompt, currentModel, ctx, runtime.model);
+		if (!baseModel) return;
+
+		const rendered = renderPromptForResolvedModel(prompt, taskArgs, baseModel);
+		if (rendered.warning) notify(ctx, rendered.warning, "warning");
+		if (rendered.empty || !rendered.content) {
+			notify(ctx, rendered.empty ?? `Prompt \`${prompt.name}\` rendered to an empty message.`, "error");
+			return;
+		}
+		const sharedTask = rendered.content;
+
+		const requestedWorkers = applyLineupActions(prompt.workers, lineupExtraction.actions, "workers") ?? [];
+		const requestedReviewers = applyLineupActions(prompt.reviewers, lineupExtraction.actions, "reviewers") ?? [];
+		const requestedFinalReviewer = applyFinalReviewerAction(prompt.finalReviewer, lineupExtraction.actions);
+
+		const workerSlots = expandLineupCounts(
+			requestedWorkers.length > 0
+				? requestedWorkers
+				: [{ agent: DEFAULT_SUBAGENT_NAME }],
+		);
+		const reviewerSlots = expandLineupCounts(
+			requestedReviewers.length > 0
+				? requestedReviewers
+				: [{ agent: "reviewer" }],
+		);
+
+		const normalizedWorkers = normalizeLineupCwds(workerSlots, compareCwd, ctx);
+		if (!normalizedWorkers) return;
+		const normalizedReviewers = normalizeLineupCwds(reviewerSlots, compareCwd, ctx);
+		if (!normalizedReviewers) return;
+		const normalizedFinalReviewer = normalizeSingleSlotCwd(requestedFinalReviewer, compareCwd, ctx);
+		if (requestedFinalReviewer && !normalizedFinalReviewer) return;
+
+		if (prompt.worktree === true) {
+			const uniqueWorkerCwds = new Set(normalizedWorkers.map((slot) => slot.cwd));
+			if (uniqueWorkerCwds.size > 1) {
+				notify(ctx, "worktree compare runs require all worker slots to use the same cwd.", "error");
+				return;
+			}
+		}
+
+		try {
+			const workerResult = await executeSubagentPromptStep({
+				pi,
+				ctx,
+				currentModel: baseModel,
+				signal: ctx.signal,
+				worktree: prompt.worktree === true,
+				allowPartialFailures: true,
+				parallel: normalizedWorkers.map((slot, index) => ({
+					prompt: buildComparePrompt(prompt, {
+						name: `${prompt.name}-worker-${index + 1}`,
+						agent: slot.agent,
+						task: buildLineupSlotTask(sharedTask, slot, taskArgs),
+						model: slot.model,
+						cwd: slot.cwd!,
+						inheritContext: true,
+					}),
+					args: [],
+				})),
+			});
+			const workerPairs = (workerResult?.parallelResults ?? []).map((result, index) => ({
+				index,
+				slot: normalizedWorkers[index]!,
+				result,
+			}));
+			if (workerPairs.length === 0) return;
+			const successfulWorkers = workerPairs.filter((entry) => !entry.result.isError);
+			const failedWorkers = workerPairs.filter((entry) => entry.result.isError);
+			if (successfulWorkers.length === 0) {
+				notify(ctx, `Compare worker phase failed: all worker slots failed.`, "error");
+				return;
+			}
+			const successfulWorkerText = [
+				renderComparePhaseResults("Worker", successfulWorkers),
+				extractSuccessfulWorktreeChanges(workerResult.text, successfulWorkers.map((entry) => entry.index)),
+			]
+				.filter((value): value is string => Boolean(value))
+				.join("\n\n");
+			const workerFailureSummary = formatPhaseFailureSummary("Worker", failedWorkers);
+
+			const reviewerPreamble = buildReviewerPreamble(sharedTask, successfulWorkerText, workerFailureSummary);
+			const reviewerResult = await executeSubagentPromptStep({
+				pi,
+				ctx,
+				currentModel: baseModel,
+				signal: ctx.signal,
+				taskPreamble: reviewerPreamble,
+				allowPartialFailures: true,
+				parallel: normalizedReviewers.map((slot, index) => ({
+					prompt: buildComparePrompt(prompt, {
+						name: `${prompt.name}-reviewer-${index + 1}`,
+						agent: slot.agent,
+						task: buildLineupSlotTask(DEFAULT_COMPARE_REVIEWER_TASK, slot, taskArgs),
+						model: slot.model,
+						cwd: slot.cwd!,
+						inheritContext: false,
+					}),
+					args: [],
+				})),
+			});
+			const reviewerPairs = (reviewerResult?.parallelResults ?? []).map((result, index) => ({
+				index,
+				slot: normalizedReviewers[index]!,
+				result,
+			}));
+			if (reviewerPairs.length === 0) return;
+			const successfulReviewers = reviewerPairs.filter((entry) => !entry.result.isError);
+			const failedReviewers = reviewerPairs.filter((entry) => entry.result.isError);
+			const successfulReviewerText = successfulReviewers.length > 0
+				? renderComparePhaseResults("Reviewer", successfulReviewers)
+				: undefined;
+			const reviewerFailureSummary = formatPhaseFailureSummary("Reviewer", failedReviewers);
+
+			if (!normalizedFinalReviewer) {
+				if (!successfulReviewerText) {
+					notify(ctx, `Compare reviewer phase failed: all reviewer slots failed.`, "error");
+					return;
+				}
+				const finalText = reviewerFailureSummary
+					? `${successfulReviewerText}\n\n${reviewerFailureSummary}`
+					: successfulReviewerText;
+				pi.sendUserMessage(`[Compare review complete: ${name}]\n\n${finalText}`);
+				await waitForTurnStart(ctx);
+				await ctx.waitForIdle();
+				return;
+			}
+
+			const finalResult = await executeSubagentPromptStep({
+				pi,
+				ctx,
+				currentModel: baseModel,
+				signal: ctx.signal,
+				taskPreamble: buildFinalReviewerPreamble(
+					sharedTask,
+					successfulWorkerText,
+					workerFailureSummary,
+					successfulReviewerText,
+					reviewerFailureSummary,
+				),
+				prompt: buildComparePrompt(prompt, {
+					name: `${prompt.name}-final-reviewer`,
+					agent: normalizedFinalReviewer.agent,
+					task: buildLineupSlotTask(DEFAULT_COMPARE_FINAL_REVIEWER_TASK, normalizedFinalReviewer, taskArgs),
+					model: normalizedFinalReviewer.model,
+					cwd: normalizedFinalReviewer.cwd!,
+					inheritContext: false,
+				}),
+				args: [],
+			});
+			if (!finalResult?.text) return;
+			pi.sendUserMessage(`[Compare review complete: ${name}]\n\n${finalResult.text}`);
+			await waitForTurnStart(ctx);
+			await ctx.waitForIdle();
+		} catch (error) {
+			notify(ctx, error instanceof Error ? error.message : String(error), "error");
+		}
+	}
+
 	async function runPromptLoop(
 		name: string,
 		cleanedArgs: string,
@@ -554,7 +1042,14 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		subagentOverride?: SubagentOverride,
 		cwdOverride?: string,
 		chainContextEnabled = false,
+		chainTemplateWorktree = false,
+		cliWorktree = false,
 	) {
+		let worktreeEnabled = chainTemplateWorktree || cliWorktree;
+		if (worktreeEnabled && !steps.some(isParallelChainStep)) {
+			notify(ctx, `--worktree ignored: chain has no parallel() steps`, "warning");
+			worktreeEnabled = false;
+		}
 		const flattenChainSteps = (): ChainStep[] => {
 			const flattened: ChainStep[] = [];
 			for (const step of steps) {
@@ -709,12 +1204,14 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 								ctx,
 								currentModel,
 								override: subagentOverride,
+								signal: ctx.signal,
 								inheritedModel: chainInheritedModel,
 								parallel: stepTemplate.tasks.map((task) => ({
 									prompt: task.prompt,
 									args: task.args.length > 0 ? task.args : sharedArgs,
 								})),
 								taskPreamble,
+								worktree: worktreeEnabled,
 							});
 						} catch (error) {
 							notify(ctx, error instanceof Error ? error.message : String(error), "error");
@@ -731,7 +1228,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 						currentModel = getCurrentModel(ctx);
 						currentThinking = pi.getThinkingLevel();
 						const stepEntries = getIterationEntries(ctx, stepStartId);
-						if (didIterationMakeChanges(stepEntries)) iterationChanged = true;
+						if (delegated.changed) iterationChanged = true;
 						chainStepSummaries.push(generateChainStepSummary(stepEntries, stepLabel, stepNumber));
 						continue;
 					}
@@ -901,11 +1398,31 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 		const argsWithoutSubagent = subagent.args;
 
+		const hasCompareLineup = prompt.workers !== undefined || prompt.reviewers !== undefined || prompt.finalReviewer !== undefined;
+		if (hasCompareLineup) {
+			await runComparePrompt(
+				name,
+				prompt,
+				argsWithoutSubagent,
+				ctx,
+				getCurrentModel(ctx),
+				{
+					cwd: runtimeCwd,
+					model: subagent.model,
+					subagentOverride: subagent.override,
+					fork: subagent.fork,
+				},
+			);
+			return;
+		}
+
 		if (prompt.chain) {
 			if (subagent.model) notify(ctx, `--model is not supported on chain prompts (ignored)`, "warning");
 			if (subagent.fork) notify(ctx, `--fork is not supported on chain prompts (ignored)`, "warning");
-			const extracted = extractChainContextFlag(argsWithoutSubagent);
+			const worktreeExtraction = extractWorktreeFlag(argsWithoutSubagent);
+			const extracted = extractChainContextFlag(worktreeExtraction.args);
 			const chainContextEnabled = extracted.chainContext || prompt.chainContext === "summary";
+			const cliWorktree = worktreeExtraction.worktree;
 			const loop = extractLoopCount(extracted.args);
 			let totalIterations: number | null = prompt.loop !== undefined ? prompt.loop : 1;
 			let fresh = false;
@@ -946,6 +1463,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				subagent.override,
 				cwdOverride,
 				chainContextEnabled,
+				prompt.worktree === true,
+				cliWorktree,
 			);
 			return;
 		}
@@ -1097,7 +1616,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			notify(ctx, `Invalid --cwd path: must be absolute`, "error");
 			return;
 		}
-		const extracted = extractChainContextFlag(subagent.args);
+		const worktreeExtraction = extractWorktreeFlag(subagent.args);
+		const extracted = extractChainContextFlag(worktreeExtraction.args);
 		const loop = extractLoopCount(extracted.args);
 		const cleanedArgs = loop ? loop.args : extracted.args;
 
@@ -1122,6 +1642,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			subagent.override,
 			runtimeCwd,
 			extracted.chainContext,
+			false,
+			worktreeExtraction.worktree,
 		);
 	}
 

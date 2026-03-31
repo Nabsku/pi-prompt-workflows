@@ -73,6 +73,7 @@ All fields are optional. Templates that don't use any extension features (no `mo
 | `rotate` | `false` | When `true` and looping, cycle through models in the `model` list instead of using fallback semantics. Thinking levels can also be comma-separated to pair with each model. |
 | `fresh` | `false` | When looping, collapse the conversation between iterations to a brief summary instead of carrying the full context forward. Saves tokens on long loops. |
 | `converge` | `true` | When looping, stop early if an iteration makes no file changes. Set `false` to always run every iteration. |
+| `worktree` | `false` | When `true`, parallel delegated work runs in separate git worktrees. Valid on chain templates with `parallel()` steps, on delegated prompts with `parallel: N`, and on compare lineups (`workers` / `reviewers`). |
 
 ### Delegation
 
@@ -80,7 +81,10 @@ All fields are optional. Templates that don't use any extension features (no `mo
 |-------|---------|--------------|
 | `subagent` | — | Delegate execution to a subagent instead of running in the current session. `true` uses the default `delegate` agent; a string value like `reviewer` targets that specific agent. Requires [pi-subagents](https://github.com/nicobailon/pi-subagents/). |
 | `inheritContext` | `false` | Only meaningful with `subagent`. When `true`, the subagent receives a fork of the current conversation context instead of starting fresh. |
-| `cwd` | — | Working directory for delegated subagent subprocesses. Must be an absolute path (`~/...` is expanded). Valid with `subagent`, and also on chain templates as the default cwd for delegated steps. |
+| `parallel` | — | Delegated prompts only. Repeats the same subagent in parallel `N` times. Each copy gets a slot header like `[Parallel subagent 2/3]` prepended to the task. Must be an integer greater than or equal to 2. |
+| `workers` | — | Compare templates only. Ordered worker lineup used for the worker phase. Each slot object supports either `subagent` (preferred) or `agent`, plus optional `model`, `task`, `taskSuffix`, `cwd`, and `count`. `subagent: true` maps to the default worker agent (`delegate`). Duplicate slots are preserved as distinct runs, and `count: N` expands one slot into N identical runs. |
+| `reviewers` | — | Compare templates only. Ordered reviewer lineup used after worker aggregation. Each slot object supports either `subagent` (preferred) or `agent`, plus optional `model`, `task`, `taskSuffix`, `cwd`, and `count`. `subagent: true` maps to the default reviewer agent (`reviewer`). |
+| `cwd` | — | Working directory for delegated subagent subprocesses. Must be an absolute path (`~/...` is expanded). Valid with `subagent`, on chain templates as the default cwd for delegated steps, and on compare lineups as the default slot cwd. |
 
 ## Model Format
 
@@ -238,6 +242,21 @@ Use url in the prompt to take screenshot: $@
 
 The subagent process runs with `/tmp/screenshots` as its working directory. Paths must be absolute (`~/...` is expanded). The directory is validated at execution time.
 
+To fan the same delegated prompt out to multiple copies in parallel, add `parallel: N`:
+
+```markdown
+---
+model: anthropic/claude-sonnet-4-20250514
+subagent: simplifier
+inheritContext: true
+parallel: 3
+worktree: true
+---
+Review changed code and fix any issues found.
+```
+
+This expands to three parallel `pi-subagents` tasks targeting the same agent. Each one receives the same rendered prompt plus an automatic slot header like `[Parallel subagent 1/3]`, `[Parallel subagent 2/3]`, and `[Parallel subagent 3/3]` so the body can assign different roles to each copy. `worktree: true` is optional here and gives each parallel run its own git worktree.
+
 During execution, a live progress widget appears above the editor showing elapsed time, tool count, token usage, and the current tool. When the run finishes, it's replaced by a completion card with the task preview, tool call history, output, and usage stats.
 
 You can override delegation at runtime per invocation with `--subagent`, `--subagent=<name>`, `--subagent:<name>`, or `--cwd=<path>`. `--cwd=<path>` must be absolute after optional `~/...` expansion. Runtime flags take precedence for that invocation only.
@@ -252,6 +271,87 @@ Two additional runtime flags work for any prompt (not just delegated ones):
 /double-check --fork --subagent:worker
 /deslop --model=openai/gpt-5.4 --loop 3
 ```
+
+Compare templates also accept runtime lineup overrides:
+
+- `--workers=<json-array>` / `--reviewers=<json-array>` replace the corresponding frontmatter lineup.
+- `--workers-append=<json-array>` / `--reviewers-append=<json-array>` append to the corresponding lineup.
+
+Each JSON array entry must be an object with either `subagent` or `agent`, plus optional `model`, `task`, `taskSuffix`, `cwd`, and `count`. In worker slots, `"subagent": true` maps to `delegate`. In reviewer slots, `"subagent": true` maps to `reviewer`. `--final-reviewer=` accepts one slot object (or a one-element array) with the same shape except `count` is not supported.
+
+## Best-of-N Compare Prompt
+
+This repo ships one example compare prompt under `examples/`:
+
+- `examples/best-of-n.md` installs as `/best-of-n`, runs in the current repo, and shows mixed workers, mixed reviewers, and an optional final arbiter.
+- Smoke test: `/best-of-n smoke test`.
+best-of-n smoke test
+
+Install them manually from this repo checkout (or from the installed package directory):
+
+```bash
+PTM_DIR=/path/to/pi-prompt-template-model
+mkdir -p ~/.pi/agent/prompts
+cp "$PTM_DIR/examples/best-of-n.md" ~/.pi/agent/prompts/best-of-n.md
+```
+
+After copying the file, restart `pi` if it is already running. The prompt then runs an explicit compare flow:
+
+1. Worker phase: run the worker lineup in parallel (`context: fork`), preserving duplicate lineup slots.
+2. Continue as long as at least one worker succeeds. Reviewers see only the successful worker variants plus a short worker-failure summary.
+3. Reviewer phase: run reviewer slots over the same aggregated worker output.
+4. Continue as long as at least one reviewer succeeds. If `finalReviewer` is configured, it receives the successful reviewer outputs plus failure summaries and produces one final synthesis.
+5. If all reviewers fail but `finalReviewer` exists, it falls back to synthesizing directly from the successful worker variants.
+
+Worker/reviewer lineups are fully configurable from frontmatter or runtime overrides, so there is no fixed three-model worker assumption. If a compare prompt omits `workers`, it falls back to one `delegate` worker using the current/main model. If it omits `reviewers`, it falls back to one `reviewer` slot. `finalReviewer` is optional.
+
+For same-model best-of-N, use `count: N` on one worker slot:
+
+```yaml
+workers:
+  - subagent: true
+    model: openai-codex/gpt-5.4:low
+    count: 4
+```
+
+You can also mix models and give each slot its own count:
+
+```yaml
+workers:
+  - subagent: true
+    model: openai-codex/gpt-5.4:low
+    count: 3
+  - subagent: true
+    model: google/gemini-2.5-pro:medium
+    count: 2
+  - subagent: true
+    model: openrouter/deepseek/deepseek-r1:low
+```
+
+Reviewer slots support the same lineup shape, and `finalReviewer` is one optional single-slot arbiter:
+
+```yaml
+reviewers:
+  - subagent: true
+    model: openai-codex/gpt-5.4:low
+    count: 2
+  - subagent: true
+    model: google/gemini-2.5-pro:medium
+    taskSuffix: Focus on regression risk.
+
+finalReviewer:
+  subagent: true
+  model: anthropic/claude-sonnet-4-20250514:high
+  taskSuffix: Produce one seamless final recommendation.
+```
+
+Within a compare lineup, use `subagent` in docs/examples unless you specifically want the low-level normalized `agent` form. `subagent: true` means “use the default slot agent”: `delegate` in `workers`, `reviewer` in `reviewers`. You can still spell the agent name explicitly, for example `subagent: reviewer`.
+
+Explicitly repeating the same slot still works, but `count: N` is the cleaner shorthand when the slot is identical.
+
+Within a compare lineup, use `task` for a full per-slot override and `taskSuffix` for a small per-slot append. `taskSuffix` is added after the shared worker task (or after the slot's `task` if you set one), which makes it the better fit for things like per-model output file names.
+
+When a compare prompt uses `worktree: true`, all worker slots must resolve to the same `cwd`. Mixed worker `cwd` values are only allowed when worktree isolation is off.
 
 ## Loop Execution
 
@@ -389,9 +489,20 @@ chain: parallel(scan-frontend, scan-backend) -> consolidate
 
 Each entry inside `parallel(...)` runs as a delegated subagent task concurrently. Parallel entries can include per-step args (for example `parallel(scan-frontend, scan-backend "auth")`), but per-step `--loop` is not supported inside parallel groups. Nested `parallel(...)` is rejected. Parallel entries must be delegated templates (`subagent: ...` or runtime `--subagent` override), and all entries in the same parallel group must resolve to the same `inheritContext` mode and `cwd`.
 
+Add `worktree: true` (or `--worktree` at runtime) so each parallel subagent runs in its own git worktree, avoiding file conflicts when agents edit concurrently:
+
+```markdown
+---
+chain: parallel(scan-frontend, scan-backend) -> consolidate
+worktree: true
+---
+```
+
+`worktree` requires a chain with at least one `parallel()` step. The flag is passed to pi-subagents, which handles worktree creation and cleanup.
+
 Steps with a `model` field use their own model. Steps without one inherit a snapshot of whatever model was active when the chain started — not the previous step's model. This keeps behavior deterministic regardless of what earlier steps do.
 
-Chain templates support `loop`, `fresh`, `converge`, `restore`, and `cwd` in their frontmatter for controlling the overall execution:
+Chain templates support `loop`, `fresh`, `converge`, `restore`, `worktree`, and `cwd` in their frontmatter for controlling the overall execution:
 
 ```markdown
 ---
@@ -439,6 +550,7 @@ Parallel groups work in `/chain-prompts` too:
 
 ```
 /chain-prompts parallel(scan-fe, scan-be) -> review
+/chain-prompts parallel(scan-fe, scan-be) -> review --worktree
 ```
 
 Looping applies to the entire chain:

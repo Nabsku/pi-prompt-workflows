@@ -15,6 +15,7 @@ export interface DelegatedSubagentTask {
 	agent: string;
 	task: string;
 	model?: string;
+	cwd?: string;
 }
 
 export interface DelegatedSubagentParallelResult {
@@ -32,6 +33,7 @@ export interface DelegatedSubagentRequest {
 	context: "fresh" | "fork";
 	model: string;
 	cwd: string;
+	worktree?: boolean;
 }
 
 export interface DelegatedSubagentResponse {
@@ -43,6 +45,7 @@ export interface DelegatedSubagentResponse {
 	cwd: string;
 	messages: unknown[];
 	parallelResults?: DelegatedSubagentParallelResult[];
+	contentText?: string;
 	isError: boolean;
 	errorText?: string;
 }

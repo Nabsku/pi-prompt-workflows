@@ -1,5 +1,4 @@
 import type { Model } from "@mariozechner/pi-ai";
-import type { ModelRegistry } from "@mariozechner/pi-coding-agent";
 import type { ResolvedModelRef } from "./template-conditionals.js";
 
 const PREFERRED_PROVIDERS = ["openai-codex", "anthropic", "github-copilot", "openrouter"];
@@ -9,7 +8,14 @@ export interface SelectedModelCandidate {
 	alreadyActive: boolean;
 }
 
-type RegistryLike = Pick<ModelRegistry, "find" | "getAll" | "getAvailable" | "getApiKey" | "isUsingOAuth">;
+export interface RegistryLike {
+	find(provider: string, modelId: string): Model<any> | undefined;
+	getAll(): Model<any>[];
+	getAvailable(): Model<any>[];
+	isUsingOAuth(model: Model<any>): boolean;
+	hasConfiguredAuth?: (model: Model<any>) => boolean;
+	getApiKey?: (model: Model<any>) => Promise<string | undefined>;
+}
 
 function isSameModel(a: Model<any>, b: Model<any>): boolean {
 	return a.provider === b.provider && a.id === b.id;
@@ -51,7 +57,7 @@ function orderMatchesByProviderPreference(models: Model<any>[]): Model<any>[] {
 	return prioritized;
 }
 
-function getModelCandidates(modelSpec: string, registry: Pick<ModelRegistry, "find" | "getAll">): Model<any>[] {
+function getModelCandidates(modelSpec: string, registry: Pick<RegistryLike, "find" | "getAll">): Model<any>[] {
 	const slashIndex = modelSpec.indexOf("/");
 
 	if (slashIndex !== -1) {
@@ -71,7 +77,9 @@ async function hasUsableAuth(model: Model<any>, registry: RegistryLike): Promise
 	const availableMatch = registry.getAvailable().some((candidate) => isSameModel(candidate, model));
 	if (availableMatch) return true;
 	if (!registry.isUsingOAuth(model)) return false;
-	return Boolean(await registry.getApiKey(model));
+	if (registry.hasConfiguredAuth) return registry.hasConfiguredAuth(model);
+	if (registry.getApiKey) return Boolean(await registry.getApiKey(model));
+	return false;
 }
 
 export async function selectModelCandidate(
