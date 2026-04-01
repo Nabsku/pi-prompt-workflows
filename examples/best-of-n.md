@@ -1,5 +1,5 @@
 ---
-description: Best-of-N parallel implementation compare in the current repo with one openai-codex lineup plus an optional final apply phase (worktree needs a clean repo)
+description: Best-of-N code task with parallel workers using different models in separate worktrees, parallel reviewers, and a final apply step that picks or synthesizes the final patch.
 # Usage: /best-of-n fix the flaky auth test
 # Usage: /best-of-n implement the plan: /path/to/plan.md
 bestOfN:
