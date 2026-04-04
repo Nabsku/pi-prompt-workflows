@@ -62,6 +62,8 @@ export function createToolManager(pi: ExtensionAPI, deps: ToolManagerDeps) {
 				"--fresh for context collapse between iterations, and --no-converge to disable early stopping for bounded loops. " +
 				"Supports runtime delegation override via --subagent, --subagent=<name>, or --subagent:<name>. " +
 				"Use 'chain-prompts template1 -> template2' for chaining and add --chain-context to pass previous step summaries into delegated steps.",
+			promptSnippet:
+				"Use this to run slash/prompt templates by name with args (including --loop/--fresh and chain-prompts flows) when the user asks to execute a prompt template.",
 			parameters: Type.Object({
 				command: Type.String({
 					description: "Template name and arguments (e.g. 'deslop --loop 5 --fresh', 'deslop --subagent:worker', 'deslop --subagent', 'chain-prompts analyze -> fix --chain-context', 'chain-prompts analyze -> fix --loop=3')",

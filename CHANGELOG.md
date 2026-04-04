@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-04-04
+
+### Changed
+- Added a `promptSnippet` for `run-prompt` so Pi 0.59+ includes it in the default tool prompt section and keeps prompt-template execution discoverable in agent turns.
+
 ## [0.7.1] - 2026-04-03
 
 ### Changed
