@@ -1016,6 +1016,26 @@ test("chain-prompts rejects empty step segments", async () => {
 	});
 });
 
+test("chain-prompts resolves plain non-extension prompts", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "double-check.md"), '---\ndescription: "plain"\n---\nDOUBLE:$@');
+		writeFileSync(join(cwd, ".pi", "prompts", "deslop.md"), '---\ndescription: "plain"\n---\nDESLOP:$@');
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const { ctx } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+
+		const chainPrompts = pi.commands.get("chain-prompts");
+		assert.ok(chainPrompts);
+		await chainPrompts.handler("double-check -> deslop -- file.ts", ctx);
+
+		assert.deepEqual(pi.userMessages, ["DOUBLE:file.ts", "DESLOP:file.ts"]);
+	});
+});
+
 test("chain templates use step args first and fall back to shared CLI args", async () => {
 	await withTempHome(async (root) => {
 		const cwd = join(root, "project");

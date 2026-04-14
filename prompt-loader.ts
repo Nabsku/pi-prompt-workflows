@@ -926,6 +926,7 @@ function normalizeThinkingLevels(
 function loadPromptsWithModelFromDir(
 	dir: string,
 	source: PromptSource,
+	includePlainPrompts: boolean,
 	subdir = "",
 	visitedDirectories = new Set<string>(),
 ): { prompts: PromptWithModel[]; diagnostics: PromptLoaderDiagnostic[] } {
@@ -993,7 +994,7 @@ function loadPromptsWithModelFromDir(
 
 			if (isDirectory) {
 				const nextSubdir = subdir ? `${subdir}:${entry.name}` : entry.name;
-				const nested = loadPromptsWithModelFromDir(fullPath, source, nextSubdir, visitedDirectories);
+				const nested = loadPromptsWithModelFromDir(fullPath, source, includePlainPrompts, nextSubdir, visitedDirectories);
 				prompts.push(...nested.prompts);
 				diagnostics.push(...nested.diagnostics);
 				continue;
@@ -1260,7 +1261,7 @@ function loadPromptsWithModelFromDir(
 					subagent !== undefined ||
 					safeInheritContext ||
 					hasModelConditionalDirectives;
-				if (!chain && !hasModelField && !hasExtensionSpecificConfig) {
+				if (!chain && !hasModelField && !hasExtensionSpecificConfig && !includePlainPrompts) {
 					continue;
 				}
 
@@ -1316,7 +1317,7 @@ function loadPromptsWithModelFromDir(
 	return { prompts, diagnostics };
 }
 
-export function loadPromptsWithModel(cwd: string): LoadPromptsWithModelResult {
+export function loadPromptsWithModel(cwd: string, includePlainPrompts = false): LoadPromptsWithModelResult {
 	const globalDir = join(homedir(), ".pi", "agent", "prompts");
 	const projectDir = resolve(cwd, ".pi", "prompts");
 	const promptMap = new Map<string, PromptWithModel>();
@@ -1344,13 +1345,13 @@ export function loadPromptsWithModel(cwd: string): LoadPromptsWithModelResult {
 		promptMap.set(prompt.name, prompt);
 	}
 
-	const globalResult = loadPromptsWithModelFromDir(globalDir, "user");
+	const globalResult = loadPromptsWithModelFromDir(globalDir, "user", includePlainPrompts);
 	diagnostics.push(...globalResult.diagnostics);
 	for (const prompt of globalResult.prompts) {
 		addPrompt(prompt);
 	}
 
-	const projectResult = loadPromptsWithModelFromDir(projectDir, "project");
+	const projectResult = loadPromptsWithModelFromDir(projectDir, "project", includePlainPrompts);
 	diagnostics.push(...projectResult.diagnostics);
 	for (const prompt of projectResult.prompts) {
 		addPrompt(prompt);

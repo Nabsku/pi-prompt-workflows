@@ -115,6 +115,21 @@ test("loadPromptsWithModel ignores generic prompts without model or extension fe
 	});
 });
 
+test("loadPromptsWithModel can include plain prompts for chain resolution without changing default loading", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "review.md"), '---\ndescription: "plain prompt"\n---\nbody');
+
+		const defaultResult = loadPromptsWithModel(cwd);
+		const chainResult = loadPromptsWithModel(cwd, true);
+
+		assert.equal(defaultResult.prompts.has("review"), false);
+		assert.equal(chainResult.prompts.get("review")?.content, "body");
+		assert.deepEqual(chainResult.prompts.get("review")?.models, []);
+	});
+});
+
 test("loadPromptsWithModel keeps model-less prompts that use inline model conditionals", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");

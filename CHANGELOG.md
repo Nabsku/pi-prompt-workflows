@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-04-14
+
+### Fixed
+- `/chain-prompts` and chain templates now resolve plain prompt files without extension-specific frontmatter, so standard prompts like `double-check -> deslop` work in chain execution.
+- Added regression coverage for plain-prompt chain resolution while keeping ordinary prompt-template command registration unchanged.
+
 ## [0.7.2] - 2026-04-04
 
 ### Changed

@@ -92,6 +92,7 @@ const DEFAULT_COMPARE_FINAL_APPLIER_TASK = [
 
 export default function promptModelExtension(pi: ExtensionAPI) {
 	let prompts = new Map<string, PromptWithModel>();
+	let chainPrompts = new Map<string, PromptWithModel>();
 	let previousModel: Model<any> | undefined;
 	let previousThinking: ThinkingLevel | undefined;
 	let pendingSkillMessage: PendingSkillMessage | undefined;
@@ -136,7 +137,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 	function refreshPrompts(cwd: string, ctx?: ExtensionContext) {
 		const result = loadPromptsWithModel(cwd);
+		const chainResult = loadPromptsWithModel(cwd, true);
 		prompts = result.prompts;
+		chainPrompts = chainResult.prompts;
 
 		for (const name of prompts.keys()) {
 			registerPromptCommand(name);
@@ -1057,7 +1060,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 		const validateChainSteps = (): boolean => {
 			const flattened = flattenChainSteps();
-			const missingTemplates = flattened.filter((step) => !prompts.has(step.name));
+			const missingTemplates = flattened.filter((step) => !chainPrompts.has(step.name));
 			if (missingTemplates.length > 0) {
 				notify(ctx, `Templates not found: ${missingTemplates.map((step) => step.name).join(", ")}`, "error");
 				return false;
@@ -1074,7 +1077,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 							notify(ctx, `Step "${parallelStep.name}" in parallel() does not support per-task --with-context.`, "error");
 							return false;
 						}
-						const stepPrompt = prompts.get(parallelStep.name);
+						const stepPrompt = chainPrompts.get(parallelStep.name);
 						if (!stepPrompt) continue;
 						if (stepPrompt.chain) {
 							notify(ctx, `Step "${parallelStep.name}" is a chain template. Chain nesting is not supported.`, "error");
@@ -1088,7 +1091,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					continue;
 				}
 
-				const stepPrompt = prompts.get(step.name);
+				const stepPrompt = chainPrompts.get(step.name);
 				if (!stepPrompt) continue;
 				if (stepPrompt.chain) {
 					notify(ctx, `Step "${step.name}" is a chain template. Chain nesting is not supported.`, "error");
@@ -1147,7 +1150,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 								name: item.name,
 								args: item.args,
 								prompt: {
-									...prompts.get(item.name)!,
+									...chainPrompts.get(item.name)!,
 									...(cwdOverride ? { cwd: cwdOverride } : {}),
 								},
 							})),
@@ -1156,7 +1159,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 							kind: "single" as const,
 							singleStep: {
 								prompt: {
-									...prompts.get(step.name)!,
+									...chainPrompts.get(step.name)!,
 									...(cwdOverride ? { cwd: cwdOverride } : {}),
 								},
 								stepArgs: step.args,
