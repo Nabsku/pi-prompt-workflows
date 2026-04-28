@@ -47,10 +47,13 @@ function isValidSpec(spec: string): boolean {
 		return segments.length === 2 && segments[0].length > 0 && segments[1] === "*";
 	}
 
-	const segments = spec.split("/");
-	if (segments.length === 1) return true;
-	if (segments.length !== 2) return false;
-	return segments[0].length > 0 && segments[1].length > 0;
+	const slashIndex = spec.indexOf("/");
+	if (slashIndex === -1) return true;
+	if (slashIndex === 0) return false;
+	const modelId = spec.slice(slashIndex + 1);
+	if (modelId.length === 0) return false;
+	if (modelId.split("/").some((segment) => segment.length === 0)) return false;
+	return true;
 }
 
 function matchSpec(spec: string, model: ResolvedModelRef): boolean {

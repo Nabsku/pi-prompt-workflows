@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-04-28
+
+### Fixed
+- Prompt templates now accept provider-qualified model IDs that contain additional slashes, such as `openrouter/openai/gpt-5.4`, across prompt loading, model selection, compare lineups, and `<if-model>` conditionals.
+
 ## [0.9.1] - 2026-04-26
 
 ### Fixed

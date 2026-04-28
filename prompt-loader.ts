@@ -150,10 +150,13 @@ function normalizeStringField(
 function isValidModelSelectionSpec(spec: string): boolean {
 	if (!spec || spec.includes("*") || /\s/.test(spec)) return false;
 
-	const segments = spec.split("/");
-	if (segments.length === 1) return true;
-	if (segments.length !== 2) return false;
-	return segments[0].length > 0 && segments[1].length > 0;
+	const slashIndex = spec.indexOf("/");
+	if (slashIndex === -1) return true;
+	if (slashIndex === 0) return false;
+	const modelId = spec.slice(slashIndex + 1);
+	if (modelId.length === 0) return false;
+	if (modelId.split("/").some((segment) => segment.length === 0)) return false;
+	return true;
 }
 
 function normalizeFrontmatterRecord(

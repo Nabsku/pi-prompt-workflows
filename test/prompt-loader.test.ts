@@ -199,6 +199,49 @@ test("loadPromptsWithModel rejects invalid model declarations up front", () => {
 	});
 });
 
+test("loadPromptsWithModel accepts provider-qualified model specs with additional slashes in model ids", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "nested-model.md"), '---\nmodel: openrouter/openai/gpt-5.4\n---\nbody');
+
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.has("nested-model"), true);
+		assert.deepEqual(result.prompts.get("nested-model")?.models, ["openrouter/openai/gpt-5.4"]);
+		assert.equal(result.diagnostics.length, 0);
+	});
+});
+
+test("loadPromptsWithModel accepts nested provider-qualified model specs in bestOfN lineups", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "compare-nested-model.md"),
+			[
+				"---",
+				"bestOfN:",
+				"  workers:",
+				"    - model: openrouter/openai/gpt-5.4",
+				"  reviewers:",
+				"    - model: openrouter/openai/gpt-5.4",
+				"  finalApplier:",
+				"    model: openrouter/openai/gpt-5.4",
+				"---",
+				"$@",
+			].join("\n"),
+		);
+
+		const result = loadPromptsWithModel(cwd);
+		const prompt = result.prompts.get("compare-nested-model");
+		assert.ok(prompt);
+		assert.equal(prompt.workers?.[0]?.model, "openrouter/openai/gpt-5.4");
+		assert.equal(prompt.reviewers?.[0]?.model, "openrouter/openai/gpt-5.4");
+		assert.equal(prompt.finalApplier?.model, "openrouter/openai/gpt-5.4");
+		assert.equal(result.diagnostics.length, 0);
+	});
+});
+
 test("loadPromptsWithModel rejects model declarations with internal whitespace", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
@@ -207,6 +250,24 @@ test("loadPromptsWithModel rejects model declarations with internal whitespace",
 
 		const result = loadPromptsWithModel(cwd);
 		assert.equal(result.prompts.has("bad-space"), false);
+		assert.match(result.diagnostics.map((item) => item.message).join("\n"), /invalid model spec/i);
+	});
+});
+
+test("loadPromptsWithModel rejects provider-qualified model specs with empty path segments", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "bad-leading-slash.md"), '---\nmodel: /model\n---\nbody');
+		writeFileSync(join(cwd, ".pi", "prompts", "bad-empty-model-id.md"), '---\nmodel: provider/\n---\nbody');
+		writeFileSync(join(cwd, ".pi", "prompts", "bad-double-slash.md"), '---\nmodel: openrouter//gpt\n---\nbody');
+		writeFileSync(join(cwd, ".pi", "prompts", "bad-trailing-slash.md"), '---\nmodel: openrouter/gpt/\n---\nbody');
+
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.has("bad-leading-slash"), false);
+		assert.equal(result.prompts.has("bad-empty-model-id"), false);
+		assert.equal(result.prompts.has("bad-double-slash"), false);
+		assert.equal(result.prompts.has("bad-trailing-slash"), false);
 		assert.match(result.diagnostics.map((item) => item.message).join("\n"), /invalid model spec/i);
 	});
 });

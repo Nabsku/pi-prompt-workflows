@@ -16,6 +16,13 @@ test("renderTemplateConditionals matches exact provider, bare id, and provider w
 	assert.equal(result.error, undefined);
 });
 
+test("renderTemplateConditionals matches explicit provider specs whose model ids contain slashes", () => {
+	const template = '<if-model is="openrouter/openai/gpt-5.4">match</if-model><if-model is="openrouter/*">fallback</if-model>';
+	const result = renderTemplateConditionals(template, { provider: "openrouter", id: "openai/gpt-5.4" }, "demo");
+	assert.equal(result.content, "matchfallback");
+	assert.equal(result.error, undefined);
+});
+
 test("renderTemplateConditionals supports comma-separated lists, nesting, and else branches", () => {
 	// Correct syntax: <else> is a separator, no </else> closing tag
 	const template = '<if-model is="openai/gpt-5.2, anthropic/*">A<if-model is="claude-sonnet-4-20250514">B</if-model><else>C</if-model>';
@@ -54,6 +61,16 @@ test("renderTemplateConditionals rejects specs with internal whitespace", () => 
 	const result = renderTemplateConditionals(template, model, "demo");
 	assert.equal(result.content, template);
 	assert.match(result.error ?? "", /Invalid model spec/);
+});
+
+test("renderTemplateConditionals rejects provider-qualified specs with empty path segments", () => {
+	const specs = ["/model", "provider/", "openrouter//gpt", "openrouter/gpt/"];
+	for (const spec of specs) {
+		const template = `<if-model is="${spec}">bad</if-model>`;
+		const result = renderTemplateConditionals(template, model, "demo");
+		assert.equal(result.content, template);
+		assert.match(result.error ?? "", /Invalid model spec/);
+	}
 });
 
 test("renderTemplateConditionals ignores literal tags that merely share a directive prefix", () => {

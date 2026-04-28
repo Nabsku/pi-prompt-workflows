@@ -64,6 +64,32 @@ test("selectModelCandidate skips explicit providers without auth before later fa
 	assert.deepEqual(selected?.model, models[1]);
 });
 
+test("selectModelCandidate resolves explicit provider specs when the model id contains slashes", async () => {
+	const models = [
+		{ provider: "openrouter", id: "openai/gpt-5.4" },
+	];
+	const registry = createRegistry(models, models);
+
+	const selected = await selectModelCandidate(["openrouter/openai/gpt-5.4"], undefined, registry as never);
+	assert.deepEqual(selected?.model, models[0]);
+	assert.equal(selected?.alreadyActive, false);
+});
+
+test("selectModelCandidate rejects explicit provider specs with empty model-id path segments", async () => {
+	const models = [
+		{ provider: "openrouter", id: "openai/gpt-5.4" },
+	];
+	const registry = createRegistry(models, models);
+
+	const selected = await selectModelCandidate([
+		"/model",
+		"provider/",
+		"openrouter//gpt",
+		"openrouter/gpt/",
+	], undefined, registry as never);
+	assert.equal(selected, undefined);
+});
+
 test("selectModelCandidate prefers available providers for ambiguous bare ids", async () => {
 	const models = [
 		{ provider: "openrouter", id: "claude-haiku-4-5" },
