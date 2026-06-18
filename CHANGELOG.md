@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.11.0](https://github.com/Nabsku/pi-prompt-template-model-enhanced/compare/v0.10.0...v0.11.0) (2026-06-18)
+
+
+### Features
+
+* --loop execution, chain templates, fresh context, run-prompt tool ([4c8d202](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/4c8d202defa6fc105bf7cbc49c65183b890006e7))
+* add /chain command for sequential template orchestration ([3370d98](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/3370d9805036c634bb9bb6f9aa86bf85e5e4f5a6))
+* add boomerang prompt templates ([94dc14f](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/94dc14f8512b0f098cb6f7e65088ed81a71eba22))
+* add cwd frontmatter and --cwd runtime flag for subagent delegation ([0d77f75](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/0d77f757f487a2f0400fffbd90b14297196729ef))
+* add delegated subagent execution via event bus ([c1c1626](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/c1c16260c3144fb2c8a82a7fd7b7b964b26de6b9))
+* add deterministic prompt steps ([4902080](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/4902080dee2c4bfd9d7368bfeded2c929b6a87a1))
+* add multi-skill prompt frontmatter ([8852219](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/8852219a5606d15da719eee6b5a084ed1c78c92d))
+* add parallel() chain step support for delegated prompt templates ([8d6ee16](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/8d6ee16d637337bef0c22b5a9fe433a09136f940))
+* add prompt includes ([2f03d5b](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/2f03d5bc922afeac82e993bbd3555a34b58fdded))
+* add prompt-templates agent skill ([191ab16](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/191ab16d4184daac70b759f5c54b216f761ccc57))
+* add skill injection and subdirectory support ([536fdb3](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/536fdb3288317aa70a6bdfa0724d0c78c7b38bf7))
+* add thinking level control and print mode support ([a406a35](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/a406a35bc375824df0143f5ff68c183dbe30d6bd))
+* chain context summaries for delegated steps ([85d06fd](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/85d06fda6bc0bfc9797ac87eaa44f41b0d3dc960))
+* harden delegated compare workflows ([829d5ea](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/829d5eaafd86f72953d2fd9cbe7c7dbda217983b))
+* inject delegated results into parent conversation ([fe15001](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/fe1500184cae50ae251f09ea5f87f713b0b24a52))
+* inline model conditionals and modular refactor ([e8d4f89](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/e8d4f89d0fd941011b28d2619f1c369188d3e3cc))
+* model fallback with comma-separated model lists ([56fb151](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/56fb15169410992b47c7afff90a9467e2cffd3e7))
+* rename /chain to /chain-prompts, add per-step args ([4d00f57](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/4d00f5779eda57fbf2ce1e943ed7c623fe390e7b))
+* runtime flags, unlimited loops, model rotation, abort detection, loop context prefix ([59e22cf](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/59e22cf8180f638566e86d93a4bda438a963da15))
+* ship best-of-n compare workflows ([c0f1cd4](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/c0f1cd4180111f4878ec010721fb18bedceb08f7))
+* support loop: unlimited frontmatter for open-ended loops ([da5c061](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/da5c061d599ea62141a3493cf1bc2a72c3b0d8c0))
+* support model-less prompts and deterministic chain inheritance ([42041fa](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/42041faee2b189d9e008c45f955937db70ed88bd))
+
+
+### Bug Fixes
+
+* add promptSnippet for run-prompt tool ([ccaef96](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/ccaef96414f2bf12f0b364b43b6da6301c48635c))
+* discover nested pi-subagents runtimes ([da8a841](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/da8a84127619894ebbbe090f5b4a522618a394a7))
+* discover pi-subagents runtime installs ([cd3f9bd](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/cd3f9bd45cb44076e2dad802907f3d5a67b868bd))
+* polish prompt template skill docs ([3007228](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/30072280d717330b43455ba6b57d7d95dd12949d))
+* restore thinking level after model-only prompt commands ([d5090f2](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/d5090f2963295459b28435eb9048b103819a14d5))
+* support nested provider model ids ([7ac1041](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/7ac10412b3d43279656df35da90dc59120059d93))
+* support pi 0.65 runtime changes ([d8eac33](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/d8eac3361408e268f3c935e22c6a043a7eaa8d9b))
+* support plain prompt chain resolution ([57353b9](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/57353b9fe9f583e8f00234271d6e9d65389d25a4))
+* suppress rewind prompt for boomerang templates ([4b91f77](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/4b91f7727fb9b8f7c00d26d21356837b9592a720))
+* update skill command resolution for pi-coding-agent 0.62.0 sourceInfo changes ([74ed8dd](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/74ed8dd57923fe039d11e5c8d22443ff722a1f66))
+
 ## [Unreleased]
 
 ### Changed
