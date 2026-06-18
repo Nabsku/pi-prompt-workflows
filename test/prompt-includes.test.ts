@@ -1,0 +1,497 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { renderPromptIncludes } from "../prompt-includes.js";
+import type { RenderPromptIncludesResult } from "../prompt-includes.js";
+
+interface IncludeFixture {
+	home: string;
+	cwd: string;
+	promptRoot: string;
+	promptDir: string;
+	promptFilePath: string;
+	globalPartials: string;
+	projectPartials: string;
+}
+
+function withFixture(run: (fixture: IncludeFixture) => void) {
+	const root = mkdtempSync(join(tmpdir(), "pi-prompt-includes-"));
+	try {
+		const home = join(root, "home");
+		const cwd = join(root, "project");
+		const promptRoot = join(cwd, ".pi", "prompts");
+		const promptDir = join(promptRoot, "nested");
+		const globalPartials = join(home, ".pi", "agent", "prompt-partials");
+		const projectPartials = join(cwd, ".pi", "prompt-partials");
+		const promptFilePath = join(promptDir, "prompt.md");
+
+		mkdirSync(promptDir, { recursive: true });
+		mkdirSync(globalPartials, { recursive: true });
+		mkdirSync(projectPartials, { recursive: true });
+		writeFileSync(promptFilePath, "---\nmodel: test\n---\nbody");
+
+		run({ home, cwd, promptRoot, promptDir, promptFilePath, globalPartials, projectPartials });
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+}
+
+function render(
+	fixture: IncludeFixture,
+	content: string,
+	includes?: string[],
+	options: { debugBoundaries?: boolean } = {},
+): RenderPromptIncludesResult {
+	return renderPromptIncludes({
+		content,
+		includes,
+		promptFilePath: fixture.promptFilePath,
+		promptRoot: fixture.promptRoot,
+		cwd: fixture.cwd,
+		source: "project",
+		homeDir: fixture.home,
+		debugBoundaries: options.debugBoundaries,
+	});
+}
+
+function assertOk(result: RenderPromptIncludesResult): asserts result is { ok: true; content: string } {
+	if (!result.ok) {
+		assert.fail(`expected render to succeed, diagnostics:\n${result.diagnostics.map((diagnostic) => diagnostic.message).join("\n")}`);
+	}
+}
+
+function assertFail(result: RenderPromptIncludesResult): asserts result is Extract<RenderPromptIncludesResult, { ok: false }> {
+	if (result.ok) {
+		assert.fail(`expected render to fail, content:\n${result.content}`);
+	}
+}
+
+test("frontmatter includes prepend in deterministic order when no placeholder exists", () => {
+	withFixture((fixture) => {
+		writeFileSync(join(fixture.projectPartials, "one.md"), "one");
+		writeFileSync(join(fixture.projectPartials, "two.md"), "two");
+
+		const result = render(fixture, "body", ["two.md", "one.md"]);
+
+		assertOk(result);
+		assert.equal(result.content, "two\n\none\n\nbody");
+		assert.doesNotMatch(result.content, /BEGIN include|END include/);
+	});
+});
+
+test("<includes /> controls placement of the frontmatter include group", () => {
+	withFixture((fixture) => {
+		writeFileSync(join(fixture.projectPartials, "first.md"), "first");
+		writeFileSync(join(fixture.projectPartials, "second.md"), "second");
+
+		const result = render(fixture, "before\n<includes />\nafter", ["first.md", "second.md"]);
+
+		assertOk(result);
+		assert.equal(result.content, "before\nfirst\n\nsecond\nafter");
+	});
+});
+
+test("<includes /> inserts frontmatter includes verbatim", () => {
+	withFixture((fixture) => {
+		writeFileSync(join(fixture.projectPartials, "shell.md"), "echo $$ && printf '$& $` $1'");
+
+		const result = render(fixture, "before\n<includes />\nafter", ["shell.md"]);
+
+		assertOk(result);
+		assert.equal(result.content, "before\necho $$ && printf '$& $` $1'\nafter");
+	});
+});
+
+test("<includes /> without frontmatter includes fails with a diagnostic", () => {
+	withFixture((fixture) => {
+		const result = render(fixture, "before <includes /> after");
+
+		assertFail(result);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "include-placeholder-without-includes"), true);
+		assert.match(result.diagnostics.map((diagnostic) => diagnostic.message).join("\n"), /frontmatter.*include/i);
+	});
+});
+
+test("inline <include file=... /> controls exact placement for one-off includes", () => {
+	withFixture((fixture) => {
+		writeFileSync(join(fixture.promptDir, "one-off.md"), "inserted");
+
+		const result = render(fixture, "alpha <include file=\"one-off.md\" /> omega");
+
+		assertOk(result);
+		assert.equal(result.content, "alpha inserted omega");
+	});
+});
+
+test("nested inline includes work", () => {
+	withFixture((fixture) => {
+		writeFileSync(join(fixture.projectPartials, "outer.md"), "outer-start\n<include file=\"inner.md\" />\nouter-end");
+		writeFileSync(join(fixture.projectPartials, "inner.md"), "inner");
+
+		const result = render(fixture, "body", ["outer.md"]);
+
+		assertOk(result);
+		assert.equal(result.content, "outer-start\ninner\nouter-end\n\nbody");
+	});
+});
+
+test("nested inline includes in subdirectory partials resolve relative to the current partial", () => {
+	withFixture((fixture) => {
+		const sharedPartials = join(fixture.projectPartials, "shared");
+		mkdirSync(sharedPartials, { recursive: true });
+		writeFileSync(join(sharedPartials, "outer.md"), "outer-start\n<include file=\"inner.md\" />\nouter-end");
+		writeFileSync(join(sharedPartials, "inner.md"), "inner");
+
+		const result = render(fixture, "body", ["shared/outer.md"]);
+
+		assertOk(result);
+		assert.equal(result.content, "outer-start\ninner\nouter-end\n\nbody");
+	});
+});
+
+test("nested inline include diagnostics point at the partial containing the bad directive", () => {
+	withFixture((fixture) => {
+		const sharedPartials = join(fixture.projectPartials, "shared");
+		const outerPath = join(sharedPartials, "outer.md");
+		mkdirSync(sharedPartials, { recursive: true });
+		writeFileSync(outerPath, "outer-start\n<include file=\"missing.md\" />\nouter-end");
+
+		const result = render(fixture, "body", ["shared/outer.md"]);
+
+		assertFail(result);
+		const diagnostic = result.diagnostics.find((item) => item.code === "include-not-found");
+		assert.ok(diagnostic);
+		assert.equal(diagnostic.filePath, realpathSync(outerPath));
+	});
+});
+
+test("cyclic nested includes fail with diagnostics", () => {
+	withFixture((fixture) => {
+		writeFileSync(join(fixture.projectPartials, "a.md"), "a -> <include file=\"b.md\" />");
+		writeFileSync(join(fixture.projectPartials, "b.md"), "b -> <include file=\"a.md\" />");
+
+		const result = render(fixture, "body", ["a.md"]);
+
+		assertFail(result);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "include-cycle"), true);
+		assert.match(result.diagnostics.map((diagnostic) => diagnostic.message).join("\n"), /Cyclic prompt include detected/);
+	});
+});
+
+test("deep acyclic nested includes fail with a diagnostic instead of overflowing the stack", () => {
+	withFixture((fixture) => {
+		const chainLength = 70;
+		for (let index = 0; index < chainLength; index += 1) {
+			const next = index + 1;
+			writeFileSync(
+				join(fixture.projectPartials, `chain-${index}.md`),
+				next < chainLength ? `partial ${index}\n<include file=\"chain-${next}.md\" />` : `partial ${index}`,
+			);
+		}
+
+		let result: RenderPromptIncludesResult | undefined;
+		assert.doesNotThrow(() => {
+			result = render(fixture, "body", ["chain-0.md"]);
+		});
+
+		assert.ok(result);
+		assertFail(result);
+		const diagnostic = result.diagnostics.find((item) => item.code === "include-depth-exceeded");
+		assert.ok(diagnostic);
+		assert.equal(diagnostic.filePath, realpathSync(join(fixture.projectPartials, "chain-63.md")));
+	});
+});
+
+test("partial frontmatter is stripped and ignored", () => {
+	withFixture((fixture) => {
+		writeFileSync(join(fixture.projectPartials, "ignored.md"), "should-not-render");
+		writeFileSync(
+			join(fixture.projectPartials, "partial.md"),
+			[
+				"---",
+				"description: metadata only",
+				"includes:",
+				"  - ignored.md",
+				"---",
+				"partial body",
+			].join("\n"),
+		);
+
+		const result = render(fixture, "body", ["partial.md"]);
+
+		assertOk(result);
+		assert.equal(result.content, "partial body\n\nbody");
+	});
+});
+
+test("partial frontmatter preserves body whitespace", () => {
+	withFixture((fixture) => {
+		const body = "\n  leading spaces\ntrailing spaces  \n";
+		writeFileSync(join(fixture.projectPartials, "whitespace.md"), `---\ndescription: metadata only\n---\n${body}`);
+
+		const result = render(fixture, "", ["whitespace.md"]);
+
+		assertOk(result);
+		assert.equal(result.content, body);
+	});
+});
+
+test("partial frontmatter preserves CRLF body line endings", () => {
+	withFixture((fixture) => {
+		const body = "first\r\nsecond\r\n";
+		writeFileSync(join(fixture.projectPartials, "crlf.md"), `---\r\ndescription: metadata only\r\n---\r\n${body}`);
+
+		const result = render(fixture, "", ["crlf.md"]);
+
+		assertOk(result);
+		assert.equal(result.content, body);
+	});
+});
+
+test("resolution order checks prompt dir, prompt root, global partials, then project partials", () => {
+	withFixture((fixture) => {
+		writeFileSync(join(fixture.promptDir, "shadow.md"), "prompt-dir");
+		writeFileSync(join(fixture.promptRoot, "shadow.md"), "prompt-root-shadow");
+		writeFileSync(join(fixture.globalPartials, "shadow.md"), "global-shadow");
+		writeFileSync(join(fixture.projectPartials, "shadow.md"), "project-shadow");
+
+		writeFileSync(join(fixture.promptRoot, "root-shadow.md"), "prompt-root");
+		writeFileSync(join(fixture.globalPartials, "root-shadow.md"), "global-root-shadow");
+		writeFileSync(join(fixture.projectPartials, "root-shadow.md"), "project-root-shadow");
+
+		writeFileSync(join(fixture.globalPartials, "partials-shadow.md"), "global");
+		writeFileSync(join(fixture.projectPartials, "partials-shadow.md"), "project-partials-shadow");
+
+		writeFileSync(join(fixture.projectPartials, "project-only.md"), "project");
+
+		const result = render(fixture, "", ["shadow.md", "root-shadow.md", "partials-shadow.md", "project-only.md"]);
+
+		assertOk(result);
+		assert.equal(result.content, "prompt-dir\n\nprompt-root\n\nglobal\n\nproject");
+	});
+});
+
+test("missing includes fail with diagnostics", () => {
+	withFixture((fixture) => {
+		const result = render(fixture, "body", ["missing.md"]);
+
+		assertFail(result);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "include-not-found"), true);
+	});
+});
+
+test("URL-scheme includes are rejected before reading literal local files", () => {
+	withFixture((fixture) => {
+		const urlIncludes = [
+			{
+				includePath: "https://example.com/remote.md",
+				literalPathParts: ["https:", "example.com", "remote.md"],
+			},
+			{
+				includePath: "http://example.com/remote.md",
+				literalPathParts: ["http:", "example.com", "remote.md"],
+			},
+			{
+				includePath: "file:///tmp/remote.md",
+				literalPathParts: ["file:", "tmp", "remote.md"],
+			},
+		];
+
+		for (const { includePath, literalPathParts } of urlIncludes) {
+			const literalPath = join(fixture.projectPartials, ...literalPathParts);
+			mkdirSync(dirname(literalPath), { recursive: true });
+			writeFileSync(literalPath, `must not render ${includePath}`);
+
+			const result = render(fixture, "body", [includePath]);
+
+			assertFail(result);
+			assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "include-url-disallowed"), true, includePath);
+			assert.match(result.diagnostics.map((diagnostic) => diagnostic.message).join("\n"), /URL/i, includePath);
+		}
+	});
+});
+
+test("glob-looking includes are rejected before reading literal local files", () => {
+	withFixture((fixture) => {
+		const globIncludes = [
+			{
+				includePath: "*.md",
+				literalPathParts: ["*.md"],
+			},
+			{
+				includePath: "shared/**/*.md",
+				literalPathParts: ["shared", "**", "*.md"],
+			},
+			{
+				includePath: "shared/file?.md",
+				literalPathParts: ["shared", "file?.md"],
+			},
+			{
+				includePath: "shared/[abc].md",
+				literalPathParts: ["shared", "[abc].md"],
+			},
+		];
+
+		for (const { includePath, literalPathParts } of globIncludes) {
+			const literalPath = join(fixture.projectPartials, ...literalPathParts);
+			mkdirSync(dirname(literalPath), { recursive: true });
+			writeFileSync(literalPath, `must not render ${includePath}`);
+
+			const result = render(fixture, "body", [includePath]);
+
+			assertFail(result);
+			assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "include-glob-disallowed"), true, includePath);
+			assert.match(result.diagnostics.map((diagnostic) => diagnostic.message).join("\n"), /glob/i, includePath);
+		}
+	});
+});
+
+test("non-markdown includes fail with diagnostics", () => {
+	withFixture((fixture) => {
+		writeFileSync(join(fixture.projectPartials, "not-markdown.txt"), "nope");
+
+		const result = render(fixture, "body", ["not-markdown.txt"]);
+
+		assertFail(result);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "include-non-markdown"), true);
+	});
+});
+
+test("../ escapes fail after path normalization", () => {
+	withFixture((fixture) => {
+		writeFileSync(join(fixture.promptRoot, "outside-prompt-dir.md"), "outside");
+
+		const result = render(fixture, "body", ["../outside-prompt-dir.md"]);
+
+		assertFail(result);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "include-path-escaped"), true);
+	});
+});
+
+test("symlink escapes fail after canonicalization", () => {
+	withFixture((fixture) => {
+		const outside = join(fixture.cwd, "outside.md");
+		writeFileSync(outside, "outside");
+		symlinkSync(outside, join(fixture.projectPartials, "link.md"));
+
+		const result = render(fixture, "body", ["link.md"]);
+
+		assertFail(result);
+		const diagnostic = result.diagnostics.find((diagnostic) => diagnostic.code === "include-path-escaped");
+		assert.ok(diagnostic);
+		assert.equal(diagnostic.filePath, fixture.promptFilePath);
+		assert.equal(diagnostic.message.includes(realpathSync(outside)), false);
+	});
+});
+
+test("project prompt partials symlink root does not authorize outside files", () => {
+	withFixture((fixture) => {
+		const outsidePartials = join(fixture.cwd, "outside-project-partials");
+		rmSync(fixture.projectPartials, { recursive: true, force: true });
+		mkdirSync(outsidePartials, { recursive: true });
+		writeFileSync(join(outsidePartials, "leak.md"), "project leak");
+		symlinkSync(outsidePartials, fixture.projectPartials, "dir");
+
+		const result = render(fixture, "body", ["leak.md"]);
+
+		assertFail(result);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "include-not-found" || diagnostic.code === "include-path-escaped"), true);
+	});
+});
+
+test("global prompt partials symlink root does not authorize outside files", () => {
+	withFixture((fixture) => {
+		const outsidePartials = join(fixture.home, "outside-global-partials");
+		rmSync(fixture.globalPartials, { recursive: true, force: true });
+		mkdirSync(outsidePartials, { recursive: true });
+		writeFileSync(join(outsidePartials, "leak.md"), "global leak");
+		symlinkSync(outsidePartials, fixture.globalPartials, "dir");
+
+		const relativeResult = render(fixture, "body", ["leak.md"]);
+		assertFail(relativeResult);
+		assert.equal(relativeResult.diagnostics.some((diagnostic) => diagnostic.code === "include-not-found" || diagnostic.code === "include-path-escaped"), true);
+
+		const homeResult = render(fixture, "body", ["~/.pi/agent/prompt-partials/leak.md"]);
+		assertFail(homeResult);
+		assert.equal(homeResult.diagnostics.some((diagnostic) => diagnostic.code === "include-path-escaped"), true);
+	});
+});
+
+test("project prompt partials reject .pi ancestor symlink escapes", () => {
+	withFixture((fixture) => {
+		const outsidePi = join(fixture.cwd, "..", "outside-project-pi");
+		const symlinkedPi = join(fixture.cwd, ".pi");
+		rmSync(symlinkedPi, { recursive: true, force: true });
+		mkdirSync(join(outsidePi, "prompt-partials"), { recursive: true });
+		mkdirSync(join(outsidePi, "prompts", "nested"), { recursive: true });
+		writeFileSync(join(outsidePi, "prompt-partials", "leak.md"), "project ancestor leak");
+		writeFileSync(join(outsidePi, "prompts", "nested", "prompt.md"), "body");
+		symlinkSync(outsidePi, symlinkedPi, "dir");
+
+		const result = render(fixture, "body", ["leak.md"]);
+
+		assertFail(result);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "include-not-found" || diagnostic.code === "include-path-escaped"), true);
+	});
+});
+
+test("global prompt partials reject agent ancestor symlink escapes", () => {
+	withFixture((fixture) => {
+		const outsideAgent = join(fixture.home, "..", "outside-global-agent");
+		const symlinkedAgent = join(fixture.home, ".pi", "agent");
+		rmSync(symlinkedAgent, { recursive: true, force: true });
+		mkdirSync(join(outsideAgent, "prompt-partials"), { recursive: true });
+		writeFileSync(join(outsideAgent, "prompt-partials", "leak.md"), "global ancestor leak");
+		symlinkSync(outsideAgent, symlinkedAgent, "dir");
+
+		const relativeResult = render(fixture, "body", ["leak.md"]);
+		assertFail(relativeResult);
+		assert.equal(relativeResult.diagnostics.some((diagnostic) => diagnostic.code === "include-not-found" || diagnostic.code === "include-path-escaped"), true);
+
+		const homeResult = render(fixture, "body", ["~/.pi/agent/prompt-partials/leak.md"]);
+		assertFail(homeResult);
+		assert.equal(homeResult.diagnostics.some((diagnostic) => diagnostic.code === "include-path-escaped"), true);
+	});
+});
+
+test("non-tilde absolute include paths are rejected", () => {
+	withFixture((fixture) => {
+		const absoluteIncludePath = join(fixture.projectPartials, "safe.md");
+		writeFileSync(absoluteIncludePath, "safe");
+
+		const result = render(fixture, "body", [absoluteIncludePath]);
+
+		assertFail(result);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "include-absolute-disallowed"), true);
+	});
+});
+
+test("~/ include paths work only under allowed Pi roots", () => {
+	withFixture((fixture) => {
+		writeFileSync(join(fixture.globalPartials, "home.md"), "home partial");
+		writeFileSync(join(fixture.home, "private.md"), "private");
+
+		const allowed = render(fixture, "body", ["~/.pi/agent/prompt-partials/home.md"]);
+		assertOk(allowed);
+		assert.equal(allowed.content, "home partial\n\nbody");
+
+		const rejected = render(fixture, "body", ["~/private.md"]);
+		assertFail(rejected);
+		assert.equal(rejected.diagnostics.some((diagnostic) => diagnostic.code === "include-absolute-disallowed"), true);
+	});
+});
+
+test("debug mode emits include boundary comments", () => {
+	withFixture((fixture) => {
+		writeFileSync(join(fixture.projectPartials, "debug.md"), "debug body");
+
+		const result = render(fixture, "body", ["debug.md"], { debugBoundaries: true });
+
+		assertOk(result);
+		assert.match(result.content, /<!-- BEGIN include: debug\.md -->/);
+		assert.match(result.content, /debug body/);
+		assert.match(result.content, /<!-- END include: debug\.md -->/);
+	});
+});
