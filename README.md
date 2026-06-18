@@ -4,7 +4,7 @@
 
 # Prompt Template Model Extension
 
-> This package is an enhanced fork of `pi-prompt-template-model`. It stays close to upstream and is intended to be kept in sync while publishing the additional features under the separate package name `pi-prompt-template-model-enhanced`.
+> This package is an enhanced fork of [`pi-prompt-template-model`](https://github.com/nicobailon/pi-prompt-template-model). It builds on the original extension's solid prompt-template foundation, stays close to upstream, and publishes the additional features under the separate package name `pi-prompt-template-model-enhanced`.
 
 Adds model selection, thinking levels, reusable prompt partials, and one-or-many skill injection to pi prompt templates. Define slash commands that switch to the right model, include shared instructions, load the exact skills needed, and auto-restore your session when done.
 
