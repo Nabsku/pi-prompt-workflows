@@ -1,0 +1,73 @@
+name: Upstream freshness
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Daily at 06:17 UTC. Fails when upstream main has moved past the recorded baseline.
+    - cron: "17 6 * * *"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/upstream-freshness.yml"
+      - ".github/upstream-baseline.txt"
+
+permissions:
+  contents: read
+
+jobs:
+  check-upstream:
+    name: Check upstream main
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compare recorded baseline with upstream
+        env:
+          UPSTREAM_REPO: nicobailon/pi-prompt-template-model
+          UPSTREAM_REF: main
+        run: |
+          set -euo pipefail
+
+          baseline_file=".github/upstream-baseline.txt"
+          if [[ ! -s "$baseline_file" ]]; then
+            echo "Missing upstream baseline file: $baseline_file" >&2
+            exit 1
+          fi
+
+          baseline_sha="$(tr -d '[:space:]' < "$baseline_file")"
+          if [[ ! "$baseline_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid upstream baseline SHA in $baseline_file: $baseline_sha" >&2
+            exit 1
+          fi
+
+          upstream_sha="$(git ls-remote "https://github.com/${UPSTREAM_REPO}.git" "refs/heads/${UPSTREAM_REF}" | awk '{print $1}')"
+          if [[ -z "$upstream_sha" ]]; then
+            echo "Could not resolve upstream ${UPSTREAM_REPO}@${UPSTREAM_REF}" >&2
+            exit 1
+          fi
+
+          compare_url="https://github.com/${UPSTREAM_REPO}/compare/${baseline_sha}...${upstream_sha}"
+
+          {
+            echo "## Upstream freshness"
+            echo
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Upstream | \`${UPSTREAM_REPO}\` |"
+            echo "| Branch | \`${UPSTREAM_REF}\` |"
+            echo "| Recorded baseline | \`${baseline_sha}\` |"
+            echo "| Current upstream | \`${upstream_sha}\` |"
+            echo "| Compare | ${compare_url} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$upstream_sha" != "$baseline_sha" ]]; then
+            echo "Upstream has changed since the recorded baseline." >&2
+            echo "Review upstream changes: ${compare_url}" >&2
+            echo "After syncing, update ${baseline_file} to ${upstream_sha}." >&2
+            exit 1
+          fi
+
+          echo "Upstream is unchanged from the recorded baseline."
