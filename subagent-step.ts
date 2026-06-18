@@ -1,9 +1,9 @@
 import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import type { AssistantMessage, Message } from "@mariozechner/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import type { Model } from "@mariozechner/pi-ai";
-import { Key, matchesKey } from "@mariozechner/pi-tui";
+import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { Model } from "@earendil-works/pi-ai";
+import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { preparePromptExecution } from "./prompt-execution.js";
 import type { PromptWithModel } from "./prompt-loader.js";
 import { notify } from "./notifications.js";

@@ -1,5 +1,5 @@
-import type { Theme } from "@mariozechner/pi-coding-agent";
-import { Box, Container, Spacer, Text } from "@mariozechner/pi-tui";
+import type { Theme } from "@earendil-works/pi-coding-agent";
+import { Box, Container, Spacer, Text } from "@earendil-works/pi-tui";
 import {
 	getDelegatedLiveState,
 	type DelegatedSubagentLiveState,

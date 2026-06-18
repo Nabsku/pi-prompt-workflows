@@ -1,5 +1,5 @@
-import type { AssistantMessage, Message } from "@mariozechner/pi-ai";
-import type { ExtensionContext, SessionEntry } from "@mariozechner/pi-coding-agent";
+import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
+import type { ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE } from "./subagent-runtime.js";
 
 interface DelegatedMessageDetails {

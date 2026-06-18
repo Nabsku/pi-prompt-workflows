@@ -1,8 +1,8 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
-import { parseFrontmatter } from "@mariozechner/pi-coding-agent";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { parseChainDeclaration } from "./chain-parser.js";
 import { hasPromptIncludeDirectives, renderPromptIncludes } from "./prompt-includes.js";
 

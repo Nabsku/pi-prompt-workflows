@@ -1,4 +1,4 @@
-import type { Model } from "@mariozechner/pi-ai";
+import type { Model } from "@earendil-works/pi-ai";
 import { substituteArgs } from "./args.js";
 import { getResolvedModelRef, selectModelCandidate, type RegistryLike, type SelectedModelCandidate } from "./model-selection.js";
 import type { PromptWithModel } from "./prompt-loader.js";
