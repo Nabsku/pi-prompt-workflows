@@ -4,6 +4,7 @@
 
 ### Changed
 - Updated development-only Pi packages from the deprecated `@mariozechner/*` namespace to `@earendil-works/*` `0.79.7`, and bumped `tsx` to `^4.22.4`.
+- Added Dependabot version updates for npm development dependencies and GitHub Actions.
 
 ## [0.10.0] - 2026-06-18
 
