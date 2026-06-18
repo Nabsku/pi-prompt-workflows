@@ -1,9 +1,10 @@
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
 import { parseFrontmatter } from "@mariozechner/pi-coding-agent";
 import { parseChainDeclaration } from "./chain-parser.js";
+import { hasPromptIncludeDirectives, renderPromptIncludes } from "./prompt-includes.js";
 
 const VALID_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
 export const RESERVED_COMMAND_NAMES = new Set([
@@ -64,10 +65,12 @@ export interface PromptWithModel {
 	description: string;
 	content: string;
 	models: string[];
+	includes?: string[];
 	chain?: string;
 	chainContext?: "summary";
 	restore: boolean;
 	skill?: string;
+	skills?: string[];
 	thinking?: ThinkingLevel;
 	thinkingLevels?: ThinkingLevel[];
 	rotate?: boolean;
@@ -432,6 +435,158 @@ function normalizeStringArrayField(
 		args.push(entry);
 	}
 	return args;
+}
+
+const VALID_EXACT_SKILL_NAME = /^[A-Za-z0-9._-]+$/;
+const VALID_SUFFIX_WILDCARD_SKILL_SELECTOR = /^[A-Za-z0-9._-]+\*$/;
+
+function normalizeSkillName(raw: string): string {
+	const trimmed = raw.trim();
+	return trimmed.startsWith("skill:") ? trimmed.slice("skill:".length).trim() : trimmed;
+}
+
+function isValidSkillNameOrSelector(value: string): boolean {
+	return VALID_EXACT_SKILL_NAME.test(value) || VALID_SUFFIX_WILDCARD_SKILL_SELECTOR.test(value);
+}
+
+function invalidSkillNameMessage(field: "skill" | "skills", value: string): string {
+	if (value.includes("*")) {
+		return `frontmatter field "${field}" contains invalid skill wildcard ${JSON.stringify(value)}: only non-empty suffix "*" prefix matching is supported.`;
+	}
+	return `frontmatter field "${field}" contains invalid skill name ${JSON.stringify(value)}.`;
+}
+
+function pushInvalidSkillsDiagnostic(
+	filePath: string,
+	source: PromptSource,
+	diagnostics: PromptLoaderDiagnostic[],
+	message: string,
+) {
+	diagnostics.push(createDiagnostic("invalid-skills", filePath, source, `Skipping prompt template at ${filePath}: ${message}`));
+}
+
+type NormalizedSkills = { ok: true; skill?: string; skills?: string[] } | { ok: false };
+
+function normalizePromptSkills(
+	frontmatter: Record<string, unknown>,
+	filePath: string,
+	source: PromptSource,
+	diagnostics: PromptLoaderDiagnostic[],
+): NormalizedSkills {
+	const normalizedSkills: string[] = [];
+	let normalizedSkill: string | undefined;
+
+	if (Object.hasOwn(frontmatter, "skill")) {
+		if (typeof frontmatter.skill !== "string") {
+			pushInvalidSkillsDiagnostic(filePath, source, diagnostics, 'frontmatter field "skill" must be a non-empty string.');
+			return { ok: false };
+		}
+		normalizedSkill = normalizeSkillName(frontmatter.skill);
+		if (!normalizedSkill || !isValidSkillNameOrSelector(normalizedSkill)) {
+			pushInvalidSkillsDiagnostic(filePath, source, diagnostics, invalidSkillNameMessage("skill", normalizedSkill));
+			return { ok: false };
+		}
+		normalizedSkills.push(normalizedSkill);
+	}
+
+	if (Object.hasOwn(frontmatter, "skills")) {
+		if (!Array.isArray(frontmatter.skills)) {
+			pushInvalidSkillsDiagnostic(filePath, source, diagnostics, 'frontmatter field "skills" must be a YAML list of non-empty skill names. Use "skill" for a scalar single skill.');
+			return { ok: false };
+		}
+		for (const entry of frontmatter.skills) {
+			if (typeof entry !== "string") {
+				pushInvalidSkillsDiagnostic(filePath, source, diagnostics, 'frontmatter field "skills" must be a YAML list of non-empty strings.');
+				return { ok: false };
+			}
+			const normalized = normalizeSkillName(entry);
+			if (!normalized || !isValidSkillNameOrSelector(normalized)) {
+				pushInvalidSkillsDiagnostic(filePath, source, diagnostics, invalidSkillNameMessage("skills", normalized));
+				return { ok: false };
+			}
+			normalizedSkills.push(normalized);
+		}
+	}
+
+	return {
+		ok: true,
+		...(normalizedSkill ? { skill: normalizedSkill } : {}),
+		...(normalizedSkills.length > 0 ? { skills: normalizedSkills } : {}),
+	};
+}
+
+type NormalizedPromptIncludes =
+	| { ok: true; includes: string[] | undefined; declaredKey?: "include" | "includes" }
+	| { ok: false };
+
+function normalizePromptIncludes(
+	frontmatter: Record<string, unknown>,
+	filePath: string,
+	source: PromptSource,
+	diagnostics: PromptLoaderDiagnostic[],
+): NormalizedPromptIncludes {
+	const hasInclude = Object.hasOwn(frontmatter, "include");
+	const hasIncludes = Object.hasOwn(frontmatter, "includes");
+	if (!hasInclude && !hasIncludes) return { ok: true, includes: undefined };
+
+	if (hasInclude && hasIncludes) {
+		diagnostics.push(
+			createDiagnostic(
+				"invalid-includes-conflict",
+				filePath,
+				source,
+				`Skipping prompt template at ${filePath}: frontmatter fields "include" and "includes" cannot be combined.`,
+			),
+		);
+		return { ok: false };
+	}
+
+	if (hasInclude) {
+		const value = frontmatter.include;
+		if (typeof value !== "string" || value.trim().length === 0) {
+			diagnostics.push(
+				createDiagnostic(
+					"invalid-include",
+					filePath,
+					source,
+					`Skipping prompt template at ${filePath}: frontmatter field "include" must be a non-empty string.`,
+				),
+			);
+			return { ok: false };
+		}
+		return { ok: true, includes: [value.trim()], declaredKey: "include" };
+	}
+
+	const value = frontmatter.includes;
+	if (!Array.isArray(value)) {
+		diagnostics.push(
+			createDiagnostic(
+				"invalid-includes",
+				filePath,
+				source,
+				`Skipping prompt template at ${filePath}: frontmatter field "includes" must be an array of non-empty strings.`,
+			),
+		);
+		return { ok: false };
+	}
+
+	const includes: string[] = [];
+	for (const entry of value) {
+		if (typeof entry !== "string" || entry.trim().length === 0) {
+			diagnostics.push(
+				createDiagnostic(
+					"invalid-includes",
+					filePath,
+					source,
+					`Skipping prompt template at ${filePath}: frontmatter field "includes" must be an array of non-empty strings.`,
+				),
+			);
+			return { ok: false };
+		}
+		includes.push(entry.trim());
+	}
+
+	return { ok: true, includes, declaredKey: "includes" };
 }
 
 function normalizeDeterministicHandoff(
@@ -1347,6 +1502,8 @@ function loadPromptsWithModelFromDir(
 	dir: string,
 	source: PromptSource,
 	includePlainPrompts: boolean,
+	loadCwd: string,
+	promptRoot = dir,
 	subdir = "",
 	visitedDirectories = new Set<string>(),
 ): { prompts: PromptWithModel[]; diagnostics: PromptLoaderDiagnostic[] } {
@@ -1414,7 +1571,7 @@ function loadPromptsWithModelFromDir(
 
 			if (isDirectory) {
 				const nextSubdir = subdir ? `${subdir}:${entry.name}` : entry.name;
-				const nested = loadPromptsWithModelFromDir(fullPath, source, includePlainPrompts, nextSubdir, visitedDirectories);
+				const nested = loadPromptsWithModelFromDir(fullPath, source, includePlainPrompts, loadCwd, promptRoot, nextSubdir, visitedDirectories);
 				prompts.push(...nested.prompts);
 				diagnostics.push(...nested.diagnostics);
 				continue;
@@ -1428,7 +1585,23 @@ function loadPromptsWithModelFromDir(
 				const frontmatter = normalizeFrontmatterRecord(parsed.frontmatter, fullPath, source, diagnostics);
 				if (!frontmatter) continue;
 				const { body } = parsed;
+				const includesResult = normalizePromptIncludes(frontmatter, fullPath, source, diagnostics);
+				if (!includesResult.ok) continue;
+				const includes = includesResult.includes;
 				const chain = normalizeChain(frontmatter.chain, fullPath, source, diagnostics);
+				const hasBodyIncludeDirectives = chain ? false : hasPromptIncludeDirectives(body);
+				const shouldRenderIncludes = !chain && (includes !== undefined || hasBodyIncludeDirectives);
+				if (chain && includesResult.declaredKey) {
+					diagnostics.push(
+						createDiagnostic(
+							"invalid-includes-chain",
+							fullPath,
+							source,
+							`Skipping prompt template at ${fullPath}: frontmatter field "${includesResult.declaredKey}" cannot be used on chain wrapper templates in v1. Put include/includes on referenced step templates instead.`,
+						),
+					);
+					continue;
+				}
 				let parsedChainDeclarationResult:
 					| ReturnType<typeof parseChainDeclaration>
 					| undefined;
@@ -1658,7 +1831,32 @@ function loadPromptsWithModelFromDir(
 				const safeInheritContext = subagent !== undefined && inheritContext;
 				const safeCwd = (chain || subagent !== undefined || hasLineup) ? cwd : undefined;
 				const description = normalizeStringField("description", frontmatter.description, fullPath, source, diagnostics) ?? "";
-				const skill = chain ? undefined : normalizeStringField("skill", frontmatter.skill, fullPath, source, diagnostics);
+				if (hasLineup && (Object.hasOwn(frontmatter, "skill") || Object.hasOwn(frontmatter, "skills"))) {
+					diagnostics.push(
+						createDiagnostic(
+							"invalid-compare-skills",
+							fullPath,
+							source,
+							`Skipping prompt template at ${fullPath}: compare prompts cannot be combined with "skill" or "skills" in v1.`,
+						),
+					);
+					continue;
+				}
+				if (subagent !== undefined && (Object.hasOwn(frontmatter, "skill") || Object.hasOwn(frontmatter, "skills"))) {
+					diagnostics.push(
+						createDiagnostic(
+							"invalid-subagent-skills",
+							fullPath,
+							source,
+							`Skipping prompt template at ${fullPath}: frontmatter field "subagent" cannot be combined with "skill" or "skills" in v1.`,
+						),
+					);
+					continue;
+				}
+				const skillResult = chain ? { ok: true as const } : normalizePromptSkills(frontmatter, fullPath, source, diagnostics);
+				if (!skillResult.ok) continue;
+				const skill = skillResult.skill;
+				const skills = skillResult.skills;
 				let thinking: ThinkingLevel | undefined;
 				let thinkingLevels: ThinkingLevel[] | undefined;
 				if (!chain) {
@@ -1729,14 +1927,31 @@ function loadPromptsWithModelFromDir(
 						);
 					}
 				}
-				const hasModelConditionalDirectives = /<if-model(?:\s|>)|<else(?:\s|>)|<\/if-model\s*>|<\/else(?:\s|>)/.test(body);
+				let content = body;
+				if (shouldRenderIncludes) {
+					const renderedIncludes = renderPromptIncludes({
+						content: body,
+						includes,
+						promptFilePath: fullPath,
+						promptRoot,
+						cwd: loadCwd,
+						source,
+					});
+					if (!renderedIncludes.ok) {
+						diagnostics.push(...renderedIncludes.diagnostics);
+						continue;
+					}
+					content = renderedIncludes.content;
+				}
+				const hasModelConditionalDirectives = /<if-model(?:\s|>)|<else(?:\s|>)|<\/if-model\s*>|<\/else(?:\s|>)/.test(content);
 				const hasExtensionSpecificConfig =
-					skill !== undefined ||
+					skills !== undefined ||
 					thinking !== undefined ||
 					fresh === true ||
 					loop !== undefined ||
 					converge === false ||
 					boomerang === true ||
+					shouldRenderIncludes ||
 					safeParallel !== undefined ||
 					deterministic !== undefined ||
 					hasLineup ||
@@ -1751,12 +1966,14 @@ function loadPromptsWithModelFromDir(
 				prompts.push({
 					name,
 					description,
-					content: body,
+					content,
 					models,
+					...(includes !== undefined ? { includes } : {}),
 					chain: chain || undefined,
 					chainContext,
 					restore,
 					skill,
+					...(skills !== undefined ? { skills } : {}),
 					thinking,
 					thinkingLevels,
 					rotate: rotate || undefined,
@@ -1830,13 +2047,13 @@ export function loadPromptsWithModel(cwd: string, includePlainPrompts = false): 
 		promptMap.set(prompt.name, prompt);
 	}
 
-	const globalResult = loadPromptsWithModelFromDir(globalDir, "user", includePlainPrompts);
+	const globalResult = loadPromptsWithModelFromDir(globalDir, "user", includePlainPrompts, cwd, globalDir);
 	diagnostics.push(...globalResult.diagnostics);
 	for (const prompt of globalResult.prompts) {
 		addPrompt(prompt);
 	}
 
-	const projectResult = loadPromptsWithModelFromDir(projectDir, "project", includePlainPrompts);
+	const projectResult = loadPromptsWithModelFromDir(projectDir, "project", includePlainPrompts, cwd, projectDir);
 	diagnostics.push(...projectResult.diagnostics);
 	for (const prompt of projectResult.prompts) {
 		addPrompt(prompt);
@@ -1860,7 +2077,7 @@ export function buildPromptCommandDescription(prompt: PromptWithModel): string {
 	}
 	const modelLabel = prompt.models.length > 0 ? prompt.models.map((model) => model.split("/").pop() || model).join("|") : "current";
 	const rotateLabel = prompt.rotate ? " rotate" : "";
-	const skillLabel = prompt.skill ? ` +${prompt.skill}` : "";
+	const skillLabel = prompt.skills && prompt.skills.length > 0 ? ` +${prompt.skills.join(",+")}` : prompt.skill ? ` +${prompt.skill}` : "";
 	const thinkingValue = prompt.thinkingLevels ? prompt.thinkingLevels.join(",") : prompt.thinking;
 	const thinkingLabel = thinkingValue ? ` ${thinkingValue}` : "";
 	const loopLabel = prompt.loop !== undefined ? ` loop:${prompt.loop === null ? "unlimited" : prompt.loop}` : "";
@@ -1924,6 +2141,79 @@ export function resolveSkillPath(skillName: string, cwd: string): string | undef
 	if (globalPiSkill) return globalPiSkill;
 
 	return findFirstExisting(getSkillCandidates(join(homedir(), ".agents", "skills"), skillName));
+}
+
+export interface DiscoveredSkill {
+	skillName: string;
+	skillPath: string;
+}
+
+function getSkillDiscoveryRoots(cwd: string): string[] {
+	const projectDir = resolve(cwd);
+	const roots: string[] = [resolve(projectDir, ".pi", "skills")];
+	const repoRoot = findRepoRoot(projectDir);
+	for (const dir of walkAncestors(projectDir, repoRoot)) {
+		roots.push(join(dir, ".agents", "skills"));
+	}
+	roots.push(join(homedir(), ".pi", "agent", "skills"));
+	roots.push(join(homedir(), ".agents", "skills"));
+	return roots;
+}
+
+function isValidDiscoveredSkillName(skillName: string): boolean {
+	return VALID_EXACT_SKILL_NAME.test(skillName);
+}
+
+function isReadableParseableSkillFile(skillPath: string): boolean {
+	try {
+		const skillStats = lstatSync(skillPath);
+		if (!skillStats.isFile()) return false;
+		parseFrontmatter(readFileSync(skillPath, "utf-8"));
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function discoverSkillsInRoot(root: string): DiscoveredSkill[] {
+	try {
+		const entries = readdirSync(root, { withFileTypes: true });
+		const discovered = new Map<string, { skillPath: string; priority: number }>();
+
+		for (const entry of entries) {
+			if (entry.name.startsWith(".")) continue;
+			if (entry.isSymbolicLink()) continue;
+			const entryPath = join(root, entry.name);
+
+			if (entry.isDirectory()) {
+				const skillName = entry.name;
+				if (!isValidDiscoveredSkillName(skillName)) continue;
+				const skillPath = join(entryPath, "SKILL.md");
+				if (!isReadableParseableSkillFile(skillPath)) continue;
+				discovered.set(skillName, { skillPath, priority: 0 });
+				continue;
+			}
+
+			if (!entry.isFile()) continue;
+			if (!entry.name.endsWith(".md")) continue;
+			const skillName = entry.name.slice(0, -3);
+			if (skillName.startsWith(".")) continue;
+			if (!isValidDiscoveredSkillName(skillName)) continue;
+			const existing = discovered.get(skillName);
+			if (existing && existing.priority <= 1) continue;
+			if (!isReadableParseableSkillFile(entryPath)) continue;
+			discovered.set(skillName, { skillPath: entryPath, priority: 1 });
+		}
+
+		return Array.from(discovered, ([skillName, value]) => ({ skillName, skillPath: value.skillPath }))
+			.sort((a, b) => lexicalCompare(a.skillName, b.skillName));
+	} catch {
+		return [];
+	}
+}
+
+export function discoverFilesystemSkills(cwd: string): DiscoveredSkill[] {
+	return getSkillDiscoveryRoots(cwd).flatMap((root) => discoverSkillsInRoot(root));
 }
 
 export function readSkillContent(skillPath: string): string {

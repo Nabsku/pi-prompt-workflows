@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { buildPromptCommandDescription, loadPromptsWithModel } from "../prompt-loader.js";
 
 function withTempHome(run: (root: string) => void) {
-	const root = mkdtempSync(join(tmpdir(), "pi-prompt-template-model-deterministic-loader-"));
+	const root = mkdtempSync(join(tmpdir(), "pi-prompt-template-model-enhanced-deterministic-loader-"));
 	const previousHome = process.env.HOME;
 	process.env.HOME = root;
 	try {

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import promptModelExtension from "../index.js";
@@ -114,7 +114,7 @@ function stripLoopPrefix(msg: string): string {
 }
 
 async function withTempHome(run: (root: string) => Promise<void>) {
-	const root = mkdtempSync(join(tmpdir(), "pi-prompt-template-model-"));
+	const root = mkdtempSync(join(tmpdir(), "pi-prompt-template-model-enhanced-"));
 	const previousHome = process.env.HOME;
 	process.env.HOME = root;
 	try {
@@ -1579,7 +1579,7 @@ test("skill injects as before_agent_start message without mutating system prompt
 					customType?: string;
 					content?: string;
 					display?: boolean;
-					details?: { skillName?: string; skillContent?: string; skillPath?: string };
+					details?: { skills?: Array<{ skillName?: string; skillContent?: string; skillPath?: string }> };
 			  }
 			| undefined;
 		assert.ok(message);
@@ -1587,7 +1587,8 @@ test("skill injects as before_agent_start message without mutating system prompt
 		assert.equal(message.display, true);
 		assert.match(message.content ?? "", /<skill name="tmux">/);
 		assert.match(message.content ?? "", /Always use tmux\./);
-		assert.equal(message.details?.skillName, "tmux");
+		assert.equal(message.details?.skills?.[0]?.skillName, "tmux");
+		assert.equal(message.details?.skills?.length, 1);
 		assert.equal(await pi.emitWithResult("before_agent_start", { systemPrompt: "BASE" }, ctx), undefined);
 	});
 });
@@ -1614,11 +1615,332 @@ test("skill resolves from registered skill commands and supports skill: prefix",
 
 		const beforeStart = await pi.emitWithResult("before_agent_start", { systemPrompt: "BASE" }, ctx);
 		assert.ok(beforeStart);
-		const message = beforeStart.message as { content?: string; details?: { skillName?: string; skillPath?: string } } | undefined;
+		const message = beforeStart.message as { content?: string; details?: { skills?: Array<{ skillName?: string; skillPath?: string }> } } | undefined;
 		assert.ok(message);
 		assert.match(message.content ?? "", /Use external skill\./);
-		assert.equal(message.details?.skillName, "external-skill");
-		assert.equal(message.details?.skillPath, skillPath);
+		assert.equal(message.details?.skills?.[0]?.skillName, "external-skill");
+		assert.equal(message.details?.skills?.[0]?.skillPath, skillPath);
+	});
+});
+
+test("two filesystem skills inject one pending message in declared order", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(root, ".pi", "agent", "skills", "tmux"), { recursive: true });
+		mkdirSync(join(root, ".pi", "agent", "skills", "repo-review"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "deslop.md"), `---\nmodel: ${MODEL_ID}\nskills: [tmux, repo-review]\n---\nTASK:$@`);
+		writeFileSync(join(root, ".pi", "agent", "skills", "tmux", "SKILL.md"), "tmux content");
+		writeFileSync(join(root, ".pi", "agent", "skills", "repo-review", "SKILL.md"), "repo content");
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const { ctx } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("deslop")!.handler("demo", ctx);
+		assert.deepEqual(pi.userMessages, ["TASK:demo"]);
+		const beforeStart = await pi.emitWithResult("before_agent_start", { systemPrompt: "BASE" }, ctx);
+		assert.ok(beforeStart);
+		const message = beforeStart.message as { customType?: string; content?: string; details?: { skills?: Array<{ skillName?: string }> } } | undefined;
+		assert.equal(message?.customType, "skill-loaded");
+		assert.equal((message?.content?.match(/<skill name="/g) ?? []).length, 2);
+		assert.ok((message?.content?.indexOf('<skill name="tmux">') ?? -1) < (message?.content?.indexOf('<skill name="repo-review">') ?? -1));
+		assert.match(message?.content ?? "", /<skill name="tmux">\ntmux content\n<\/skill>\n\n<skill name="repo-review">\nrepo content\n<\/skill>/);
+		assert.deepEqual(message?.details?.skills?.map((skill) => skill.skillName), ["tmux", "repo-review"]);
+		assert.equal(await pi.emitWithResult("before_agent_start", { systemPrompt: "BASE" }, ctx), undefined);
+	});
+});
+
+test("wildcard skills expand in deterministic source and lexical order", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "skills", "golang-tests"), { recursive: true });
+		mkdirSync(join(root, ".pi", "agent", "skills", "golang-style"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "go.md"), `---\nmodel: ${MODEL_ID}\nskills: [golang-*]\n---\nGO`);
+		writeFileSync(join(cwd, ".pi", "skills", "golang-tests", "SKILL.md"), "tests content");
+		writeFileSync(join(root, ".pi", "agent", "skills", "golang-style", "SKILL.md"), "style content");
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const { ctx } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+		await pi.commands.get("go")!.handler("", ctx);
+
+		const beforeStart = await pi.emitWithResult("before_agent_start", { systemPrompt: "BASE" }, ctx);
+		const message = beforeStart?.message as { content?: string; details?: { skills?: Array<{ skillName?: string }> } } | undefined;
+		assert.deepEqual(message?.details?.skills?.map((skill) => skill.skillName), ["golang-tests", "golang-style"]);
+		assert.ok((message?.content?.indexOf('<skill name="golang-tests">') ?? -1) < (message?.content?.indexOf('<skill name="golang-style">') ?? -1));
+	});
+});
+
+test("wildcard skills skip malformed filesystem matches and still load valid matches", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		const skillsRoot = join(cwd, ".pi", "skills");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(skillsRoot, "golang-broken-dir"), { recursive: true });
+		mkdirSync(join(skillsRoot, "golang-valid"), { recursive: true });
+		mkdirSync(join(skillsRoot, "golang-shadowed"), { recursive: true });
+		mkdirSync(join(root, ".pi", "agent", "skills", "golang-shadowed"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "go.md"), `---\nmodel: ${MODEL_ID}\nskills: [golang-*]\n---\nGO`);
+		writeFileSync(join(skillsRoot, "golang-broken-file.md"), "---\nname: [\n---\nfile should be ignored");
+		writeFileSync(join(skillsRoot, "golang-broken-dir", "SKILL.md"), "---\nname: [\n---\ndir should be ignored");
+		writeFileSync(join(skillsRoot, "golang-shadowed", "SKILL.md"), "---\nname: [\n---\nproject malformed duplicate should be ignored");
+		writeFileSync(join(root, ".pi", "agent", "skills", "golang-shadowed", "SKILL.md"), "global fallback content");
+		writeFileSync(join(skillsRoot, "golang-valid", "SKILL.md"), "valid content");
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const { ctx, getNotifications } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+		await pi.commands.get("go")!.handler("", ctx);
+
+		assert.deepEqual(pi.userMessages, ["GO"]);
+		assert.doesNotMatch(getNotifications().join("\n"), /Failed to read skill|No skills matched/);
+		const beforeStart = await pi.emitWithResult("before_agent_start", { systemPrompt: "BASE" }, ctx);
+		const message = beforeStart?.message as { content?: string; details?: { skills?: Array<{ skillName?: string }> } } | undefined;
+		assert.deepEqual(message?.details?.skills?.map((skill) => skill.skillName), ["golang-valid", "golang-shadowed"]);
+		assert.match(message?.content ?? "", /valid content/);
+		assert.match(message?.content ?? "", /global fallback content/);
+		assert.doesNotMatch(message?.content ?? "", /should be ignored|project malformed duplicate/);
+	});
+});
+
+test("skill-prefixed wildcard behaves the same as bare wildcard", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "skills", "golang-style"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "skills", "golang-tests"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "go.md"), `---\nmodel: ${MODEL_ID}\nskill: skill:golang-*\n---\nGO`);
+		writeFileSync(join(cwd, ".pi", "skills", "golang-style", "SKILL.md"), "style content");
+		writeFileSync(join(cwd, ".pi", "skills", "golang-tests", "SKILL.md"), "tests content");
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const { ctx } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+		await pi.commands.get("go")!.handler("", ctx);
+
+		const beforeStart = await pi.emitWithResult("before_agent_start", { systemPrompt: "BASE" }, ctx);
+		const message = beforeStart?.message as { details?: { skills?: Array<{ skillName?: string }> } } | undefined;
+		assert.deepEqual(message?.details?.skills?.map((skill) => skill.skillName), ["golang-style", "golang-tests"]);
+	});
+});
+
+test("nonmatching wildcard aborts before side effects", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "go.md"), `---\nmodel: ${MODEL_ID}\nskill: golang-*\n---\nGO`);
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const { ctx, getNotifications } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+		await pi.commands.get("go")!.handler("", ctx);
+
+		assert.deepEqual(pi.userMessages, []);
+		assert.match(getNotifications().join("\n"), /No skills matched "golang-\*"/);
+	});
+});
+
+test("wildcard discovery is direct-only, safe-name-only, non-symlinked, and directory SKILL wins", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		const skillsRoot = join(cwd, ".pi", "skills");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(skillsRoot, "golang-dir"), { recursive: true });
+		mkdirSync(join(skillsRoot, "nested", "golang-nested"), { recursive: true });
+		mkdirSync(join(skillsRoot, ".golang-hidden"), { recursive: true });
+		mkdirSync(join(skillsRoot, "golang-dupe"), { recursive: true });
+		mkdirSync(join(root, "target-symlink-dir"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "go.md"), `---\nmodel: ${MODEL_ID}\nskills: [golang-*]\n---\nGO`);
+		writeFileSync(join(skillsRoot, "golang-dir", "SKILL.md"), "dir content");
+		writeFileSync(join(skillsRoot, "nested", "golang-nested", "SKILL.md"), "nested content");
+		writeFileSync(join(skillsRoot, ".golang-hidden", "SKILL.md"), "hidden content");
+		writeFileSync(join(skillsRoot, "golang-bad<xml.md"), "bad xml");
+		writeFileSync(join(skillsRoot, "golang-bad>xml.md"), "bad xml");
+		writeFileSync(join(skillsRoot, "golang-bad&xml.md"), "bad xml");
+		writeFileSync(join(skillsRoot, "golang-bad\"xml.md"), "bad quote");
+		writeFileSync(join(skillsRoot, "golang-bad'xml.md"), "bad quote");
+		writeFileSync(join(skillsRoot, "golang-bad space.md"), "bad space");
+		writeFileSync(join(skillsRoot, "golang-dupe.md"), "file content");
+		writeFileSync(join(skillsRoot, "golang-dupe", "SKILL.md"), "directory wins");
+		writeFileSync(join(root, "target-symlink.md"), "symlink file content");
+		writeFileSync(join(root, "target-symlink-dir", "SKILL.md"), "symlink dir content");
+		symlinkSync(join(root, "target-symlink.md"), join(skillsRoot, "golang-symlink-file.md"));
+		symlinkSync(join(root, "target-symlink-dir"), join(skillsRoot, "golang-symlink-dir"));
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const { ctx } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+		await pi.commands.get("go")!.handler("", ctx);
+		const beforeStart = await pi.emitWithResult("before_agent_start", { systemPrompt: "BASE" }, ctx);
+		const message = beforeStart?.message as { content?: string; details?: { skills?: Array<{ skillName?: string }> } } | undefined;
+
+		assert.deepEqual(message?.details?.skills?.map((skill) => skill.skillName), ["golang-dir", "golang-dupe"]);
+		assert.match(message?.content ?? "", /directory wins/);
+		assert.doesNotMatch(message?.content ?? "", /file content|nested content|hidden content|bad xml|bad quote|bad space|symlink/);
+	});
+});
+
+test("registered wildcard matches precede filesystem matches and unsafe registered names are ignored", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		const externalPath = join(root, "external-one.md");
+		const badPath = join(root, "bad.md");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "skills", "external-one"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "skills", "external-two"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "external.md"), `---\nmodel: ${MODEL_ID}\nskills: [external-*]\n---\nEXT`);
+		writeFileSync(externalPath, "registered content");
+		writeFileSync(badPath, "bad registered content");
+		writeFileSync(join(cwd, ".pi", "skills", "external-one", "SKILL.md"), "filesystem duplicate content");
+		writeFileSync(join(cwd, ".pi", "skills", "external-two", "SKILL.md"), "filesystem two content");
+
+		const pi = new FakePi();
+		pi.skillCommands = [
+			{ name: "skill:external-one", source: "skill", sourceInfo: { path: externalPath } },
+			{ name: "skill:external-bad<xml", source: "skill", sourceInfo: { path: badPath } },
+			{ name: "skill:external-bad\"name", source: "skill", sourceInfo: { path: badPath } },
+		];
+		promptModelExtension(pi as never);
+		const { ctx } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+		await pi.commands.get("external")!.handler("", ctx);
+
+		const beforeStart = await pi.emitWithResult("before_agent_start", { systemPrompt: "BASE" }, ctx);
+		const message = beforeStart?.message as { content?: string; details?: { skills?: Array<{ skillName?: string }> } } | undefined;
+		assert.deepEqual(message?.details?.skills?.map((skill) => skill.skillName), ["external-one", "external-two"]);
+		assert.match(message?.content ?? "", /registered content/);
+		assert.doesNotMatch(message?.content ?? "", /filesystem duplicate content|bad registered content/);
+	});
+});
+
+test("wildcard expansion de-dupes explicit and repeated skills without recursive related skill loading", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "skills", "golang-style"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "skills", "golang-tests"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "skills", "tmux"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "skills", "other-skill"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "go.md"), `---\nmodel: ${MODEL_ID}\nskills: [golang-style, golang-*, tmux, tmux]\n---\nGO`);
+		writeFileSync(join(cwd, ".pi", "skills", "golang-style", "SKILL.md"), "style content related_skills: [other-skill]");
+		writeFileSync(join(cwd, ".pi", "skills", "golang-tests", "SKILL.md"), "tests content mentions other-skill");
+		writeFileSync(join(cwd, ".pi", "skills", "tmux", "SKILL.md"), "tmux content");
+		writeFileSync(join(cwd, ".pi", "skills", "other-skill", "SKILL.md"), "other content should not load");
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const { ctx } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+		await pi.commands.get("go")!.handler("", ctx);
+		const beforeStart = await pi.emitWithResult("before_agent_start", { systemPrompt: "BASE" }, ctx);
+		const message = beforeStart?.message as { content?: string; details?: { skills?: Array<{ skillName?: string }> } } | undefined;
+
+		assert.deepEqual(message?.details?.skills?.map((skill) => skill.skillName), ["golang-style", "golang-tests", "tmux"]);
+		assert.equal((message?.content?.match(/<skill name="golang-style">/g) ?? []).length, 1);
+		assert.doesNotMatch(message?.content ?? "", /<skill name="other-skill">|other content should not load/);
+	});
+});
+
+test("missing second skill aborts before model switch and user message send", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(root, ".pi", "agent", "skills", "tmux"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "deslop.md"), "---\nmodel: anthropic/target-model\nskills: [tmux, missing-skill]\n---\nTASK:$@");
+		writeFileSync(join(root, ".pi", "agent", "skills", "tmux", "SKILL.md"), "tmux content");
+
+		const baseModel = { provider: "anthropic", id: "base-model" };
+		const targetModel = { provider: "anthropic", id: "target-model" };
+		const pi = new FakePi();
+		pi.currentModel = baseModel;
+		promptModelExtension(pi as never);
+		const { ctx, getNotifications } = createContext(cwd, pi, [baseModel, targetModel]);
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("deslop")!.handler("demo", ctx);
+		assert.deepEqual(pi.setModelCalls, []);
+		assert.deepEqual(pi.userMessages, []);
+		assert.match(getNotifications().join("\n"), /Skill "missing-skill" not found/);
+		assert.equal(await pi.emitWithResult("before_agent_start", { systemPrompt: "BASE" }, ctx), undefined);
+	});
+});
+
+test("registered skill with unsafe normalized name is rejected before injection", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		const skillPath = join(root, "custom-skills", "bad.md");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(root, "custom-skills"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "deslop.md"), `---\nmodel: ${MODEL_ID}\nskill: skill:bad<xml\n---\nTASK:$@`);
+		writeFileSync(skillPath, "bad xml name content");
+
+		const pi = new FakePi();
+		pi.skillCommands = [{ name: "skill:bad<xml", source: "skill", sourceInfo: { path: skillPath } }];
+		promptModelExtension(pi as never);
+		const { ctx, getNotifications } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+
+		assert.equal(pi.commands.has("deslop"), false);
+		assert.deepEqual(pi.userMessages, []);
+		assert.equal(await pi.emitWithResult("before_agent_start", { systemPrompt: "BASE" }, ctx), undefined);
+		assert.match(getNotifications().join("\n"), /invalid skill name/i);
+	});
+});
+
+test("deterministic prompt with missing skill does not run deterministic script", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		const marker = join(root, "deterministic-ran");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "push.md"), `---\nrun: touch ${JSON.stringify(marker)}\nhandoff: always\nmodel: anthropic/target-model\nskill: missing-skill\n---\nTASK`);
+
+		const baseModel = { provider: "anthropic", id: "base-model" };
+		const targetModel = { provider: "anthropic", id: "target-model" };
+		const pi = new FakePi();
+		pi.currentModel = baseModel;
+		promptModelExtension(pi as never);
+		const { ctx, getNotifications } = createContext(cwd, pi, [baseModel, targetModel]);
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("push")!.handler("", ctx);
+		assert.equal(existsSync(marker), false);
+		assert.deepEqual(pi.setModelCalls, []);
+		assert.deepEqual(pi.userMessages, []);
+		assert.match(getNotifications().join("\n"), /Skill "missing-skill" not found/);
+	});
+});
+
+test("deterministic prompt with unreadable selected skill aborts before side effects", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		const marker = join(root, "deterministic-ran");
+		const unreadablePath = join(root, "unreadable-skill-dir");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(unreadablePath, { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "push.md"), `---\nrun: touch ${JSON.stringify(marker)}\nhandoff: always\nmodel: anthropic/target-model\nskill: skill:unreadable\n---\nTASK`);
+
+		const baseModel = { provider: "anthropic", id: "base-model" };
+		const targetModel = { provider: "anthropic", id: "target-model" };
+		const pi = new FakePi();
+		pi.currentModel = baseModel;
+		pi.skillCommands = [{ name: "skill:unreadable", source: "skill", sourceInfo: { path: unreadablePath } }];
+		promptModelExtension(pi as never);
+		const { ctx, getNotifications } = createContext(cwd, pi, [baseModel, targetModel]);
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("push")!.handler("", ctx);
+		assert.equal(existsSync(marker), false);
+		assert.deepEqual(pi.setModelCalls, []);
+		assert.deepEqual(pi.userMessages, []);
+		assert.match(getNotifications().join("\n"), /Failed to read skill "unreadable"/);
 	});
 });
 
@@ -1670,13 +1992,15 @@ test("skill path traversal names are rejected", async () => {
 	});
 });
 
-test("session switch clears queued skill message", async () => {
+test("session switch clears pending plural skill message", async () => {
 	await withTempHome(async (root) => {
 		const cwd = join(root, "project");
 		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 		mkdirSync(join(root, ".pi", "agent", "skills", "tmux"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "deslop.md"), `---\nmodel: ${MODEL_ID}\nskill: tmux\n---\nTASK:$@`);
+		mkdirSync(join(root, ".pi", "agent", "skills", "repo-review"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "deslop.md"), `---\nmodel: ${MODEL_ID}\nskills: [tmux, repo-review]\n---\nTASK:$@`);
 		writeFileSync(join(root, ".pi", "agent", "skills", "tmux", "SKILL.md"), "---\nname: tmux\ndescription: tmux helper\n---\nAlways use tmux.");
+		writeFileSync(join(root, ".pi", "agent", "skills", "repo-review", "SKILL.md"), "---\nname: repo-review\ndescription: review helper\n---\nAlways review repos.");
 
 		const pi = new FakePi();
 		promptModelExtension(pi as never);
@@ -1686,7 +2010,7 @@ test("session switch clears queued skill message", async () => {
 		const deslop = pi.commands.get("deslop");
 		assert.ok(deslop);
 		await deslop.handler("demo", ctx);
-			await pi.emit("session_start", { reason: "resume" }, ctx);
+		await pi.emit("session_start", { reason: "resume" }, ctx);
 		assert.equal(await pi.emitWithResult("before_agent_start", { systemPrompt: "BASE" }, ctx), undefined);
 	});
 });
@@ -2058,6 +2382,55 @@ test("--model flag overrides prompt model in loop iterations", async () => {
 
 		assert.equal(pi.setModelCalls[0], "openai/gpt-5.4");
 		assert.equal(pi.userMessages.length, 2);
+	});
+});
+
+test("runtime subagent override is rejected when prompt skills are configured", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "skills", "tmux"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "check.md"), `---\nmodel: ${MODEL_ID}\nskill: tmux\n---\ncheck code`);
+		writeFileSync(join(cwd, ".pi", "skills", "tmux", "SKILL.md"), "tmux content");
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const { ctx, getNotifications } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("check")!.handler("--subagent", ctx);
+
+		assert.deepEqual(pi.userMessages, []);
+		assert.deepEqual(pi.setModelCalls, []);
+		assert.match(getNotifications().join("\n"), /cannot run as subagents/i);
+		assert.equal(await pi.emitWithResult("before_agent_start", { systemPrompt: "BASE" }, ctx), undefined);
+	});
+});
+
+test("parallel chain runtime subagent override is rejected when step skills are configured", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "skills", "tmux"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "parallel(check-a, check-b)"\n---\nignored');
+		writeFileSync(join(cwd, ".pi", "prompts", "check-a.md"), `---\nmodel: ${MODEL_ID}\nskill: tmux\n---\nCHECK-A`);
+		writeFileSync(join(cwd, ".pi", "prompts", "check-b.md"), `---\nmodel: ${MODEL_ID}\n---\nCHECK-B`);
+		writeFileSync(join(cwd, ".pi", "skills", "tmux", "SKILL.md"), "tmux content");
+
+		const pi = new FakePi();
+		let delegatedRequests = 0;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, () => {
+			delegatedRequests++;
+		});
+		promptModelExtension(pi as never);
+		const { ctx, getNotifications } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("pipeline")!.handler("--subagent", ctx);
+
+		assert.equal(delegatedRequests, 0);
+		assert.deepEqual(pi.userMessages, []);
+		assert.match(getNotifications().join("\n"), /cannot run as subagents/i);
 	});
 });
 

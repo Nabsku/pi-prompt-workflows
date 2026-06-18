@@ -199,7 +199,17 @@ test("deterministic prompts can inject env and disable nonInteractive defaults",
 		promptModelExtension(pi as never);
 		await pi.emit("session_start", {}, ctx);
 
-		await pi.commands.get("deploy")!.handler("", ctx);
+		const previousCi = process.env.CI;
+		delete process.env.CI;
+		try {
+			await pi.commands.get("deploy")!.handler("", ctx);
+		} finally {
+			if (previousCi === undefined) {
+				delete process.env.CI;
+			} else {
+				process.env.CI = previousCi;
+			}
+		}
 
 		assert.equal(pi.customMessages.length, 1);
 		assert.match(pi.customMessages[0].details.stdout, /missing\ndeploy-token/);

@@ -8,7 +8,7 @@ description: |
 
 # Prompt Template Authoring
 
-Use this skill when working on prompt templates for `pi-prompt-template-model`.
+Use this skill when working on prompt templates for `pi-prompt-template-model-enhanced`.
 Templates are markdown files that register as slash commands.
 
 ## Where Templates Live

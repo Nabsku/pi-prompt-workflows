@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { preparePromptExecution } from "../prompt-execution.js";
+import { loadPromptsWithModel } from "../prompt-loader.js";
 
 const model = { provider: "anthropic", id: "claude-sonnet-4-20250514" };
 const registry = {
@@ -13,13 +17,65 @@ const registry = {
 	getAvailable() {
 		return [model];
 	},
-		async getApiKeyAndHeaders() {
-			return { ok: true, apiKey: "token" };
-		},
+	async getApiKeyAndHeaders() {
+		return { ok: true, apiKey: "token" };
+	},
 	isUsingOAuth() {
 		return false;
 	},
 };
+
+async function withTempHome<T>(run: (root: string) => Promise<T> | T): Promise<T> {
+	const root = mkdtempSync(join(tmpdir(), "pi-prompt-execution-"));
+	const previousHome = process.env.HOME;
+	process.env.HOME = root;
+	try {
+		return await run(root);
+	} finally {
+		process.env.HOME = previousHome;
+		rmSync(root, { recursive: true, force: true });
+	}
+}
+
+test("included $@ survives loader rendering and is substituted during execution prep", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompt-partials"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-partials", "args.md"), "Args: $@");
+		writeFileSync(join(cwd, ".pi", "prompts", "args-demo.md"), "---\nmodel: claude-sonnet-4-20250514\ninclude: args.md\n---\nTail");
+
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.diagnostics.length, 0);
+		const prompt = result.prompts.get("args-demo");
+		assert.ok(prompt);
+		assert.equal(prompt.content, "Args: $@\n\nTail");
+
+		const prepared = await preparePromptExecution(prompt, ["one", "two"], undefined, registry as never);
+		assert.ok(prepared && !("message" in prepared));
+		assert.equal(prepared.content, "Args: one two\n\nTail");
+	});
+});
+
+test("included <if-model> survives loader rendering and is rendered during execution prep", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompt-partials"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-partials", "conditional.md"), '<if-model is="anthropic/*">anthropic<else>other</if-model>');
+		writeFileSync(join(cwd, ".pi", "prompts", "conditional-demo.md"), "---\nmodel: claude-sonnet-4-20250514\ninclude: conditional.md\n---\nTail");
+
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.diagnostics.length, 0);
+		const prompt = result.prompts.get("conditional-demo");
+		assert.ok(prompt);
+		assert.equal(prompt.content, '<if-model is="anthropic/*">anthropic<else>other</if-model>\n\nTail');
+
+		const prepared = await preparePromptExecution(prompt, [], undefined, registry as never);
+		assert.ok(prepared && !("message" in prepared));
+		assert.equal(prepared.content, "anthropic\n\nTail");
+	});
+});
 
 test("preparePromptExecution renders conditionals before substituting user args", async () => {
 	const prepared = await preparePromptExecution(

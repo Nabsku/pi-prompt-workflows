@@ -22,6 +22,7 @@ import { notify, summarizePromptDiagnostics, diagnosticsFingerprint } from "./no
 import { preparePromptExecution, renderPromptForResolvedModel } from "./prompt-execution.js";
 import {
 	buildPromptCommandDescription,
+	discoverFilesystemSkills,
 	expandCwdPath,
 	loadPromptsWithModel,
 	readSkillContent,
@@ -181,11 +182,31 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		return skillName.startsWith("skill:") ? skillName.slice("skill:".length) : skillName;
 	}
 
+	function isSafeXmlSkillName(skillName: string): boolean {
+		return /^[A-Za-z0-9._-]+$/.test(skillName);
+	}
+
+	function lexicalCompare(a: string, b: string): number {
+		if (a < b) return -1;
+		if (a > b) return 1;
+		return 0;
+	}
+
+	function isWildcardSelector(skillName: string): boolean {
+		return skillName.includes("*");
+	}
+
+	function isValidSuffixWildcardSelector(skillName: string): boolean {
+		const firstStar = skillName.indexOf("*");
+		return firstStar > 0 && firstStar === skillName.length - 1 && skillName.indexOf("*", firstStar + 1) === -1 && isSafeXmlSkillName(skillName.slice(0, -1));
+	}
+
+	function invalidWildcardError(skillName: string): string {
+		return `Invalid skill wildcard "${skillName}": only non-empty suffix "*" prefix matching is supported.`;
+	}
+
 	function isPathResolvableSkillName(skillName: string): boolean {
-		if (skillName === "." || skillName === "..") return false;
-		if (skillName.includes("/")) return false;
-		if (skillName.includes("\\")) return false;
-		return true;
+		return skillName !== "." && skillName !== "..";
 	}
 
 	function resolveRegisteredSkillPath(skillName: string): string | undefined {
@@ -206,39 +227,112 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		return undefined;
 	}
 
-	function resolveSkillMessage(skillName: string | undefined, cwd: string): SkillMessageResolution {
-		if (!skillName) {
+	function discoverRegisteredWildcardMatches(prefix: string): Array<{ skillName: string; skillPath: string }> {
+		const matches = new Map<string, string>();
+		for (const command of pi.getCommands()) {
+			if (command.source !== "skill") continue;
+			const sourceInfo = "sourceInfo" in command
+				? (command as { sourceInfo?: { path?: string } }).sourceInfo
+				: undefined;
+			if (!sourceInfo?.path) continue;
+			const normalizedSkillName = normalizeSkillName(command.name);
+			if (!isSafeXmlSkillName(normalizedSkillName)) continue;
+			if (!normalizedSkillName.startsWith(prefix)) continue;
+			if (!matches.has(normalizedSkillName)) matches.set(normalizedSkillName, sourceInfo.path);
+		}
+		return Array.from(matches, ([skillName, skillPath]) => ({ skillName, skillPath }))
+			.sort((a, b) => lexicalCompare(a.skillName, b.skillName));
+	}
+
+	type ExpandedSkill = { skillName: string; skillPath?: string };
+
+	function expandWildcardSelector(selector: string, cwd: string): SkillMessageResolution | { kind: "matches"; skills: ExpandedSkill[] } {
+		if (!isValidSuffixWildcardSelector(selector)) {
+			return { kind: "error", error: invalidWildcardError(selector) };
+		}
+		const prefix = selector.slice(0, -1);
+		const matches: ExpandedSkill[] = [];
+		const seen = new Set<string>();
+		for (const skill of discoverRegisteredWildcardMatches(prefix)) {
+			if (seen.has(skill.skillName)) continue;
+			seen.add(skill.skillName);
+			matches.push(skill);
+		}
+		for (const skill of discoverFilesystemSkills(cwd)) {
+			if (!skill.skillName.startsWith(prefix)) continue;
+			if (seen.has(skill.skillName)) continue;
+			seen.add(skill.skillName);
+			matches.push(skill);
+		}
+		if (matches.length === 0) {
+			return { kind: "error", error: `No skills matched "${selector}"` };
+		}
+		return { kind: "matches", skills: matches };
+	}
+
+	function expandRequestedSkillNames(skillNames: string[], cwd: string): SkillMessageResolution | { kind: "expanded"; skills: ExpandedSkill[] } {
+		const expanded: ExpandedSkill[] = [];
+		const seen = new Set<string>();
+		for (const skillName of skillNames) {
+			const normalizedSkillName = normalizeSkillName(skillName);
+			if (!normalizedSkillName) {
+				return { kind: "error", error: `Skill "${skillName}" not found` };
+			}
+			if (isWildcardSelector(normalizedSkillName)) {
+				const wildcard = expandWildcardSelector(normalizedSkillName, cwd);
+				if (wildcard.kind !== "matches") return wildcard;
+				for (const matchedSkill of wildcard.skills) {
+					if (seen.has(matchedSkill.skillName)) continue;
+					seen.add(matchedSkill.skillName);
+					expanded.push(matchedSkill);
+				}
+				continue;
+			}
+			if (!isSafeXmlSkillName(normalizedSkillName)) {
+				return { kind: "error", error: `Skill "${skillName}" has invalid name "${normalizedSkillName}"` };
+			}
+			if (seen.has(normalizedSkillName)) continue;
+			seen.add(normalizedSkillName);
+			expanded.push({ skillName: normalizedSkillName });
+		}
+		return { kind: "expanded", skills: expanded };
+	}
+
+	function resolveSkillMessage(skillNames: string[], cwd: string): SkillMessageResolution {
+		if (skillNames.length === 0) {
 			return { kind: "none" };
 		}
 
-		const normalizedSkillName = normalizeSkillName(skillName);
-		if (!normalizedSkillName) {
-			return { kind: "error", error: `Skill "${skillName}" not found` };
+		const expandedSkillNames = expandRequestedSkillNames(skillNames, cwd);
+		if (expandedSkillNames.kind !== "expanded") return expandedSkillNames;
+
+		const loadedSkills: Array<{ skillName: string; skillContent: string; skillPath: string }> = [];
+		for (const skill of expandedSkillNames.skills) {
+			const skillPath = skill.skillPath ?? resolveRegisteredSkillPath(skill.skillName) ?? (isPathResolvableSkillName(skill.skillName) ? resolveSkillPath(skill.skillName, cwd) : undefined);
+			if (!skillPath) {
+				return { kind: "error", error: `Skill "${skill.skillName}" not found` };
+			}
+
+			try {
+				const skillContent = readSkillContent(skillPath);
+				loadedSkills.push({ skillName: skill.skillName, skillContent, skillPath });
+			} catch (error) {
+				return {
+					kind: "error",
+					error: `Failed to read skill "${skill.skillName}": ${error instanceof Error ? error.message : String(error)}`,
+				};
+			}
 		}
 
-		const skillPath =
-			resolveRegisteredSkillPath(skillName) ?? (isPathResolvableSkillName(normalizedSkillName) ? resolveSkillPath(normalizedSkillName, cwd) : undefined);
-		if (!skillPath) {
-			return { kind: "error", error: `Skill "${skillName}" not found` };
-		}
-
-		try {
-			const skillContent = readSkillContent(skillPath);
-			return {
-				kind: "ready",
-				message: {
-					customType: "skill-loaded",
-					content: `<skill name="${normalizedSkillName}">\n${skillContent}\n</skill>`,
-					display: true,
-					details: { skillName: normalizedSkillName, skillContent, skillPath },
-				},
-			};
-		} catch (error) {
-			return {
-				kind: "error",
-				error: `Failed to read skill "${skillName}": ${error instanceof Error ? error.message : String(error)}`,
-			};
-		}
+		return {
+			kind: "ready",
+			message: {
+				customType: "skill-loaded",
+				content: loadedSkills.map((skill) => `<skill name="${skill.skillName}">\n${skill.skillContent}\n</skill>`).join("\n\n"),
+				display: true,
+				details: { skills: loadedSkills },
+			},
+		};
 	}
 
 	async function waitForTurnStart(ctx: ExtensionContext) {
@@ -249,6 +343,10 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 	function shouldDelegatePrompt(prompt: PromptWithModel, override?: SubagentOverride): boolean {
 		return prompt.subagent !== undefined || override?.enabled === true;
+	}
+
+	function getRequestedSkills(prompt: PromptWithModel): string[] {
+		return prompt.skills ?? (prompt.skill ? [prompt.skill] : []);
 	}
 
 	function isParallelChainStep(step: ChainStepOrParallel): step is ParallelChainStep {
@@ -265,6 +363,17 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		taskPreamble?: string,
 		loopContext?: string,
 	): Promise<PromptStepResult | "aborted"> {
+		const requestedSkills = getRequestedSkills(prompt);
+		const skillResolution = resolveSkillMessage(requestedSkills, ctx.cwd);
+		if (skillResolution.kind === "error") {
+			notify(ctx, skillResolution.error, "error");
+			return "aborted";
+		}
+		if (requestedSkills.length > 0 && shouldDelegatePrompt(prompt, override)) {
+			notify(ctx, "Prompts with skill or skills frontmatter cannot run as subagents in v1.", "error");
+			return "aborted";
+		}
+
 		let deterministicPreamble: string | undefined;
 		if (prompt.deterministic) {
 			try {
@@ -355,12 +464,6 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 		if (prepared.warning) {
 			notify(ctx, prepared.warning, "warning");
-		}
-
-		const skillResolution = resolveSkillMessage(prompt.skill, ctx.cwd);
-		if (skillResolution.kind === "error") {
-			notify(ctx, skillResolution.error, "error");
-			return "aborted";
 		}
 
 		if (!prepared.selectedModel.alreadyActive) {
@@ -1275,6 +1378,12 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 						const isForkedParallelContext = stepTemplate.tasks.some((task) => task.prompt.inheritContext === true);
 						if (chainContextEnabled && !isForkedParallelContext && chainStepSummaries.length > 0) {
 							taskPreamble = `[Previous chain steps]\n\n${chainStepSummaries.join("\n\n")}`;
+						}
+
+						if (stepTemplate.tasks.some((task) => getRequestedSkills(task.prompt).length > 0 && shouldDelegatePrompt(task.prompt, subagentOverride))) {
+							notify(ctx, "Prompts with skill or skills frontmatter cannot run as subagents in v1.", "error");
+							aborted = true;
+							break;
 						}
 
 						let delegated;

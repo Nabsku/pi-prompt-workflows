@@ -1,27 +1,39 @@
 <p>
-  <img src="banner.png" alt="pi-prompt-template-model" width="1100">
+  <img src="banner.png" alt="pi-prompt-template-model-enhanced" width="1100">
 </p>
 
 # Prompt Template Model Extension
 
-Adds `model`, `skill`, and `thinking` frontmatter to pi prompt templates. Define slash commands that switch to the right model, set a thinking level, inject skill context, and auto-restore your session when done.
+> This package is an enhanced fork of `pi-prompt-template-model`. It stays close to upstream and is intended to be kept in sync while publishing the additional features under the separate package name `pi-prompt-template-model-enhanced`.
+
+Adds model selection, thinking levels, reusable prompt partials, and one-or-many skill injection to pi prompt templates. Define slash commands that switch to the right model, include shared instructions, load the exact skills needed, and auto-restore your session when done.
 
 ```
-/debug-python my code crashes
-  → switches to Sonnet, loads tmux skill, agent responds
+/review src/server.ts
+  → switches to Sonnet
+  → includes shared repo-review instructions
+  → loads tmux + TypeScript skills
   → restores your previous model when finished
 ```
 
 ## Why?
 
-Each prompt template becomes a self-contained agent mode. `/quick-debug` spins up a cheap model with REPL skills. `/deep-analysis` brings in extended thinking with refactoring expertise. When the command finishes, you're back to your daily driver without touching anything.
+Each prompt template becomes a self-contained agent mode. `/quick-debug` spins up a cheap model with REPL skills. `/deep-analysis` brings in extended thinking with refactoring expertise. `/review` can include the same shared repo rules every time without copying them into every template. When the command finishes, you're back to your daily driver without touching anything.
 
-No more manually switching models, no hoping the agent picks up on the right skill. You define the configuration once, and the slash command handles the rest.
+No more manually switching models, copying standard instructions between prompts, or hoping the agent picks up the right skills. You define the configuration once, and the slash command handles the rest.
+
+## What this adds
+
+- **Model routing**: choose one model, an explicit provider/model pair, or a fallback list.
+- **Thinking control**: set per-command thinking levels.
+- **Prompt includes**: reuse shared Markdown partials with `includes`, `include`, `<includes />`, and inline `<include file="..." />` directives.
+- **Multiple skills**: inject one skill with `skill`, many skills with `skills`, or constrained wildcard groups like `golang-*`.
+- **Execution control**: loops, model rotation, fresh context, boomerang collapse, delegated subagents, chains, and best-of-N compare prompts.
 
 ## Installation
 
 ```bash
-pi install npm:pi-prompt-template-model
+pi install npm:pi-prompt-template-model-enhanced
 ```
 
 Restart pi to load the extension.
@@ -36,7 +48,25 @@ pi-subagents is optional — everything else works without it. Using `subagent: 
 
 ## Quick Start
 
-Add `model` and optionally `skill` to any prompt template:
+Add `model`, optional `includes`, and optional `skill` / `skills` to any prompt template:
+
+```markdown
+---
+description: Review TypeScript with shared repo rules
+model: claude-sonnet-4-20250514
+includes:
+  - shared/repo-rules.md
+  - shared/review-checklist.md
+skills:
+  - tmux
+  - typescript-*
+---
+Review this change: $@
+```
+
+Run `/review src/server.ts` and the agent switches to Sonnet, prepends the shared partials, injects the requested skills, and starts working. When it finishes, your previous model is restored.
+
+For a smaller prompt, the old single-skill form still works:
 
 ```markdown
 ---
@@ -47,19 +77,20 @@ skill: tmux
 Start a Python REPL session and help me debug: $@
 ```
 
-Run `/debug-python some issue` and the agent switches to Sonnet, receives the tmux skill as context, and starts working. When it finishes, your previous model is restored.
-
 ## Frontmatter Reference
 
-All fields are optional. Templates that don't use any extension features (no `model`, `skill`, `thinking`, etc.) are left to pi's default prompt loader.
+All fields are optional. Templates that don't use any extension features (no `model`, `skill`, `skills`, `include`, `includes`, `thinking`, etc.) are left to pi's default prompt loader.
 
 ### Core Fields
 
 | Field | Default | What it does |
 |-------|---------|--------------|
 | `model` | current session model | Which model to use. Accepts a single model, a `provider/model-id` pair, or a comma-separated fallback list (see [Model Format](#model-format)). Ignored when `chain` is set. |
-| `skill` | — | Injects a skill's content as a context message before the agent handles your task. No extra round-trip — the agent gets the expertise immediately. See [Skill Resolution](#skill-resolution). |
+| `skill` | — | Injects a skill, or a constrained suffix-`*` wildcard selector such as `golang-*`, as context before the agent handles your task. Kept for backward compatibility and simple prompts. See [Skills](#skills). |
+| `skills` | — | List of skills to inject, with optional suffix-`*` wildcard selectors such as `golang-*`. See [Skills](#skills). |
 | `thinking` | — | Thinking level for the model: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`. |
+| `includes` | — | List of shared `.md` partials to insert into the prompt. See [Prompt includes](#prompt-includes). |
+| `include` | — | Shortcut for a single partial, equivalent to `includes: [file.md]`. See [Prompt includes](#prompt-includes). |
 | `description` | — | Short text shown next to the command in autocomplete. |
 | `chain` | — | Declares a reusable pipeline of templates (`step -> step`). When set, the body is ignored. See [Chain Templates](#chain-templates). |
 | `chainContext` | — | Chain templates only. Set to `summary` so delegated steps receive a compact summary of what previous steps did. Steps with `inheritContext: true` are excluded. See [Chain context for delegated steps](#chain-context-for-delegated-steps). |
@@ -128,7 +159,7 @@ model: anthropic/claude-haiku-4-5, openrouter/claude-haiku-4-5, claude-sonnet-4-
 
 Normally, pi lists available skills in the system prompt, the agent reads your task, decides which skill it needs, and loads it with the read tool. That's an extra round-trip, and the agent might not pick the right one.
 
-The `skill` field bypasses all of that:
+The `skill` field bypasses all of that and remains fully backward compatible:
 
 ```markdown
 ---
@@ -139,24 +170,191 @@ skill: surf
 $@
 ```
 
-The skill content is injected as a context message before the agent processes your task. No decision-making, no tool call — immediate expertise. If the skill file can't be found, the command fails fast instead of running without it.
+The skill content is injected as a context message before the agent processes your task. No decision-making, no tool call — immediate expertise. If a requested skill can't be found or read, the command fails fast instead of running without it.
+
+To load multiple skills, use `skills:` as a YAML list:
+
+```markdown
+---
+description: Go review mode
+model: claude-sonnet-4-20250514
+skills:
+  - tmux
+  - golang-style
+  - golang-tests
+---
+Review this change: $@
+```
+
+Scalar `skills` values are invalid. Use `skill: tmux` for one skill, not `skills: tmux`. A prompt with invalid `skills` frontmatter is skipped with a diagnostic rather than registered without its requested context.
+
+You can combine `skill` and `skills` during migration or composition. The singular `skill` is loaded first, followed by the list entries:
+
+```yaml
+skill: tmux
+skills:
+  - golang-style
+  - golang-tests
+# loads: tmux, golang-style, golang-tests
+```
+
+After wildcard expansion, duplicate skill names are removed from the final load list; the first requested occurrence wins. For example, `skills: [golang-style, golang-*]` injects `golang-style` only once even if the wildcard also matches it.
+
+Skills are resolved and validated before any deterministic script runs, before model switching, and before the user prompt is sent. That means invalid skill configuration aborts before potentially side-effectful deterministic steps execute.
 
 ### Skill Resolution
 
-The `skill` field accepts a bare name or a `skill:` prefix:
+Skill names accept a bare name or a `skill:` prefix:
 
 ```yaml
 skill: tmux
 skill: skill:tmux    # equivalent
 ```
 
+The same normalization applies inside `skills:` entries, including wildcard selectors: `skill:golang-*` is equivalent to `golang-*`.
+
 Resolution order:
 
 1. Registered skill commands from `pi.getCommands()` (source: `"skill"`)
 2. `<cwd>/.pi/skills/<name>/SKILL.md` or `<cwd>/.pi/skills/<name>.md`
-3. `.agents/skills` in the current directory and ancestors (up to the git root)
+3. `.agents/skills` in the current directory and ancestors (up to the git root, or the filesystem root if no git root is found)
 4. `~/.pi/agent/skills/<name>/SKILL.md` or `~/.pi/agent/skills/<name>.md`
 5. `~/.agents/skills/<name>/SKILL.md` or `~/.agents/skills/<name>.md`
+
+### Skill wildcards
+
+`skill` and `skills:` entries may use one constrained wildcard form: a non-empty prefix followed by a final `*`. This means `skill: golang-*` is valid too; it can inject more than one matching skill while preserving the same ordering and de-dupe rules.
+
+```yaml
+skills:
+  - golang-*
+  - repo-review
+```
+
+This is prefix matching, not general globbing. `golang-*` is valid; `*`, `go**`, `go*lang`, `go?*`, path-like selectors, and selectors containing whitespace or XML/quote characters are rejected.
+
+Wildcard expansion searches the same skill sources as exact skill resolution, in the same source order. Within each source, matches are sorted lexically by normalized skill name. If the same normalized name appears in more than one source, the first source wins. If a wildcard matches nothing, prompt execution aborts with an error such as `No skills matched "golang-*"`.
+
+Wildcard discovery is bounded to direct skill entries only: direct `name.md` files and direct `name/SKILL.md` directories. It does not recursively scan nested directories.
+
+Skill-to-skill references are not recursive in v1. Loaded skills are treated as Markdown content only; if a skill mentions another skill in prose, frontmatter, `related_skills`, or other metadata, that other skill is not loaded automatically. Add every required skill to the prompt's `skill`/`skills` frontmatter explicitly.
+
+### Skills with chains and subagents
+
+`skill` and `skills` apply to direct prompt execution.
+
+Chain wrapper templates ignore `skill` and `skills`; put skill frontmatter on the step templates instead. When a chain runs a step, that step uses its own skill configuration.
+
+Delegated prompts cannot combine `subagent:` with `skill` or `skills` in v1. Such prompts are rejected at registration time. Runtime delegation overrides such as `--subagent` and `--fork` also reject prompts or chain steps that declare skills, so they do not silently run without requested skill context.
+
+Compare prompts (`bestOfN`) cannot combine with `skill` or `skills` in v1 because compare execution delegates worker/reviewer/final-applier tasks. Add required skill instructions to the compare prompt body instead.
+
+## Prompt includes
+
+Prompt includes let you write the common parts of your prompts once and reuse them. Put shared Markdown in partials, then pull those partials into any prompt that needs them.
+
+### Syntax
+
+Use `includes:` for the shared block you want at the top of a prompt:
+
+```markdown
+---
+description: Review with shared repo rules
+model: claude-sonnet-4-20250514
+includes:
+  - shared/repo-rules.md
+  - shared/review-checklist.md
+---
+Review this change: $@
+```
+
+If the body has no `<includes />` marker, Pi prepends the rendered partials:
+
+```markdown
+<rendered shared/repo-rules.md>
+
+<rendered shared/review-checklist.md>
+
+Review this change: $@
+```
+
+Add `<includes />` when the shared block belongs somewhere else:
+
+```markdown
+---
+model: claude-sonnet-4-20250514
+includes:
+  - shared/context.md
+  - shared/checklist.md
+---
+Start with the project-specific context.
+
+<includes />
+
+Now answer the user's request: $@
+```
+
+For one partial, `include:` is shorter:
+
+```markdown
+---
+model: claude-sonnet-4-20250514
+include: shared/repo-rules.md
+---
+Apply the shared rules above, then inspect: $@
+```
+
+Use an inline include when the partial belongs at an exact spot in the prompt:
+
+```markdown
+---
+model: claude-sonnet-4-20250514
+includes:
+  - shared/repo-rules.md
+---
+<includes />
+
+Focus area:
+<include file="languages/typescript.md" />
+
+Task: $@
+```
+
+Partials can include other partials with the same inline syntax.
+
+### Partial roots and resolution order
+
+Include paths are local `.md` files. Resolution starts next to the file that asked for the include. For frontmatter `include` / `includes` and inline includes in the prompt body, that means the prompt file. For nested inline includes, it means the current partial.
+
+If Pi does not find the file there, it checks these roots in order:
+
+1. The directory of the file containing the directive
+2. The owning prompt root: `~/.pi/agent/prompts` for user prompts, or `<cwd>/.pi/prompts` for project prompts
+3. `~/.pi/agent/prompt-partials`
+4. `<cwd>/.pi/prompt-partials`
+
+Example layout:
+
+```text
+~/.pi/agent/prompts/review.md
+~/.pi/agent/prompts/shared/repo-rules.md
+~/.pi/agent/prompt-partials/shared/review-checklist.md
+<cwd>/.pi/prompt-partials/languages/typescript.md
+```
+
+With that layout, `review.md` can include `shared/repo-rules.md`, `shared/review-checklist.md`, and `languages/typescript.md` without absolute paths.
+
+### Rules and guardrails
+
+- Partials must be Markdown files (`.md`).
+- Includes are local files. URLs and globs are rejected, even if a local file happens to have that name.
+- Nested includes work. Cycles do not: Pi skips the command and reports a diagnostic.
+- Include expansion stops after 64 nested levels. If a chain goes deeper, Pi skips the command and points the diagnostic at the partial with the include that crossed the limit.
+- Partial frontmatter is stripped and ignored. Put active `include` / `includes` metadata on prompt templates, not inside partials. For nesting, use `<include file="..." />` in the partial body.
+- Missing or invalid includes skip command registration. Broken slash commands should fail loudly, not register half-rendered prompts.
+- `chain:` wrapper templates cannot use frontmatter `include` or `includes` in v1. Put includes on the step templates instead.
+- `~/...` paths are allowed only when they resolve under a Pi prompt root or prompt-partials root. Other absolute paths are rejected.
+- Include boundary comments appear only in debug/diagnostic mode. Normal prompt content does not contain `<!-- BEGIN include ... -->` / `<!-- END include ... -->` comments.
 
 ## Inline Model Conditionals
 
@@ -295,7 +493,7 @@ This repo ships one example compare prompt under `examples/`:
 Install it manually from this repo checkout (or from the installed package directory):
 
 ```bash
-PTM_DIR=/path/to/pi-prompt-template-model
+PTM_DIR=/path/to/pi-prompt-template-model-enhanced
 mkdir -p ~/.pi/agent/prompts
 cp "$PTM_DIR/examples/best-of-n.md" ~/.pi/agent/prompts/best-of-n.md
 ```

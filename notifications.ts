@@ -23,7 +23,7 @@ export function summarizePromptDiagnostics(diagnostics: PromptLoaderDiagnostic[]
 		lines.push(`- ... and ${remaining} more prompt template issue(s)`);
 	}
 
-	return [`[pi-prompt-template-model] Found ${diagnostics.length} prompt template issue(s):`, ...lines].join("\n");
+	return [`[pi-prompt-template-model-enhanced] Found ${diagnostics.length} prompt template issue(s):`, ...lines].join("\n");
 }
 
 export function diagnosticsFingerprint(diagnostics: PromptLoaderDiagnostic[]): string {

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { buildPromptCommandDescription, loadPromptsWithModel, RESERVED_COMMAND_NAMES, resolveSkillPath } from "../prompt-loader.js";
 
 function withTempHome(run: (root: string) => void) {
-	const root = mkdtempSync(join(tmpdir(), "pi-prompt-template-model-"));
+	const root = mkdtempSync(join(tmpdir(), "pi-prompt-template-model-enhanced-"));
 	const previousHome = process.env.HOME;
 	process.env.HOME = root;
 	try {
@@ -90,6 +90,113 @@ test("loadPromptsWithModel trims optional string frontmatter fields", () => {
 	});
 });
 
+test("loadPromptsWithModel normalizes plural skills frontmatter", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "multi.md"), "---\nmodel: claude-sonnet-4-20250514\nskills: [tmux, repo-review]\n---\nbody");
+		writeFileSync(join(cwd, ".pi", "prompts", "single.md"), "---\nmodel: claude-sonnet-4-20250514\nskill: tmux\n---\nbody");
+		writeFileSync(join(cwd, ".pi", "prompts", "combined.md"), "---\nmodel: claude-sonnet-4-20250514\nskill: skill:tmux\nskills: [golang-style]\n---\nbody");
+
+		const result = loadPromptsWithModel(cwd);
+
+		assert.deepEqual(result.prompts.get("multi")?.skills, ["tmux", "repo-review"]);
+		assert.equal(result.prompts.get("multi")?.skill, undefined);
+		assert.deepEqual(result.prompts.get("single")?.skills, ["tmux"]);
+		assert.equal(result.prompts.get("single")?.skill, "tmux");
+		assert.equal(buildPromptCommandDescription(result.prompts.get("single")!), "[claude-sonnet-4-20250514 +tmux] (project)");
+		assert.deepEqual(result.prompts.get("combined")?.skills, ["tmux", "golang-style"]);
+		assert.equal(result.prompts.get("combined")?.skill, "tmux");
+	});
+});
+
+test("loadPromptsWithModel rejects invalid plural skills frontmatter", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "scalar.md"), "---\nmodel: claude-sonnet-4-20250514\nskills: tmux\n---\nbody");
+		writeFileSync(join(cwd, ".pi", "prompts", "empty.md"), '---\nmodel: claude-sonnet-4-20250514\nskills: ["", "tmux"]\n---\nbody');
+		writeFileSync(join(cwd, ".pi", "prompts", "bad-space.md"), '---\nmodel: claude-sonnet-4-20250514\nskills: ["bad name"]\n---\nbody');
+		writeFileSync(join(cwd, ".pi", "prompts", "bad-xml.md"), '---\nmodel: claude-sonnet-4-20250514\nskills: ["bad<xml"]\n---\nbody');
+		writeFileSync(join(cwd, ".pi", "prompts", "bad-path.md"), '---\nmodel: claude-sonnet-4-20250514\nskills: ["../tmux"]\n---\nbody');
+		const invalidWildcards = ["*", "skill:*", "go**", "go*lang", "go?*", "../go-*", "foo/bar-*"];
+		for (const [index, selector] of invalidWildcards.entries()) {
+			writeFileSync(join(cwd, ".pi", "prompts", `bad-wildcard-${index}.md`), `---\nmodel: claude-sonnet-4-20250514\nskill: ${JSON.stringify(selector)}\n---\nbody`);
+		}
+
+		const result = loadPromptsWithModel(cwd);
+
+		assert.equal(result.prompts.has("scalar"), false);
+		assert.equal(result.prompts.has("empty"), false);
+		assert.equal(result.prompts.has("bad-space"), false);
+		assert.equal(result.prompts.has("bad-xml"), false);
+		assert.equal(result.prompts.has("bad-path"), false);
+		for (let index = 0; index < invalidWildcards.length; index++) {
+			assert.equal(result.prompts.has(`bad-wildcard-${index}`), false);
+		}
+		assert.equal(result.diagnostics.filter((diagnostic) => diagnostic.code === "invalid-skills").length, 5 + invalidWildcards.length);
+	});
+});
+
+test("loadPromptsWithModel treats skills as model-less extension config", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "skill-only.md"), "---\nskills: [tmux]\n---\nbody");
+
+		const result = loadPromptsWithModel(cwd);
+		const prompt = result.prompts.get("skill-only");
+		assert.ok(prompt);
+		assert.deepEqual(prompt.models, []);
+		assert.deepEqual(prompt.skills, ["tmux"]);
+	});
+});
+
+test("buildPromptCommandDescription displays every normalized skill label", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "multi-desc.md"),
+			"---\nmodel: claude-sonnet-4-20250514\nskills: [tmux, golang-style, golang-tests]\n---\nbody",
+		);
+
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(buildPromptCommandDescription(result.prompts.get("multi-desc")!), "[claude-sonnet-4-20250514 +tmux,+golang-style,+golang-tests] (project)");
+	});
+});
+
+test("chain wrapper templates ignore skill and skills without diagnostics", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "chain-skills.md"), '---\nchain: "analyze -> fix"\nskill: 42\nskills: tmux\n---\nignored');
+
+		const result = loadPromptsWithModel(cwd);
+		const prompt = result.prompts.get("chain-skills");
+		assert.ok(prompt);
+		assert.equal(prompt.chain, "analyze -> fix");
+		assert.equal(prompt.skill, undefined);
+		assert.equal(prompt.skills, undefined);
+		assert.doesNotMatch(result.diagnostics.map((diagnostic) => diagnostic.message).join("\n"), /invalid skill|invalid skills/i);
+	});
+});
+
+test("loadPromptsWithModel rejects subagent prompts combined with skill frontmatter", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "subagent-skill.md"), "---\nmodel: claude-sonnet-4-20250514\nsubagent: delegate\nskill: tmux\n---\nbody");
+		writeFileSync(join(cwd, ".pi", "prompts", "subagent-skills.md"), "---\nmodel: claude-sonnet-4-20250514\nsubagent: delegate\nskills: [tmux]\n---\nbody");
+
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.has("subagent-skill"), false);
+		assert.equal(result.prompts.has("subagent-skills"), false);
+		assert.equal(result.diagnostics.filter((diagnostic) => diagnostic.code === "invalid-subagent-skills").length, 2);
+		assert.match(result.diagnostics.map((diagnostic) => diagnostic.message).join("\n"), /subagent.*skill/i);
+	});
+});
+
 test("loadPromptsWithModel allows non-chain prompts without model and defaults description to current", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
@@ -127,6 +234,258 @@ test("loadPromptsWithModel can include plain prompts for chain resolution withou
 		assert.equal(defaultResult.prompts.has("review"), false);
 		assert.equal(chainResult.prompts.get("review")?.content, "body");
 		assert.deepEqual(chainResult.prompts.get("review")?.models, []);
+	});
+});
+
+test("loadPromptsWithModel renders frontmatter includes into prompt content and skips missing includes", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompt-partials", "shared"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-partials", "shared", "common.md"), "common");
+		writeFileSync(join(cwd, ".pi", "prompt-partials", "shared", "evidence.md"), "evidence");
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "with-includes.md"),
+			[
+				"---",
+				"model: claude-sonnet-4-20250514",
+				'includes: ["shared/common.md", "shared/evidence.md"]',
+				"---",
+				"body",
+			].join("\n"),
+		);
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "missing-include.md"),
+			"---\nmodel: claude-sonnet-4-20250514\ninclude: shared/missing.md\n---\nbody",
+		);
+
+		const result = loadPromptsWithModel(cwd);
+		const prompt = result.prompts.get("with-includes");
+		assert.ok(prompt);
+		assert.deepEqual(prompt.includes, ["shared/common.md", "shared/evidence.md"]);
+		assert.equal(prompt.content, "common\n\nevidence\n\nbody");
+		assert.equal(result.prompts.has("missing-include"), false);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "include-not-found"), true);
+	});
+});
+
+test("loadPromptsWithModel resolves nested partial includes relative to the current partial", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompt-partials", "shared"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-partials", "shared", "outer.md"), "outer-start\n<include file=\"inner.md\" />\nouter-end");
+		writeFileSync(join(cwd, ".pi", "prompt-partials", "shared", "inner.md"), "inner");
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "nested-partial.md"),
+			"---\nmodel: claude-sonnet-4-20250514\ninclude: shared/outer.md\n---\nbody",
+		);
+
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.get("nested-partial")?.content, "outer-start\ninner\nouter-end\n\nbody");
+		assert.equal(result.diagnostics.length, 0);
+	});
+});
+
+test("loadPromptsWithModel honors <includes /> placement after include rendering", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompt-partials", "shared"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-partials", "shared", "common.md"), "common");
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "placed.md"),
+			"---\nmodel: claude-sonnet-4-20250514\ninclude: shared/common.md\n---\nbefore\n<includes />\nafter",
+		);
+
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.get("placed")?.content, "before\ncommon\nafter");
+		assert.equal(result.diagnostics.length, 0);
+	});
+});
+
+test("loadPromptsWithModel rejects model-less <includes /> without include metadata", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "model-less-placeholder.md"), '---\ndescription: "placeholder"\n---\nbefore <includes /> after');
+
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.has("model-less-placeholder"), false);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "include-placeholder-without-includes"), true);
+		assert.match(result.diagnostics.map((diagnostic) => diagnostic.message).join("\n"), /frontmatter.*include/i);
+	});
+});
+
+test("loadPromptsWithModel rejects model prompts with <includes /> without include metadata", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "model-placeholder.md"),
+			"---\nmodel: claude-sonnet-4-20250514\n---\nbefore <includes /> after",
+		);
+
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.has("model-placeholder"), false);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "include-placeholder-without-includes"), true);
+	});
+});
+
+test("loadPromptsWithModel ignores <includes /> placeholders in chain wrapper bodies", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "review"\n---\nbefore <includes /> after');
+
+		const result = loadPromptsWithModel(cwd);
+		const prompt = result.prompts.get("pipeline");
+		assert.ok(prompt);
+		assert.equal(prompt.chain, "review");
+		assert.equal(prompt.content, "before <includes /> after");
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "include-placeholder-without-includes"), false);
+	});
+});
+
+test("loadPromptsWithModel renders inline include tags without frontmatter includes", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "one-off.md"), "inserted");
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "inline.md"),
+			'---\nmodel: claude-sonnet-4-20250514\n---\nalpha <include file="one-off.md" /> omega',
+		);
+
+		const result = loadPromptsWithModel(cwd);
+		const prompt = result.prompts.get("inline");
+		assert.ok(prompt);
+		assert.equal(prompt.includes, undefined);
+		assert.equal(prompt.content, "alpha inserted omega");
+		assert.equal(result.diagnostics.length, 0);
+	});
+});
+
+test("loadPromptsWithModel treats inline-only includes as extension-specific model-less config", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "partial.md"), "from partial");
+		writeFileSync(join(cwd, ".pi", "prompts", "model-less-inline.md"), '---\ndescription: "inline"\n---\n<include file="partial.md" />');
+
+		const result = loadPromptsWithModel(cwd);
+		const prompt = result.prompts.get("model-less-inline");
+		assert.ok(prompt);
+		assert.deepEqual(prompt.models, []);
+		assert.equal(prompt.content, "from partial");
+		assert.equal(result.diagnostics.length, 0);
+	});
+});
+
+test("loadPromptsWithModel resolves nested prompt includes against the stable prompt root", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts", "nested"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompts", "shared"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "shared", "root.md"), "root partial");
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "nested", "deep.md"),
+			'---\nmodel: claude-sonnet-4-20250514\n---\n<include file="shared/root.md" />\nbody',
+		);
+
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.get("deep")?.content, "root partial\nbody");
+		assert.equal(result.prompts.get("deep")?.subdir, "nested");
+		assert.equal(result.diagnostics.length, 0);
+	});
+});
+
+test("loadPromptsWithModel rejects invalid prompt include frontmatter", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "both.md"),
+			'---\nmodel: claude-sonnet-4-20250514\ninclude: shared/common.md\nincludes: ["shared/evidence.md"]\n---\nbody',
+		);
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "bad-includes-entry.md"),
+			'---\nmodel: claude-sonnet-4-20250514\nincludes: ["shared/common.md", ""]\n---\nbody',
+		);
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "bad-includes-type.md"),
+			"---\nmodel: claude-sonnet-4-20250514\nincludes: shared/common.md\n---\nbody",
+		);
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "bad-include.md"),
+			'---\nmodel: claude-sonnet-4-20250514\ninclude: "   "\n---\nbody',
+		);
+
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.has("both"), false);
+		assert.equal(result.prompts.has("bad-includes-entry"), false);
+		assert.equal(result.prompts.has("bad-includes-type"), false);
+		assert.equal(result.prompts.has("bad-include"), false);
+		const diagnostics = result.diagnostics.map((item) => item.message).join("\n");
+		assert.match(diagnostics, /frontmatter fields "include" and "includes" cannot be combined/i);
+		assert.match(diagnostics, /frontmatter field "includes" must be an array of non-empty strings/i);
+		assert.match(diagnostics, /frontmatter field "include" must be a non-empty string/i);
+	});
+});
+
+test("loadPromptsWithModel rejects include metadata on chain wrapper templates", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompt-partials", "shared"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-partials", "shared", "common.md"), "common");
+		writeFileSync(join(cwd, ".pi", "prompts", "chain-include.md"), '---\nchain: "step-with-include"\ninclude: shared/common.md\n---\nignored');
+		writeFileSync(join(cwd, ".pi", "prompts", "chain-includes.md"), '---\nchain: "step-with-include"\nincludes: ["shared/common.md"]\n---\nignored');
+		writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "step-with-include"\n---\nignored');
+		writeFileSync(join(cwd, ".pi", "prompts", "step-with-include.md"), "---\nmodel: claude-sonnet-4-20250514\ninclude: shared/common.md\n---\nbody");
+
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.has("chain-include"), false);
+		assert.equal(result.prompts.has("chain-includes"), false);
+		assert.equal(result.prompts.get("pipeline")?.chain, "step-with-include");
+		assert.deepEqual(result.prompts.get("step-with-include")?.includes, ["shared/common.md"]);
+		assert.equal(result.prompts.get("step-with-include")?.content, "common\n\nbody");
+		const diagnostics = result.diagnostics.map((item) => item.message).join("\n");
+		assert.match(diagnostics, /frontmatter field "include" cannot be used on chain wrapper templates/i);
+		assert.match(diagnostics, /frontmatter field "includes" cannot be used on chain wrapper templates/i);
+	});
+});
+
+test("loadPromptsWithModel ignores missing inline include directives in chain wrapper bodies", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "review"\n---\n<include file="missing.md" />');
+
+		const result = loadPromptsWithModel(cwd);
+		const prompt = result.prompts.get("pipeline");
+		assert.ok(prompt);
+		assert.equal(prompt.chain, "review");
+		assert.equal(prompt.content, '<include file="missing.md" />');
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "include-not-found"), false);
+	});
+});
+
+test("loadPromptsWithModel leaves existing inline include tags raw in chain wrapper bodies", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompt-partials"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-partials", "existing.md"), "rendered partial");
+		writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "review"\n---\nbefore <include file="existing.md" /> after');
+
+		const result = loadPromptsWithModel(cwd);
+		const prompt = result.prompts.get("pipeline");
+		assert.ok(prompt);
+		assert.equal(prompt.chain, "review");
+		assert.equal(prompt.content, 'before <include file="existing.md" /> after');
+		assert.doesNotMatch(prompt.content, /rendered partial/);
+		assert.equal(result.diagnostics.length, 0);
 	});
 });
 
@@ -1066,6 +1425,22 @@ test("loadPromptsWithModel validates bestOfN compare lineups and cutover diagnos
 					assert.match(buildPromptCommandDescription(prompt), /workers:4/);
 					assert.match(buildPromptCommandDescription(prompt), /reviewers:2/);
 					assert.match(buildPromptCommandDescription(prompt), /final-applier/);
+				},
+			},
+			{
+				name: "compare-with-skills",
+				content: [
+					"---",
+					"skills: [tmux]",
+					"bestOfN:",
+					"  workers:",
+					"    - model: openai/gpt-5.4",
+					"---",
+					"$@",
+				].join("\n"),
+				check(result: ReturnType<typeof loadPromptsWithModel>) {
+					assert.equal(result.prompts.has("compare-with-skills"), false);
+					assert.ok(result.diagnostics.some((d) => d.code === "invalid-compare-skills" && d.message.includes('cannot be combined with "skill" or "skills"')));
 				},
 			},
 			{
