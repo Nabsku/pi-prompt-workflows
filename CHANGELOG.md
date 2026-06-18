@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-06-18
+
+### Added
+- Published under the separate package name `pi-prompt-template-model-enhanced` for the enhanced fork line.
+- Added plural `skills` frontmatter for prompt templates, including ordered multi-skill injection and constrained suffix-wildcard selectors such as `golang-*`.
+
+### Changed
+- Skill context now renders as one combined context message while preserving backward compatibility for singular `skill` prompts.
+
+### Fixed
+- Fixed delegated prompt execution discovery for current `pi-subagents` npm package layouts, including `src/agents/agents.ts`, so `pi install npm:pi-subagents` works without setting `PI_SUBAGENT_RUNTIME_ROOT` manually.
+
 ## [0.9.3] - 2026-04-28
 
 ### Fixed
