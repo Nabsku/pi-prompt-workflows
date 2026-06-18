@@ -1,6 +1,9 @@
 name: Test
 
 on:
+  pull_request:
+    branches:
+      - main
   push:
     branches:
       - main
@@ -29,3 +32,9 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev
+
+      - name: Check package contents
+        run: npm pack --dry-run

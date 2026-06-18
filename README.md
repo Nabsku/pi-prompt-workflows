@@ -986,6 +986,15 @@ model: anthropic/claude-haiku-4-5, openrouter/claude-haiku-4-5
 $@
 ```
 
+## Release process
+
+Releases are managed with [Release Please](https://github.com/googleapis/release-please) from conventional commits on `main`.
+
+1. Land normal commits such as `feat:`, `fix:`, `docs:`, or `chore:`.
+2. Release Please opens a release PR that updates `package.json`, `package-lock.json`, `CHANGELOG.md`, and the release manifest.
+3. Merge the release PR to create the GitHub Release/tag.
+4. The publish workflow verifies the tag matches `package.json`, runs the Node 24 test suite, checks production audit, verifies package contents, and publishes to npm with provenance through trusted publishing.
+
 ## Limitations
 
 - Prompt files are reloaded on session start and whenever an extension-owned command runs. If you add a new prompt file mid-session, run any extension command (like `/chain-prompts`), start a new session, or reload pi to pick it up.
