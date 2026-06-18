@@ -3,8 +3,8 @@ name: Upstream freshness
 on:
   workflow_dispatch:
   schedule:
-    # Daily at 06:17 UTC. Fails when upstream main has moved past the recorded baseline.
-    - cron: "17 6 * * *"
+    # Twice daily at 06:17 and 18:17 UTC. Fails when upstream main has moved past the recorded baseline.
+    - cron: "17 6,18 * * *"
   push:
     branches:
       - main
