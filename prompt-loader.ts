@@ -10,6 +10,7 @@ const VALID_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh
 export const RESERVED_COMMAND_NAMES = new Set([
 	"chain-prompts",
 	"prompt-tool",
+	"validate-prompts",
 	"settings",
 	"model",
 	"scoped-models",
@@ -1606,7 +1607,7 @@ function loadPromptsWithModelFromDir(
 					| ReturnType<typeof parseChainDeclaration>
 					| undefined;
 				const chainContext = chain ? normalizeChainContext(frontmatter.chainContext, fullPath, source, diagnostics) : undefined;
-				if (chain && /\bparallel\s*\(/.test(chain)) {
+				if (chain) {
 					parsedChainDeclarationResult = parseChainDeclaration(chain);
 					if (parsedChainDeclarationResult.invalidSegments.length > 0 || parsedChainDeclarationResult.steps.length === 0) {
 						diagnostics.push(

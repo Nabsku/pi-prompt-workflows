@@ -34,6 +34,7 @@
     "prompt-execution.ts",
     "prompt-includes.ts",
     "prompt-loader.ts",
+    "prompt-validation.ts",
     "deterministic-step.ts",
     "deterministic-renderer.ts",
     "subagent-renderer.ts",

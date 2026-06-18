@@ -77,6 +77,24 @@ skill: tmux
 Start a Python REPL session and help me debug: $@
 ```
 
+## Validation
+
+Run `/validate-prompts` to check prompt templates before using them. It reloads the project and user prompt directories, validates frontmatter, include paths, include cycles, chain declarations, reserved command names, and skill references that can be resolved from registered or filesystem skills.
+
+A clean library reports success:
+
+```text
+[pi-prompt-template-model-enhanced] Prompt validation passed: 4 prompt template(s) loaded.
+```
+
+Invalid libraries fail with explicit diagnostics:
+
+```text
+[pi-prompt-template-model-enhanced] Prompt validation failed: 2 issue(s) found across 3 loaded prompt template(s).
+- include-not-found (project) /repo/.pi/prompts/review.md: Prompt include "shared/rules.md" was not found ...
+- skill-not-found (project) /repo/.pi/prompts/debug.md: Prompt template ... references skill "tmux", but it was not found ...
+```
+
 ## Frontmatter Reference
 
 All fields are optional. Templates that don't use any extension features (no `model`, `skill`, `skills`, `include`, `includes`, `thinking`, etc.) are left to pi's default prompt loader.

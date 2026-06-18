@@ -43,6 +43,7 @@ import {
 	shouldHandoffToLlm,
 } from "./deterministic-step.js";
 import { renderDeterministicCompletion, renderDeterministicResult } from "./deterministic-renderer.js";
+import { formatPromptValidationReport, validatePromptTemplates, type RegisteredPromptSkill } from "./prompt-validation.js";
 
 interface LoopState {
 	currentIteration: number;
@@ -225,6 +226,22 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 
 		return undefined;
+	}
+
+	function collectRegisteredPromptSkills(): RegisteredPromptSkill[] {
+		const skills: RegisteredPromptSkill[] = [];
+		for (const command of pi.getCommands()) {
+			if (command.source !== "skill") continue;
+			const normalizedSkillName = normalizeSkillName(command.name);
+			if (!normalizedSkillName) continue;
+			const sourceInfo = "sourceInfo" in command
+				? (command as { sourceInfo?: { path?: string } }).sourceInfo
+				: undefined;
+			const skillPath = sourceInfo?.path;
+			if (!skillPath) continue;
+			skills.push({ skillName: normalizedSkillName, skillPath });
+		}
+		return skills;
 	}
 
 	function discoverRegisteredWildcardMatches(prefix: string): Array<{ skillName: string; skillPath: string }> {
@@ -1872,6 +1889,13 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		description: "Chain prompt templates sequentially [template -> template -> ...]",
 		handler: async (args, ctx) => {
 			await runChainCommand(args, ctx);
+		},
+	});
+	pi.registerCommand("validate-prompts", {
+		description: "Validate prompt templates, includes, frontmatter, and skill references",
+		handler: async (_args, ctx) => {
+			const validation = validatePromptTemplates(ctx.cwd, { registeredSkills: collectRegisteredPromptSkills() });
+			notify(ctx, formatPromptValidationReport(validation), validation.ok ? "info" : "error");
 		},
 	});
 	toolManager.registerCommand();

@@ -1638,5 +1638,6 @@ test("reserved built-in command mirror is explicit", () => {
 		"settings",
 		"share",
 		"tree",
+		"validate-prompts",
 	].sort());
 });
