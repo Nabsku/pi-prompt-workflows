@@ -54,7 +54,7 @@
     "test": "tsx --test test/**/*.test.ts"
   },
   "dependencies": {
-    "typebox": "^1.1.24"
+    "typebox": "^1.2.16"
   },
   "devDependencies": {
     "@earendil-works/pi-agent-core": "^0.79.7",
