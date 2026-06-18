@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT = "prompt-template:subagent:request";
@@ -111,32 +112,80 @@ export interface SubagentRuntime {
 let runtimeCache: SubagentRuntime | null = null;
 const delegatedLiveState = new Map<string, DelegatedSubagentLiveState>();
 
-function runtimeCandidates(cwd: string): string[] {
-	const fromEnv = process.env.PI_SUBAGENT_RUNTIME_ROOT?.trim();
-	if (fromEnv) return [resolve(fromEnv)];
-	const localSibling = resolve(dirname(fileURLToPath(import.meta.url)), "..", "pi-subagents");
-	return [
-		resolve(cwd, ".pi", "npm", "node_modules", "pi-subagents"),
-		localSibling,
-	];
+const RUNTIME_MODULE_EXTENSIONS = [".ts", ".mts", ".js", ".mjs"] as const;
+
+function hasRuntimeModule(root: string, baseName = "agents"): boolean {
+	return RUNTIME_MODULE_EXTENSIONS.some((ext) => existsSync(join(root, `${baseName}${ext}`)));
 }
 
-function findSubagentRoot(cwd: string): string | undefined {
+function resolveHomeRelative(pathValue: string): string {
+	if (pathValue === "~") return homedir();
+	if (pathValue.startsWith("~/")) return resolve(homedir(), pathValue.slice(2));
+	return resolve(pathValue);
+}
+
+function resolvePiAgentDir(): string {
+	const configured = process.env.PI_CODING_AGENT_DIR?.trim();
+	return configured ? resolveHomeRelative(configured) : resolve(homedir(), ".pi", "agent");
+}
+
+function projectPiPackageCandidates(cwd: string): string[] {
+	const candidates: string[] = [];
+	let current = resolve(cwd);
+	while (true) {
+		candidates.push(join(current, ".pi", "npm", "node_modules", "pi-subagents"));
+		const parent = dirname(current);
+		if (parent === current) break;
+		current = parent;
+	}
+	return candidates;
+}
+
+function uniquePaths(paths: string[]): string[] {
+	return [...new Set(paths)];
+}
+
+function runtimeCandidates(cwd: string): string[] {
+	const fromEnv = process.env.PI_SUBAGENT_RUNTIME_ROOT?.trim();
+	if (fromEnv) return [resolveHomeRelative(fromEnv)];
+	const packageDir = dirname(fileURLToPath(import.meta.url));
+	const localSibling = resolve(packageDir, "..", "pi-subagents");
+	const includeLocalSibling = basename(dirname(packageDir)) === "node_modules";
+	const piAgentDir = resolvePiAgentDir();
+	return uniquePaths([
+		...projectPiPackageCandidates(cwd),
+		resolve(piAgentDir, "npm", "node_modules", "pi-subagents"),
+		resolve(piAgentDir, "node_modules", "pi-subagents"),
+		...(includeLocalSibling ? [localSibling] : []),
+	]);
+}
+
+function runtimeEntryCandidates(candidate: string): string[] {
+	return [candidate, join(candidate, "src", "agents"), join(candidate, "dist", "agents")];
+}
+
+interface FindSubagentRootResult {
+	root?: string;
+	checked: string[];
+	envOnly: boolean;
+}
+
+function findSubagentRoot(cwd: string): FindSubagentRootResult {
+	const checked: string[] = [];
+	const envOnly = Boolean(process.env.PI_SUBAGENT_RUNTIME_ROOT?.trim());
 	for (const candidate of runtimeCandidates(cwd)) {
-		if (existsSync(join(candidate, "agents.ts")) || existsSync(join(candidate, "agents.js"))) {
-			return candidate;
+		for (const runtimeRoot of runtimeEntryCandidates(candidate)) {
+			checked.push(runtimeRoot);
+			if (hasRuntimeModule(runtimeRoot)) {
+				return { root: runtimeRoot, checked, envOnly };
+			}
 		}
 	}
-	return undefined;
+	return { checked, envOnly };
 }
 
 async function importRuntimeModule(root: string, baseName: string): Promise<unknown> {
-	const candidates = [
-		join(root, `${baseName}.ts`),
-		join(root, `${baseName}.mts`),
-		join(root, `${baseName}.js`),
-		join(root, `${baseName}.mjs`),
-	];
+	const candidates = RUNTIME_MODULE_EXTENSIONS.map((ext) => join(root, `${baseName}${ext}`));
 
 	let lastError: unknown;
 	for (const filePath of candidates) {
@@ -212,10 +261,19 @@ export function clearDelegatedLiveState(requestId: string): void {
 }
 
 export async function ensureSubagentRuntime(cwd: string): Promise<SubagentRuntime> {
-	const root = findSubagentRoot(cwd);
+	const result = findSubagentRoot(cwd);
+	const root = result.root;
 	if (!root) {
 		throw new Error(
-			"Delegated prompt execution requires pi-subagents. Install it with `pi install npm:pi-subagents` or set PI_SUBAGENT_RUNTIME_ROOT.",
+			[
+				"Delegated prompt execution requires pi-subagents, but no runtime module was found.",
+				"Install it with `pi install npm:pi-subagents` or set PI_SUBAGENT_RUNTIME_ROOT.",
+				result.envOnly
+					? "Discovery mode: PI_SUBAGENT_RUNTIME_ROOT environment override only."
+					: "Discovery mode: automatic project/user/sibling search.",
+				"Checked runtime directories:",
+				...result.checked.map((path) => `- ${path}`),
+			].join("\n"),
 		);
 	}
 
