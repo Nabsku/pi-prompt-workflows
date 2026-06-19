@@ -115,11 +115,12 @@ test("includes skill content only when present in result", () => {
 });
 
 test("shows delegation metadata clearly", () => {
-	const rendered = formatPromptDryRun(ok({ runtime: { restore: false, boomerang: false, delegation: { enabled: true, agent: "reviewer", fork: true, inheritContext: true } } }));
+	const rendered = formatPromptDryRun(ok({ runtime: { restore: false, boomerang: false, delegation: { enabled: true, agent: "reviewer", fork: true, inheritContext: true, parallel: 3 } } }));
 	assert.match(rendered, /Delegation: enabled/);
 	assert.match(rendered, /Agent: reviewer/);
 	assert.match(rendered, /Fork: true/);
 	assert.match(rendered, /Inherit context: true/);
+	assert.match(rendered, /Parallel: 3/);
 });
 
 test("shows model, active, thinking, restore, cwd, boomerang, and loop metadata clearly", () => {

@@ -100,8 +100,6 @@ const DEFAULT_COMPARE_FINAL_APPLIER_TASK = [
 	"5. Report changed files and verification commands run.",
 ].join("\n");
 
-const PROMPT_TEMPLATE_DRY_RUN_MESSAGE_TYPE = "prompt-template-dry-run";
-
 export default function promptModelExtension(pi: ExtensionAPI) {
 	let prompts = new Map<string, PromptWithModel>();
 	let chainPrompts = new Map<string, PromptWithModel>();
@@ -1453,16 +1451,11 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			return;
 		}
 
-		if (parsed.tui && !parsed.plain) {
-			notify(ctx, "--tui dry-run output is not available yet; falling back to plain output.", "warning");
-		}
 		for (const warning of result.warnings) notify(ctx, warning, "warning");
-		pi.sendMessage({
-			customType: PROMPT_TEMPLATE_DRY_RUN_MESSAGE_TYPE,
-			content: formatPromptDryRun(result),
-			display: true,
-			details: result,
-		});
+		if (parsed.tui && !parsed.plain) {
+			notify(ctx, "--tui dry-run output is not available yet; falling back to stdout.", "warning");
+		}
+		process.stdout.write(formatPromptDryRun(result));
 	}
 
 	async function runPromptCommand(name: string, args: string, ctx: ExtensionCommandContext) {

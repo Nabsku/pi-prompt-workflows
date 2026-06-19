@@ -246,10 +246,15 @@ test("records loop/restore/thinking/boomerang metadata without executing anythin
 
 test("records delegation metadata for --subagent, --subagent=reviewer, and --fork", async () => {
 	const base = prompt();
-	assert.deepEqual(assertOk(await createPromptDryRun(base, options("/tmp", { rawArgs: "--subagent task" }))).runtime.delegation, { enabled: true });
+	assert.deepEqual(assertOk(await createPromptDryRun(base, options("/tmp", { rawArgs: "--subagent task" }))).runtime.delegation, { enabled: true, agent: "delegate" });
 	assert.deepEqual(assertOk(await createPromptDryRun(base, options("/tmp", { rawArgs: "--subagent=reviewer task" }))).runtime.delegation, { enabled: true, agent: "reviewer" });
 	const forked = assertOk(await createPromptDryRun(base, options("/tmp", { rawArgs: "--fork task" })));
-	assert.deepEqual(forked.runtime.delegation, { enabled: true, fork: true, inheritContext: true });
+	assert.deepEqual(forked.runtime.delegation, { enabled: true, agent: "delegate", fork: true, inheritContext: true });
+});
+
+test("records default delegate agent for subagent frontmatter", async () => {
+	const result = assertOk(await createPromptDryRun(prompt({ subagent: true }), options("/tmp")));
+	assert.deepEqual(result.runtime.delegation, { enabled: true, agent: "delegate" });
 });
 
 test("validates/records --cwd without changing process cwd", async () => {
@@ -317,6 +322,46 @@ test("delegated prompt frontmatter cwd is shown as effective runtime cwd metadat
 		const fromCli = assertOk(await createPromptDryRun(prompt({ subagent: true, cwd: delegatedCwd }), options(ctxCwd, { rawArgs: `--cwd=${cliCwd}` })));
 		assert.equal(fromCli.runtime.cwd, cliCwd);
 	});
+});
+
+test("delegated dry-run rejects missing effective cwd like runtime", async () => {
+	await withTempHome(async (root) => {
+		const ctxCwd = join(root, "ctx");
+		mkdirSync(ctxCwd, { recursive: true });
+		const missingFrontmatter = join(root, "missing-frontmatter");
+		const fromPrompt = assertError(await createPromptDryRun(prompt({ subagent: true, cwd: missingFrontmatter }), options(ctxCwd)));
+		assert.equal(fromPrompt.error, `cwd directory does not exist: ${missingFrontmatter}`);
+
+		const missingCli = join(root, "missing-cli");
+		const fromCli = assertError(await createPromptDryRun(prompt({ subagent: true, cwd: join(root, "also-missing") }), options(ctxCwd, { rawArgs: `--cwd=${missingCli}` })));
+		assert.equal(fromCli.error, `cwd directory does not exist: ${missingCli}`);
+	});
+});
+
+test("non-delegated dry-run keeps cwd metadata without existence check", async () => {
+	await withTempHome(async (root) => {
+		const missing = join(root, "missing-nondelegated");
+		const result = assertOk(await createPromptDryRun(prompt(), options(root, { rawArgs: `--cwd=${missing}` })));
+		assert.equal(result.runtime.cwd, missing);
+	});
+});
+
+test("parallel delegated dry-run shows each runtime subagent task prefix", async () => {
+	const result = assertOk(await createPromptDryRun(prompt({ subagent: true, parallel: 3, content: "Body $1" }), options("/tmp", { rawArgs: "file.ts" })));
+	assert.deepEqual(result.runtime.delegation, { enabled: true, agent: "delegate", parallel: 3 });
+	assert.equal(result.content, [
+		"[Parallel subagent 1/3]",
+		"",
+		"Body file.ts",
+		"",
+		"[Parallel subagent 2/3]",
+		"",
+		"Body file.ts",
+		"",
+		"[Parallel subagent 3/3]",
+		"",
+		"Body file.ts",
+	].join("\n"));
 });
 
 test("--cwd is displayed as runtime metadata but skills still resolve from ctx.cwd, matching runtime", async () => {
