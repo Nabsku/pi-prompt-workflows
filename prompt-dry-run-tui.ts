@@ -31,7 +31,7 @@ export interface PromptDryRunTuiResult {
 }
 
 const ANSI_ESCAPE_PATTERN = /\u001b(?:\][^\u0007]*(?:\u0007|\u001b\\)|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])/g;
-const CONTROL_PATTERN = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
+const CONTROL_PATTERN = /[\u0000-\u0008\u000b\u000c\u000d\u000e-\u001f\u007f-\u009f]/g;
 
 function sanitizeText(value: string): string {
 	return value
@@ -160,7 +160,7 @@ export class PromptDryRunPicker implements Component {
 		}
 		if (data === "\r" || data === "\n") {
 			const item = items[this.selectedIndex];
-			if (item && !item.unsupportedReason) this.done?.({ action: "selected", templateName: item.name });
+			if (item) this.done?.({ action: "selected", templateName: item.name });
 			return;
 		}
 		if (data === "\u007f" || data === "\b") {

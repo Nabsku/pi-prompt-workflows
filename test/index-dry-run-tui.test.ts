@@ -126,6 +126,23 @@ async function captureStdout(run: () => Promise<void>): Promise<string> {
 	}
 }
 
+async function captureStderr(run: () => Promise<void>): Promise<string> {
+	const originalWrite = process.stderr.write.bind(process.stderr);
+	let output = "";
+	(process.stderr.write as unknown as (chunk: unknown, encoding?: unknown, cb?: unknown) => boolean) = ((chunk: unknown, encoding?: unknown, cb?: unknown) => {
+		output += typeof chunk === "string" ? chunk : Buffer.from(chunk as Uint8Array).toString();
+		if (typeof encoding === "function") encoding();
+		if (typeof cb === "function") cb();
+		return true;
+	}) as never;
+	try {
+		await run();
+		return output;
+	} finally {
+		process.stderr.write = originalWrite as never;
+	}
+}
+
 async function setup(mode: "tui" | "rpc" | "print" | "json", run: (cwd: string, pi: FakePi, ctx: any) => Promise<void>) {
 	await withTempHome(async (root) => {
 		const cwd = join(root, "project");
@@ -229,12 +246,40 @@ test("--plain forces stdout/plain path in TUI mode and does not call ctx.ui.cust
 });
 
 test("non-TUI modes keep missing-template error with guidance to use Pi TUI or pass a template", async () => {
-	for (const mode of ["rpc", "print", "json"] as const) {
+	await setup("rpc", async (_cwd, pi, ctx) => {
+		await pi.commands.get("dry-run-prompt")!.handler!("", ctx);
+		assert.equal(pi.customCalls.length, 0);
+		assert.equal(pi.notifications.at(-1)?.type, "error");
+		assert.match(pi.notifications.at(-1)?.message ?? "", /Run in Pi TUI mode.*pick from templates.*pass a template name/i);
+		assertNoExecutionSideEffects(pi);
+	});
+
+	for (const mode of ["print", "json"] as const) {
 		await setup(mode, async (_cwd, pi, ctx) => {
-			await pi.commands.get("dry-run-prompt")!.handler!("", ctx);
+			const stderr = await captureStderr(() => pi.commands.get("dry-run-prompt")!.handler!("", ctx));
 			assert.equal(pi.customCalls.length, 0);
-			assert.equal(pi.notifications.at(-1)?.type, "error");
-			assert.match(pi.notifications.at(-1)?.message ?? "", /Run in Pi TUI mode.*pick from templates.*pass a template name/i);
+			assert.equal(pi.notifications.length, 0);
+			assert.match(stderr, /Run in Pi TUI mode.*pick from templates.*pass a template name/i);
+			assertNoExecutionSideEffects(pi);
+		});
+	}
+});
+
+test("non-TUI missing-template usage goes to stderr and does not call no-op or throwing ui.notify", async () => {
+	for (const commandName of ["print-prompt", "dry-run-prompt"] as const) {
+		await setup("print", async (_cwd, pi, ctx) => {
+			let notifyCalls = 0;
+			ctx.ui.notify = () => {
+				notifyCalls++;
+				throw new Error("ui.notify should not be called when hasUI is false");
+			};
+
+			const stderr = await captureStderr(() => pi.commands.get(commandName)!.handler!("", ctx));
+
+			assert.equal(notifyCalls, 0);
+			assert.equal(pi.notifications.length, 0);
+			assert.match(stderr, /Usage: \/print-prompt <template>/);
+			assert.match(stderr, /Run in Pi TUI mode.*pick from templates.*pass a template name/i);
 			assertNoExecutionSideEffects(pi);
 		});
 	}
@@ -263,6 +308,21 @@ test("unsupported dry-run results in TUI mode show a diagnostic and do not open 
 		await pi.commands.get("print-prompt")!.handler!("det", ctx);
 
 		assert.equal(pi.customCalls.length, 0);
+		assert.equal(pi.notifications.at(-1)?.type, "error");
+		assert.match(pi.notifications.at(-1)?.message ?? "", /deterministic prompts is not supported/i);
+		assertNoExecutionSideEffects(pi);
+	});
+});
+
+test("TUI picker unsupported selection surfaces dry-run diagnostic without execution side effects", async () => {
+	await setup("tui", async (cwd, pi, ctx) => {
+		writePrompt(cwd, "det", "---\nrun: printf ok\n---\nignored");
+		await pi.emit("session_start", {}, ctx);
+		pi.customResults.push({ action: "selected", templateName: "det" });
+
+		await pi.commands.get("dry-run-prompt")!.handler!("", ctx);
+
+		assert.equal(pi.customCalls.length, 1);
 		assert.equal(pi.notifications.at(-1)?.type, "error");
 		assert.match(pi.notifications.at(-1)?.message ?? "", /deterministic prompts is not supported/i);
 		assertNoExecutionSideEffects(pi);

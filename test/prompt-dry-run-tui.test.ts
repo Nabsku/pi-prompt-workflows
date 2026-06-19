@@ -107,6 +107,16 @@ test("picker filters by typed text and selects the highlighted template with ent
 	assert.deepEqual(doneValues.at(-1), { action: "selected", templateName: "implement-plan" });
 });
 
+test("picker returns unsupported highlighted templates on enter so callers can surface dry-run diagnostics", () => {
+	const doneValues: unknown[] = [];
+	const picker = new PromptDryRunPicker(catalog, "deterministic-report", undefined, undefined, (value) => doneValues.push(value));
+
+	assert.match(renderText(picker.render(100)), />\s*deterministic-report/);
+	picker.handleInput("\r");
+
+	assert.deepEqual(doneValues.at(-1), { action: "selected", templateName: "deterministic-report" });
+});
+
 test("picker supports initial preselection and quit keys", () => {
 	const doneValues: unknown[] = [];
 	const picker = new PromptDryRunPicker(catalog, "implement-plan", undefined, undefined, (value) => doneValues.push(value));
@@ -148,6 +158,27 @@ test("inspector strips terminal control sequences from untrusted prompt and skil
 	const text = renderText(new PromptDryRunInspector(createPromptDryRunTuiViewModel(hostileResult, plainReport)).render(100));
 	assert.doesNotMatch(text, /\u001b|\u0007/);
 	assert.match(text, /safe red  end/);
+});
+
+test("TUI sanitizer escapes bare carriage returns in inspector and picker rendered text", () => {
+	const hostileResult: PromptDryRunResult = okResult.status === "ok"
+		? {
+			...okResult,
+			promptName: "review\rname",
+			content: "line one\rline two",
+			skills: [{ skillName: "skill\rname", skillPath: "/tmp/skill\rpath", skillContent: "skill\rcontent" }],
+		}
+		: okResult;
+	const inspectorText = renderText(new PromptDryRunInspector(createPromptDryRunTuiViewModel(hostileResult, "raw\rreport")).render(120));
+	assert.doesNotMatch(inspectorText, /\r/);
+	assert.match(inspectorText, /\\u000d/);
+
+	const picker = new PromptDryRunPicker([
+		{ name: "name\rwith-cr", source: "project", displaySource: "project", description: "desc\rwith-cr" },
+	], undefined);
+	const pickerText = renderText(picker.render(120));
+	assert.doesNotMatch(pickerText, /\r/);
+	assert.match(pickerText, /\\u000d/);
 });
 
 test("inspector tab, numeric jump, back, scroll, and quit keybindings are render-only", () => {
