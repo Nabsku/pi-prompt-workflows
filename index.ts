@@ -48,8 +48,23 @@ import {
 } from "./deterministic-step.js";
 import { renderDeterministicCompletion, renderDeterministicResult } from "./deterministic-renderer.js";
 import { formatPromptValidationReport, validatePromptTemplates, type RegisteredPromptSkill } from "./prompt-validation.js";
-import { createPromptDryRun, parseDryRunCommand } from "./prompt-dry-run.js";
+import {
+	DRY_RUN_CHAIN_UNSUPPORTED,
+	DRY_RUN_COMPARE_UNSUPPORTED,
+	DRY_RUN_DELEGATED_SKILLS_UNSUPPORTED,
+	DRY_RUN_DETERMINISTIC_UNSUPPORTED,
+	createPromptDryRun,
+	parseDryRunCommand,
+	type PromptDryRunResult,
+} from "./prompt-dry-run.js";
 import { formatPromptDryRun } from "./prompt-dry-run-renderer.js";
+import {
+	PromptDryRunInspector,
+	PromptDryRunPicker,
+	createPromptDryRunTuiViewModel,
+	type PromptDryRunTuiResult,
+	type PromptTemplateCatalogItem,
+} from "./prompt-dry-run-tui.js";
 
 interface LoopState {
 	currentIteration: number;
@@ -1421,12 +1436,111 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 	}
 
+	function isTuiMode(ctx: ExtensionCommandContext): boolean {
+		return (ctx as ExtensionCommandContext & { mode?: string }).mode === "tui";
+	}
+
+	function hasCustomUi(ctx: ExtensionCommandContext): boolean {
+		return typeof (ctx as ExtensionCommandContext & { ui?: { custom?: unknown } }).ui?.custom === "function";
+	}
+
+	function getDryRunUnsupportedReason(prompt: PromptWithModel): string | undefined {
+		if (prompt.chain) return DRY_RUN_CHAIN_UNSUPPORTED;
+		if (prompt.workers !== undefined || prompt.reviewers !== undefined || prompt.finalApplier !== undefined) return DRY_RUN_COMPARE_UNSUPPORTED;
+		if (prompt.deterministic) return DRY_RUN_DETERMINISTIC_UNSUPPORTED;
+		if (getRequestedSkills(prompt).length > 0 && shouldDelegatePrompt(prompt)) return DRY_RUN_DELEGATED_SKILLS_UNSUPPORTED;
+		return undefined;
+	}
+
+	function buildPromptDryRunCatalog(): PromptTemplateCatalogItem[] {
+		const merged = new Map<string, PromptWithModel>();
+		for (const [name, prompt] of chainPrompts) merged.set(name, prompt);
+		for (const [name, prompt] of prompts) merged.set(name, prompt);
+		return Array.from(merged.values())
+			.sort((a, b) => a.name.localeCompare(b.name))
+			.map((prompt) => ({
+				name: prompt.name,
+				source: prompt.source,
+				displaySource: prompt.source,
+				file: prompt.filePath,
+				description: prompt.description,
+				model: prompt.models[0],
+				skillCount: getRequestedSkills(prompt).length,
+				skills: getRequestedSkills(prompt),
+				unsupportedReason: getDryRunUnsupportedReason(prompt),
+			}));
+	}
+
+	async function openPromptDryRunInspector(ctx: ExtensionCommandContext, result: PromptDryRunResult, plainReport: string) {
+		const ui = (ctx as ExtensionCommandContext & {
+			ui: { custom: (factory: (...args: any[]) => unknown, options?: unknown) => Promise<PromptDryRunTuiResult | unknown> | PromptDryRunTuiResult | unknown };
+		}).ui;
+		return await ui.custom((tui, theme, _layout, done) => new PromptDryRunInspector(createPromptDryRunTuiViewModel(result, plainReport), tui, theme, done));
+	}
+
+	async function openPromptDryRunPicker(ctx: ExtensionCommandContext, initialTemplateName?: string): Promise<PromptDryRunTuiResult | unknown> {
+		const ui = (ctx as ExtensionCommandContext & {
+			ui: { custom: (factory: (...args: any[]) => unknown, options?: unknown) => Promise<PromptDryRunTuiResult | unknown> | PromptDryRunTuiResult | unknown };
+		}).ui;
+		return await ui.custom((tui, theme, _layout, done) => new PromptDryRunPicker(buildPromptDryRunCatalog(), initialTemplateName, tui, theme, done));
+	}
+
+	function notifyDryRunError(ctx: ExtensionCommandContext, message: string) {
+		const maybeUi = (ctx as ExtensionCommandContext & { ui?: { notify?: (message: string, type: "error") => void } }).ui;
+		if (maybeUi && typeof maybeUi.notify === "function") {
+			maybeUi.notify(message, "error");
+			return;
+		}
+		notify(ctx, message, "error");
+	}
+
+	async function inspectPromptDryRunInTui(ctx: ExtensionCommandContext, promptName: string, rawArgs: string, showSkills: boolean): Promise<void> {
+		const prompt = prompts.get(promptName) ?? chainPrompts.get(promptName);
+		if (!prompt) {
+			notify(ctx, `Prompt "${promptName}" not found`, "error");
+			return;
+		}
+
+		const result = await createPromptDryRun(prompt, {
+			cwd: ctx.cwd,
+			rawArgs,
+			currentModel: getCurrentModel(ctx),
+			modelRegistry: ctx.modelRegistry,
+			commands: pi.getCommands() as RuntimeSkillCommand[],
+			showSkills,
+		});
+		const plainReport = formatPromptDryRun(result);
+
+		if (result.status === "error") {
+			for (const warning of result.warnings) notify(ctx, warning, "warning");
+			notify(ctx, result.error, "error");
+			return;
+		}
+
+		for (const warning of result.warnings) notify(ctx, warning, "warning");
+		const action = await openPromptDryRunInspector(ctx, result, plainReport);
+		if (action && typeof action === "object" && (action as PromptDryRunTuiResult).action === "back") {
+			const selection = await openPromptDryRunPicker(ctx, result.promptName);
+			if (selection && typeof selection === "object" && (selection as PromptDryRunTuiResult).action === "selected" && (selection as PromptDryRunTuiResult).templateName) {
+				await inspectPromptDryRunInTui(ctx, (selection as PromptDryRunTuiResult).templateName, rawArgs, showSkills);
+			}
+		}
+	}
+
 	async function runDryRunCommand(args: string, ctx: ExtensionCommandContext) {
 		storedCommandCtx = ctx;
 		refreshPrompts(ctx.cwd, ctx);
 		const parsed = parseDryRunCommand(args);
+		const useTui = isTuiMode(ctx) && !parsed.plain && hasCustomUi(ctx);
 		if (!parsed.promptName) {
-			notify(ctx, "Usage: /print-prompt <template> [args] [--show-skills]", "error");
+			if (useTui) {
+				const selection = await openPromptDryRunPicker(ctx);
+				if (selection && typeof selection === "object" && (selection as PromptDryRunTuiResult).action === "selected" && (selection as PromptDryRunTuiResult).templateName) {
+					await inspectPromptDryRunInTui(ctx, (selection as PromptDryRunTuiResult).templateName, parsed.remainingArgs, parsed.showSkills);
+				}
+				return;
+			}
+			notifyDryRunError(ctx, "Usage: /print-prompt <template> [args] [--show-skills]. Run in Pi TUI mode to pick from templates, or pass a template name.");
 			return;
 		}
 
@@ -1444,6 +1558,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			commands: pi.getCommands() as RuntimeSkillCommand[],
 			showSkills: parsed.showSkills,
 		});
+		const plainReport = formatPromptDryRun(result);
 
 		if (result.status === "error") {
 			for (const warning of result.warnings) notify(ctx, warning, "warning");
@@ -1452,10 +1567,20 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 
 		for (const warning of result.warnings) notify(ctx, warning, "warning");
-		if (parsed.tui && !parsed.plain) {
-			notify(ctx, "--tui dry-run output is not available yet; falling back to stdout.", "warning");
+		if (useTui) {
+			const action = await openPromptDryRunInspector(ctx, result, plainReport);
+			if (action && typeof action === "object" && (action as PromptDryRunTuiResult).action === "back") {
+				const selection = await openPromptDryRunPicker(ctx, result.promptName);
+				if (selection && typeof selection === "object" && (selection as PromptDryRunTuiResult).action === "selected" && (selection as PromptDryRunTuiResult).templateName) {
+					await inspectPromptDryRunInTui(ctx, (selection as PromptDryRunTuiResult).templateName, parsed.remainingArgs, parsed.showSkills);
+				}
+			}
+			return;
 		}
-		process.stdout.write(formatPromptDryRun(result));
+		if (parsed.tui && !parsed.plain) {
+			notify(ctx, "--tui dry-run output is not available without Pi TUI custom UI; falling back to stdout.", "warning");
+		}
+		process.stdout.write(plainReport);
 	}
 
 	async function runPromptCommand(name: string, args: string, ctx: ExtensionCommandContext) {

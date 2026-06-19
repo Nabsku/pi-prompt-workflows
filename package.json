@@ -34,6 +34,7 @@
     "prompt-execution.ts",
     "prompt-dry-run.ts",
     "prompt-dry-run-renderer.ts",
+    "prompt-dry-run-tui.ts",
     "prompt-includes.ts",
     "prompt-loader.ts",
     "prompt-skills.ts",

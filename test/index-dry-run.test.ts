@@ -206,7 +206,7 @@ test("--plain explicitly keeps stdout dry-run output without warning", async () 
 	});
 });
 
-test("--tui warns and falls back to stdout until TUI implementation lands unless --plain is also present", async () => {
+test("--tui warns and falls back to stdout outside Pi TUI custom UI unless --plain is also present", async () => {
 	await setup(async (_root, cwd, pi, ctx) => {
 		writePrompt(cwd, "review", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nReview $@");
 		await pi.emit("session_start", {}, ctx);
