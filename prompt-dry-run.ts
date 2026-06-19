@@ -90,6 +90,111 @@ export interface CreatePromptDryRunOptions {
 	showSkills?: boolean;
 }
 
+export interface ParsedDryRunCommand {
+	promptName?: string;
+	remainingArgs: string;
+	showSkills: boolean;
+	plain: boolean;
+	tui: boolean;
+}
+
+interface DryRunToken {
+	value: string;
+	start: number;
+	end: number;
+	quoted: boolean;
+}
+
+const DRY_RUN_CONTROL_FLAGS = new Set(["--show-skills", "--plain", "--tui"]);
+
+function scanDryRunTokens(input: string): DryRunToken[] {
+	const tokens: DryRunToken[] = [];
+	let i = 0;
+	while (i < input.length) {
+		while (i < input.length && /\s/.test(input[i]!)) i++;
+		if (i >= input.length) break;
+		const start = i;
+		let value = "";
+		let quoted = false;
+		let quote: string | undefined;
+		while (i < input.length) {
+			const ch = input[i]!;
+			if (quote) {
+				if (ch === quote) {
+					quoted = true;
+					quote = undefined;
+					i++;
+					continue;
+				}
+				if (ch === "\\" && i + 1 < input.length) {
+					value += input[i + 1]!;
+					i += 2;
+					continue;
+				}
+				value += ch;
+				i++;
+				continue;
+			}
+
+			if (/\s/.test(ch)) break;
+			if (ch === "'" || ch === '"') {
+				quoted = true;
+				quote = ch;
+				i++;
+				continue;
+			}
+			if (ch === "\\" && i + 1 < input.length) {
+				value += input[i + 1]!;
+				i += 2;
+				continue;
+			}
+			value += ch;
+			i++;
+		}
+		tokens.push({ value, start, end: i, quoted });
+	}
+	return tokens;
+}
+
+function removeDryRunControlFlags(input: string, tokens: DryRunToken[]) {
+	const remove = new Set<DryRunToken>();
+	let showSkills = false;
+	let plain = false;
+	let tui = false;
+	for (const token of tokens) {
+		if (token.quoted || !DRY_RUN_CONTROL_FLAGS.has(token.value)) continue;
+		remove.add(token);
+		if (token.value === "--show-skills") showSkills = true;
+		if (token.value === "--plain") plain = true;
+		if (token.value === "--tui") tui = true;
+	}
+
+	let cleaned = "";
+	let cursor = 0;
+	for (const token of tokens) {
+		if (!remove.has(token)) continue;
+		cleaned += input.slice(cursor, token.start);
+		cursor = token.end;
+	}
+	cleaned += input.slice(cursor);
+	return { cleaned: cleaned.trim(), showSkills, plain, tui };
+}
+
+export function parseDryRunCommand(input: string): ParsedDryRunCommand {
+	const initialTokens = scanDryRunTokens(input);
+	const { cleaned, showSkills, plain, tui } = removeDryRunControlFlags(input, initialTokens);
+	const tokens = scanDryRunTokens(cleaned);
+	const promptToken = tokens[0];
+	if (!promptToken) return { remainingArgs: "", showSkills, plain, tui };
+	return {
+		promptName: promptToken.value,
+		remainingArgs: cleaned.slice(promptToken.end).trim(),
+		showSkills,
+		plain,
+		tui,
+	};
+}
+
 function errorResult(
 	prompt: Pick<PromptWithModel, "name">,
 	error: string,

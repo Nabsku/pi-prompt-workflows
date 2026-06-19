@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createPromptDryRun, type PromptDryRunResult } from "../prompt-dry-run.js";
+import { createPromptDryRun, parseDryRunCommand, type PromptDryRunResult } from "../prompt-dry-run.js";
 import { loadPromptsWithModel, type PromptWithModel } from "../prompt-loader.js";
 import type { RuntimeSkillCommand } from "../prompt-skills.js";
 
@@ -84,6 +84,64 @@ function writeProjectSkill(cwd: string, name: string, content: string): string {
 function skillCommand(name: string, skillPath: string): RuntimeSkillCommand {
 	return { name, source: "skill", sourceInfo: { path: skillPath } };
 }
+
+test("parseDryRunCommand preserves quoted arg tail and excludes prompt name from remaining args", () => {
+	const parsed = parseDryRunCommand('review "src/my file.ts"');
+	assert.equal(parsed.promptName, "review");
+	assert.equal(parsed.remainingArgs, '"src/my file.ts"');
+	assert.equal(parsed.showSkills, false);
+});
+
+test("parseDryRunCommand removes unquoted --show-skills wherever it appears", () => {
+	for (const input of ["--show-skills review file.ts", "review --show-skills file.ts", "review file.ts --show-skills"]) {
+		const parsed = parseDryRunCommand(input);
+		assert.equal(parsed.promptName, "review");
+		assert.equal(parsed.showSkills, true);
+		assert.equal(parsed.remainingArgs, "file.ts");
+	}
+});
+
+test("parseDryRunCommand removes unquoted --plain wherever it appears", () => {
+	for (const input of ["--plain review file.ts", "review --plain file.ts", "review file.ts --plain"]) {
+		const parsed = parseDryRunCommand(input);
+		assert.equal(parsed.promptName, "review");
+		assert.equal(parsed.plain, true);
+		assert.equal(parsed.remainingArgs, "file.ts");
+	}
+});
+
+test("parseDryRunCommand removes unquoted --tui wherever it appears", () => {
+	for (const input of ["--tui review file.ts", "review --tui file.ts"]) {
+		const parsed = parseDryRunCommand(input);
+		assert.equal(parsed.promptName, "review");
+		assert.equal(parsed.tui, true);
+		assert.equal(parsed.remainingArgs, "file.ts");
+	}
+});
+
+test("parseDryRunCommand keeps quoted control flags as template args", () => {
+	const parsed = parseDryRunCommand('review "--show-skills" "--plain" "--tui"');
+	assert.equal(parsed.promptName, "review");
+	assert.equal(parsed.showSkills, false);
+	assert.equal(parsed.plain, false);
+	assert.equal(parsed.tui, false);
+	assert.equal(parsed.remainingArgs, '"--show-skills" "--plain" "--tui"');
+});
+
+test("parseDryRunCommand keeps runtime flags in remaining args", () => {
+	const parsed = parseDryRunCommand("--show-skills review --model=gpt-5.2 --loop 3 --fresh --subagent=reviewer file.ts");
+	assert.equal(parsed.promptName, "review");
+	assert.equal(parsed.showSkills, true);
+	assert.equal(parsed.remainingArgs, "--model=gpt-5.2 --loop 3 --fresh --subagent=reviewer file.ts");
+});
+
+test("parseDryRunCommand can set both --plain and --tui; plain wins later", () => {
+	const parsed = parseDryRunCommand("--tui review --plain file.ts");
+	assert.equal(parsed.promptName, "review");
+	assert.equal(parsed.tui, true);
+	assert.equal(parsed.plain, true);
+	assert.equal(parsed.remainingArgs, "file.ts");
+});
 
 test("renders includes + $@ args through existing loader/preparation path", async () => {
 	await withTempHome(async (root) => {
