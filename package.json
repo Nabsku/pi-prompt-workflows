@@ -33,6 +33,7 @@
     "notifications.ts",
     "prompt-execution.ts",
     "prompt-dry-run.ts",
+    "prompt-dry-run-renderer.ts",
     "prompt-includes.ts",
     "prompt-loader.ts",
     "prompt-skills.ts",
