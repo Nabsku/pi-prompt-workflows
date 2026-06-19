@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { setKittyProtocolActive, visibleWidth } from "@earendil-works/pi-tui";
 import {
 	createPromptDryRunTuiViewModel,
 	PromptDryRunInspector,
@@ -105,6 +105,65 @@ test("picker filters by typed text and selects the highlighted template with ent
 
 	picker.handleInput("\r");
 	assert.deepEqual(doneValues.at(-1), { action: "selected", templateName: "implement-plan" });
+});
+
+test("picker decodes Kitty CSI-u printable text for search filtering", () => {
+	const doneValues: unknown[] = [];
+	const picker = new PromptDryRunPicker(catalog, undefined, undefined, undefined, (value) => doneValues.push(value));
+
+	for (const data of ["\x1b[112u", "\x1b[108u", "\x1b[97u", "\x1b[110u"]) picker.handleInput(data);
+	const text = renderText(picker.render(80));
+	assert.match(text, /search: plan/);
+	assert.match(text, /implement-plan/);
+	assert.doesNotMatch(text, /review\s+project/);
+
+	picker.handleInput("\x1b[13u");
+	assert.deepEqual(doneValues.at(-1), { action: "selected", templateName: "implement-plan" });
+});
+
+test("picker preserves raw newline selection while Kitty protocol is active", () => {
+	const doneValues: unknown[] = [];
+	const picker = new PromptDryRunPicker(catalog, undefined, undefined, undefined, (value) => doneValues.push(value));
+
+	setKittyProtocolActive(true);
+	try {
+		picker.handleInput("\n");
+	} finally {
+		setKittyProtocolActive(false);
+	}
+
+	assert.deepEqual(doneValues.at(-1), { action: "selected", templateName: "review" });
+});
+
+test("picker treats Kitty CSI-u j, k, and q as shortcuts before printable filtering", () => {
+	const doneValues: unknown[] = [];
+	const picker = new PromptDryRunPicker(catalog, undefined, undefined, undefined, (value) => doneValues.push(value));
+
+	picker.handleInput("\x1b[106u");
+	let text = renderText(picker.render(80));
+	assert.match(text, />\s*implement-plan/);
+	assert.match(text, /search: \(type to filter\)/);
+
+	picker.handleInput("\x1b[107u");
+	text = renderText(picker.render(80));
+	assert.match(text, />\s*review/);
+	assert.match(text, /search: \(type to filter\)/);
+
+	picker.handleInput("\x1b[113u");
+	assert.deepEqual(doneValues.at(-1), { action: "closed" });
+});
+
+test("picker supports Kitty CSI-u escape and backspace parity", () => {
+	const doneValues: unknown[] = [];
+	const picker = new PromptDryRunPicker(catalog, undefined, undefined, undefined, (value) => doneValues.push(value));
+
+	picker.handleInput("\x1b[112u");
+	picker.handleInput("\x1b[108u");
+	picker.handleInput("\x1b[127u");
+	assert.match(renderText(picker.render(80)), /search: p/);
+
+	picker.handleInput("\x1b[27u");
+	assert.deepEqual(doneValues.at(-1), { action: "closed" });
 });
 
 test("picker returns unsupported highlighted templates on enter so callers can surface dry-run diagnostics", () => {
