@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
 import {
@@ -11,6 +12,7 @@ import type { RegistryLike } from "./model-selection.js";
 import { preparePromptExecution } from "./prompt-execution.js";
 import { expandCwdPath, type PromptWithModel } from "./prompt-loader.js";
 import { getRequestedSkills, resolvePromptSkills, type RuntimeSkillCommand } from "./prompt-skills.js";
+import { DEFAULT_SUBAGENT_NAME } from "./subagent-runtime.js";
 
 export const DRY_RUN_CHAIN_UNSUPPORTED =
 	"Dry-run for chain templates is not supported in v1. Use /validate-prompts for structural checks.";
@@ -37,6 +39,7 @@ export interface PromptDryRunDelegationMetadata {
 	agent?: string;
 	fork?: boolean;
 	inheritContext?: boolean;
+	parallel?: number;
 }
 
 export interface PromptDryRunRuntimeMetadata {
@@ -330,10 +333,15 @@ export async function createPromptDryRun(
 	const delegated = shouldDelegatePrompt(effectivePrompt, parsed.override);
 	if (delegated && !runtime.cwd && prompt.cwd) runtime.cwd = prompt.cwd;
 	if (delegated) {
+		const effectiveCwd = effectivePrompt.cwd ?? options.cwd;
+		if (effectiveCwd !== options.cwd && !existsSync(effectiveCwd)) {
+			return errorResult(prompt, `cwd directory does not exist: ${effectiveCwd}`, warnings, runtime);
+		}
 		runtime.delegation = {
 			enabled: true,
-			...(parsed.override?.agent ? { agent: parsed.override.agent } : typeof effectivePrompt.subagent === "string" ? { agent: effectivePrompt.subagent } : {}),
+			agent: parsed.override?.agent ?? (typeof effectivePrompt.subagent === "string" ? effectivePrompt.subagent : DEFAULT_SUBAGENT_NAME),
 			...(parsed.fork ? { fork: true, inheritContext: true } : {}),
+			...(effectivePrompt.parallel && effectivePrompt.parallel > 1 ? { parallel: effectivePrompt.parallel } : {}),
 		};
 	}
 	if (effectivePrompt.inheritContext) runtime.inheritContext = true;
@@ -361,9 +369,12 @@ export async function createPromptDryRun(
 	if (prepared.warning) warnings.push(prepared.warning);
 
 	const skillPreviews = skillResolution.kind === "ready" ? previewSkills(skillResolution.skills, options.showSkills === true) : [];
-	const content = runtime.loop && !delegated
-		? `[${representativeLoopContext(runtime.loop, loopRotation.rotationLabel)}]\n\n${prepared.content}`
-		: prepared.content;
+	let content = prepared.content;
+	if (delegated && effectivePrompt.parallel && effectivePrompt.parallel > 1) {
+		content = Array.from({ length: effectivePrompt.parallel }, (_, index) => `[Parallel subagent ${index + 1}/${effectivePrompt.parallel}]\n\n${prepared.content}`).join("\n\n");
+	} else if (runtime.loop && !delegated) {
+		content = `[${representativeLoopContext(runtime.loop, loopRotation.rotationLabel)}]\n\n${prepared.content}`;
+	}
 
 	return {
 		status: "ok",

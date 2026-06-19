@@ -103,10 +103,28 @@ function writeSkill(cwd: string, name: string, content: string) {
 }
 
 function assertNoExecutionSideEffects(pi: FakePi) {
+	assert.equal(pi.messages.length, 0);
 	assert.equal(pi.userMessages.length, 0);
 	assert.equal(pi.setModelCalls.length, 0);
 	assert.equal(pi.setThinkingLevelCalls.length, 0);
 	assert.equal(pi.waitForIdleCalls, 0);
+}
+
+async function captureStdout(run: () => Promise<void>): Promise<string> {
+	const originalWrite = process.stdout.write.bind(process.stdout);
+	let output = "";
+	(process.stdout.write as unknown as (chunk: unknown, encoding?: unknown, cb?: unknown) => boolean) = ((chunk: unknown, encoding?: unknown, cb?: unknown) => {
+		output += typeof chunk === "string" ? chunk : Buffer.from(chunk as Uint8Array).toString();
+		if (typeof encoding === "function") encoding();
+		if (typeof cb === "function") cb();
+		return true;
+	}) as never;
+	try {
+		await run();
+		return output;
+	} finally {
+		process.stdout.write = originalWrite as never;
+	}
 }
 
 async function setup(run: (root: string, cwd: string, pi: FakePi, ctx: any) => Promise<void>) {
@@ -148,96 +166,85 @@ test("unknown template reports not found error", async () => {
 	});
 });
 
-test("print-prompt sends one dry-run message with rendered content and no execution side effects", async () => {
+test("print-prompt writes dry-run report to stdout instead of LLM history and has no execution side effects", async () => {
 	await setup(async (_root, cwd, pi, ctx) => {
 		mkdirSync(join(cwd, ".pi", "prompt-partials"), { recursive: true });
 		writeFileSync(join(cwd, ".pi", "prompt-partials", "review-prefix.md"), "Include arg: $1");
 		writePrompt(cwd, "review", "---\nmodel: anthropic/claude-sonnet-4-20250514\ninclude: review-prefix.md\n---\nReview $@ now");
 		await pi.emit("session_start", {}, ctx);
 
-		await pi.commands.get("print-prompt")!.handler!("review src/server.ts", ctx);
+		const output = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("review src/server.ts", ctx));
 
-		assert.equal(pi.messages.length, 1);
-		assert.equal(pi.messages[0].display, true);
-		assert.equal(pi.messages[0].details.status, "ok");
-		assert.equal(pi.messages[0].details.content, "Include arg: src/server.ts\n\nReview src/server.ts now");
-		assert.match(pi.messages[0].content, /Include arg: src\/server\.ts/);
-		assert.match(pi.messages[0].content, /Review src\/server\.ts now/);
+		assert.equal(pi.messages.length, 0);
+		assert.match(output, /# Prompt dry-run: review/);
+		assert.match(output, /Status: ok/);
+		assert.match(output, /Include arg: src\/server\.ts/);
+		assert.match(output, /Review src\/server\.ts now/);
 		assertNoExecutionSideEffects(pi);
 	});
 });
 
-test("dry-run-prompt alias produces the same content as print-prompt", async () => {
+test("dry-run-prompt alias produces the same stdout content as print-prompt", async () => {
 	await setup(async (_root, cwd, pi, ctx) => {
 		writePrompt(cwd, "review", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nReview $@");
 		await pi.emit("session_start", {}, ctx);
-		await pi.commands.get("print-prompt")!.handler!("review src/server.ts", ctx);
-		const printed = pi.messages[0].content;
-		pi.messages = [];
-		await pi.commands.get("dry-run-prompt")!.handler!("review src/server.ts", ctx);
-		assert.equal(pi.messages.length, 1);
-		assert.equal(pi.messages[0].content, printed);
+		const printed = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("review src/server.ts", ctx));
+		const dryRun = await captureStdout(() => pi.commands.get("dry-run-prompt")!.handler!("review src/server.ts", ctx));
+		assert.equal(dryRun, printed);
 		assertNoExecutionSideEffects(pi);
 	});
 });
 
-test("--plain explicitly keeps current plain dry-run output without warning", async () => {
+test("--plain explicitly keeps stdout dry-run output without warning", async () => {
 	await setup(async (_root, cwd, pi, ctx) => {
 		writePrompt(cwd, "review", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nReview $@");
 		await pi.emit("session_start", {}, ctx);
-		await pi.commands.get("print-prompt")!.handler!("review --plain file.ts", ctx);
-		assert.equal(pi.messages.length, 1);
-		assert.equal(pi.messages[0].details.content, "Review file.ts");
+		const output = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("review --plain file.ts", ctx));
+		assert.match(output, /Review file\.ts/);
 		assert.equal(pi.notifications.length, 0);
 		assertNoExecutionSideEffects(pi);
 	});
 });
 
-test("--tui warns and falls back to plain dry-run output unless --plain is also present", async () => {
+test("--tui warns and falls back to stdout until TUI implementation lands unless --plain is also present", async () => {
 	await setup(async (_root, cwd, pi, ctx) => {
 		writePrompt(cwd, "review", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nReview $@");
 		await pi.emit("session_start", {}, ctx);
-		await pi.commands.get("print-prompt")!.handler!("review --tui file.ts", ctx);
-		assert.equal(pi.messages.length, 1);
-		assert.equal(pi.messages[0].details.content, "Review file.ts");
+		const tuiOutput = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("review --tui file.ts", ctx));
+		assert.match(tuiOutput, /Review file\.ts/);
 		assert.equal(pi.notifications.at(-1)?.type, "warning");
-		assert.match(pi.notifications.at(-1)!.message, /--tui.*not available.*plain/i);
+		assert.match(pi.notifications.at(-1)?.message ?? "", /--tui.*not available.*stdout/i);
 
-		pi.messages = [];
 		pi.notifications = [];
-		await pi.commands.get("print-prompt")!.handler!("review --tui --plain file.ts", ctx);
-		assert.equal(pi.messages.length, 1);
-		assert.equal(pi.messages[0].details.content, "Review file.ts");
+		const plainOutput = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("review --tui --plain file.ts", ctx));
+		assert.match(plainOutput, /Review file\.ts/);
 		assert.equal(pi.notifications.length, 0);
 		assertNoExecutionSideEffects(pi);
 	});
 });
 
-test("--model affects conditional output", async () => {
+test("--model affects conditional stdout output", async () => {
 	await setup(async (_root, cwd, pi, ctx) => {
 		writePrompt(cwd, "conditional", "---\nmodel: anthropic/claude-sonnet-4-20250514, openai/gpt-5.2\n---\n<if-model is=\"openai/*\">openai<else>other</if-model>");
 		await pi.emit("session_start", {}, ctx);
-		await pi.commands.get("print-prompt")!.handler!("conditional --model=gpt-5.2", ctx);
-		assert.equal(pi.messages[0].details.content, "openai");
-		assert.equal(pi.messages[0].details.runtime.model, "gpt-5.2");
+		const output = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("conditional --model=gpt-5.2", ctx));
+		assert.match(output, /openai/);
+		assert.match(output, /Requested model override: gpt-5\.2/);
 		assertNoExecutionSideEffects(pi);
 	});
 });
 
-test("--show-skills includes skill content and default omits it", async () => {
+test("--show-skills includes skill content in stdout and default omits it", async () => {
 	await setup(async (_root, cwd, pi, ctx) => {
 		writeSkill(cwd, "tmux", "tmux skill content");
 		writePrompt(cwd, "skilled", "---\nmodel: anthropic/claude-sonnet-4-20250514\nskill: tmux\n---\nUse skill");
 		await pi.emit("session_start", {}, ctx);
 
-		await pi.commands.get("print-prompt")!.handler!("skilled", ctx);
-		assert.equal("skillContent" in pi.messages[0].details.skills[0], false);
-		assert.doesNotMatch(pi.messages[0].content, /tmux skill content/);
+		const hidden = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("skilled", ctx));
+		assert.doesNotMatch(hidden, /tmux skill content/);
 
-		pi.messages = [];
-		await pi.commands.get("print-prompt")!.handler!("skilled --show-skills", ctx);
-		assert.equal(pi.messages[0].details.skills[0].skillContent, "tmux skill content");
-		assert.match(pi.messages[0].content, /tmux skill content/);
+		const shown = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("skilled --show-skills", ctx));
+		assert.match(shown, /tmux skill content/);
 		assertNoExecutionSideEffects(pi);
 	});
 });

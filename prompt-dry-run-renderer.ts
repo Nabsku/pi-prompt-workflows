@@ -36,6 +36,7 @@ function formatRuntime(runtime: Partial<PromptDryRunRuntimeMetadata> | undefined
 		if (runtime.delegation.agent !== undefined) lines.push(`  - Agent: ${formatScalar(runtime.delegation.agent)}`);
 		if (runtime.delegation.fork !== undefined) lines.push(`  - Fork: ${formatScalar(runtime.delegation.fork)}`);
 		if (runtime.delegation.inheritContext !== undefined) lines.push(`  - Inherit context: ${formatScalar(runtime.delegation.inheritContext)}`);
+		if (runtime.delegation.parallel !== undefined) lines.push(`  - Parallel: ${formatScalar(runtime.delegation.parallel)}`);
 	} else {
 		lines.push("- Delegation: disabled");
 	}
