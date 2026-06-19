@@ -72,6 +72,82 @@ test("validation result includes skipped graph for root prompt with direct missi
 	});
 });
 
+test("validation result includes skipped user graph under same-name project override", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(root, ".pi", "agent", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		const userPromptPath = join(root, ".pi", "agent", "prompts", "same.md");
+		const projectPromptPath = join(cwd, ".pi", "prompts", "same.md");
+		writeFileSync(userPromptPath, "---\nmodel: claude-sonnet-4-20250514\ninclude: missing.md\n---\nuser");
+		writeFileSync(projectPromptPath, "---\nmodel: claude-sonnet-4-20250514\n---\nproject");
+
+		const result = validatePromptTemplates(cwd);
+		const sameGraphs = result.includeGraphs.filter((entry) => entry.root.promptName === "same");
+		const userGraph = sameGraphs.find((entry) => entry.root.source === "user");
+		const projectGraph = sameGraphs.find((entry) => entry.root.source === "project");
+
+		assert.equal(result.ok, false);
+		assert.equal(result.promptCount, 1);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "include-not-found" && diagnostic.filePath === userPromptPath), true);
+		assert.equal(sameGraphs.length, 2);
+		assert.ok(userGraph);
+		assert.equal(userGraph.effective, false);
+		assert.equal(userGraph.skipped, true);
+		assert.equal(userGraph.root.filePath, userPromptPath);
+		assert.equal(userGraph.edges.length, 1);
+		assert.equal(userGraph.edges[0]?.status, "failed");
+		assert.equal(userGraph.edges[0]?.diagnostics.some((diagnostic) => diagnostic.code === "include-not-found"), true);
+		assert.ok(projectGraph);
+		assert.equal(projectGraph.effective, true);
+		assert.equal(projectGraph.skipped, false);
+		assert.equal(projectGraph.root.filePath, projectPromptPath);
+
+		const report = formatPromptValidationReport(result);
+		assert.match(report, /Include graph:/);
+		assert.match(report, /- same \[skipped\] .*\.pi\/agent\/prompts\/same\.md/);
+		assert.match(report, /same -> unresolved:missing\.md \(frontmatter missing\.md\) \[failed\]/);
+		assert.match(report, /! include-not-found: Prompt include/);
+	});
+});
+
+test("validation report omits non-effective successful user graph under same-name project override", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(root, ".pi", "agent", "prompts"), { recursive: true });
+		mkdirSync(join(root, ".pi", "agent", "prompt-partials"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		const userPromptPath = join(root, ".pi", "agent", "prompts", "same.md");
+		const projectPromptPath = join(cwd, ".pi", "prompts", "same.md");
+		writeFileSync(join(root, ".pi", "agent", "prompt-partials", "ok.md"), "ok include");
+		writeFileSync(userPromptPath, "---\nmodel: claude-sonnet-4-20250514\ninclude: ok.md\n---\nuser");
+		writeFileSync(projectPromptPath, "---\nmodel: claude-sonnet-4-20250514\n---\nproject");
+
+		const result = validatePromptTemplates(cwd);
+		const sameGraphs = result.includeGraphs.filter((entry) => entry.root.promptName === "same");
+		const userGraph = sameGraphs.find((entry) => entry.root.source === "user");
+		const projectGraph = sameGraphs.find((entry) => entry.root.source === "project");
+
+		assert.equal(result.ok, true);
+		assert.equal(result.promptCount, 1);
+		assert.deepEqual(result.diagnostics, []);
+		assert.ok(userGraph);
+		assert.equal(userGraph.effective, false);
+		assert.equal(userGraph.skipped, false);
+		assert.equal(userGraph.root.filePath, userPromptPath);
+		assert.equal(userGraph.edges.length, 1);
+		assert.equal(userGraph.edges[0]?.status, "ok");
+		assert.ok(projectGraph);
+		assert.equal(projectGraph.effective, true);
+		assert.equal(projectGraph.skipped, false);
+		assert.equal(projectGraph.root.filePath, projectPromptPath);
+
+		const report = formatPromptValidationReport(result);
+		assert.doesNotMatch(report, /Include graph:/);
+		assert.doesNotMatch(report, /\.pi\/agent\/prompts\/same\.md/);
+	});
+});
+
 test("validation result marks root skipped for nested missing include via graph subtree", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
@@ -647,6 +723,7 @@ test("formatPromptValidationReport escapes control characters in diagnostics", (
 				}],
 			}],
 			diagnostics: [],
+			effective: false,
 			skipped: true,
 		}],
 	});
