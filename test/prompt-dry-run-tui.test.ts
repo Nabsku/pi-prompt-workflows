@@ -240,6 +240,56 @@ test("TUI sanitizer escapes bare carriage returns in inspector and picker render
 	assert.match(pickerText, /\\u000d/);
 });
 
+test("TUI sanitizer escapes tabs in inspector and picker text before truncation", () => {
+	const tabbedResult: PromptDryRunResult = okResult.status === "ok"
+		? {
+			...okResult,
+			promptName: "review	name",
+			content: "prompt	content",
+			skills: [{ skillName: "skill	name", skillPath: "/tmp/skill	path", skillContent: "skill	content" }],
+		}
+		: okResult;
+	const inspectorText = renderText(new PromptDryRunInspector(createPromptDryRunTuiViewModel(tabbedResult, "raw	report")).render(120));
+	assert.doesNotMatch(inspectorText, /	/);
+	assert.match(inspectorText, /prompt\\u0009content/);
+	assert.match(inspectorText, /skill\\u0009content/);
+
+	const narrowInspectorText = renderText(new PromptDryRunInspector(createPromptDryRunTuiViewModel(tabbedResult, "raw	report")).render(20));
+	assert.doesNotMatch(narrowInspectorText, /	/);
+	assert.match(narrowInspectorText, /prompt\\u0009/);
+
+	const picker = new PromptDryRunPicker([
+		{ name: "name	with-tab", source: "project", displaySource: "project", description: "desc	with-tab" },
+	], undefined);
+	const pickerText = renderText(picker.render(120));
+	assert.doesNotMatch(pickerText, /	/);
+	assert.match(pickerText, /name\\u0009with-tab/);
+	assert.match(pickerText, /desc\\u0009with-tab/);
+});
+
+test("picker windows large catalogs while keeping controls and selected row visible", () => {
+	const largeCatalog: PromptTemplateCatalogItem[] = Array.from({ length: 250 }, (_, index) => ({
+		name: `template-${index.toString().padStart(3, "0")}`,
+		source: "project",
+		displaySource: "project",
+		description: `description ${index}`,
+	}));
+	const picker = new PromptDryRunPicker(largeCatalog, undefined);
+
+	for (let i = 0; i < 125; i++) picker.handleInput("j");
+
+	const lines = picker.render(100);
+	const text = renderText(lines);
+	assert.ok(lines.length <= 26, `expected bounded render, got ${lines.length} lines`);
+	assert.match(text, /Prompt dry-run/);
+	assert.match(text, /search: \(type to filter\)/);
+	assert.match(text, /Enter: inspect/);
+	assert.match(text, />\s*template-125/);
+	assert.doesNotMatch(text, /template-000\s+project/);
+	assert.match(text, /earlier template/);
+	assert.match(text, /later template/);
+});
+
 test("inspector tab, numeric jump, back, scroll, and quit keybindings are render-only", () => {
 	const doneValues: unknown[] = [];
 	const viewModel = createPromptDryRunTuiViewModel(okResult, plainReport);
@@ -315,4 +365,19 @@ test("inspector includes full skill content only when --show-skills data is pres
 
 	const hidden = createPromptDryRunTuiViewModel(okResult, plainReport);
 	assert.doesNotMatch(renderText(new PromptDryRunInspector(hidden).render(100)), /SECRET FULL TYPESCRIPT SKILL CONTENT/);
+});
+
+test("inspector treats empty skillContent as present --show-skills data", () => {
+	const emptySkillResult: PromptDryRunResult = okResult.status === "ok"
+		? {
+			...okResult,
+			skills: [{ skillName: "empty", skillPath: "/repo/.pi/skills/empty/SKILL.md", skillContent: "" }],
+		}
+		: okResult;
+	const viewModel = createPromptDryRunTuiViewModel(emptySkillResult, plainReport);
+	const text = renderText(new PromptDryRunInspector(viewModel).render(100));
+
+	assert.match(viewModel.panes.skills, /- empty \(\/repo\/\.pi\/skills\/empty\/SKILL\.md\)/);
+	assert.doesNotMatch(viewModel.panes.skills, /full skill content hidden|--show-skills/i);
+	assert.doesNotMatch(text, /full skill content hidden|--show-skills/i);
 });

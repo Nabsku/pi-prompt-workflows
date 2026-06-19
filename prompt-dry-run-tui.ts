@@ -31,7 +31,8 @@ export interface PromptDryRunTuiResult {
 }
 
 const ANSI_ESCAPE_PATTERN = /\u001b(?:\][^\u0007]*(?:\u0007|\u001b\\)|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])/g;
-const CONTROL_PATTERN = /[\u0000-\u0008\u000b\u000c\u000d\u000e-\u001f\u007f-\u009f]/g;
+const CONTROL_PATTERN = /[\u0000-\u001f\u007f-\u009f]/g;
+const PICKER_VISIBLE_ROWS = 18;
 
 function sanitizeText(value: string): string {
 	return value
@@ -73,7 +74,7 @@ function formatSkills(result: PromptDryRunResult): string {
 	const lines: string[] = [];
 	for (const skill of skills) {
 		lines.push(`- ${skill.skillName} (${skill.skillPath})`);
-		if (skill.skillContent) {
+		if (skill.skillContent !== undefined) {
 			lines.push(skill.skillContent);
 		} else {
 			lines.push("  full skill content hidden; rerun with --show-skills to preview it");
@@ -140,13 +141,21 @@ export class PromptDryRunPicker implements Component {
 		if (!items.length) {
 			lines.push("No templates match your search.");
 		} else {
-			for (const [index, item] of items.entries()) {
+			const visibleRows = Math.min(PICKER_VISIBLE_ROWS, items.length);
+			let windowStart = Math.max(0, this.selectedIndex - Math.floor(visibleRows / 2));
+			windowStart = Math.min(windowStart, Math.max(0, items.length - visibleRows));
+			const windowEnd = Math.min(items.length, windowStart + visibleRows);
+			if (windowStart > 0) lines.push(`… ${windowStart} earlier template${windowStart === 1 ? "" : "s"}`);
+			for (let index = windowStart; index < windowEnd; index++) {
+				const item = items[index]!;
 				const marker = index === this.selectedIndex ? ">" : " ";
 				const unsupported = item.unsupportedReason ? ` — unsupported: ${item.unsupportedReason}` : "";
 				const skills = item.skillCount !== undefined ? ` · ${item.skillCount} skill${item.skillCount === 1 ? "" : "s"}` : "";
 				const description = item.description ? ` — ${item.description}` : "";
 				lines.push(`${marker} ${item.name}  ${item.displaySource}${skills}${description}${unsupported}`);
 			}
+			const remaining = items.length - windowEnd;
+			if (remaining > 0) lines.push(`… ${remaining} later template${remaining === 1 ? "" : "s"}`);
 		}
 		lines.push("", "Enter: inspect  ↑/↓: move  Backspace: edit  Esc/q: quit");
 		return linesSafe(lines, width);
