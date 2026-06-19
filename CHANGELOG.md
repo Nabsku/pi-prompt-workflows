@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.2](https://github.com/Nabsku/pi-prompt-template-model-enhanced/compare/v0.11.1...v0.11.2) (2026-06-19)
+
+
+### Bug Fixes
+
+* publish after release-please releases ([7949c6c](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/7949c6cb313f62f2dc8cc5ab707b90413e3095ac))
+
 ## [0.11.1](https://github.com/Nabsku/pi-prompt-template-model-enhanced/compare/v0.11.0...v0.11.1) (2026-06-19)
 
 
