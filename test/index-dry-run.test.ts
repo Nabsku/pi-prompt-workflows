@@ -181,6 +181,38 @@ test("dry-run-prompt alias produces the same content as print-prompt", async () 
 	});
 });
 
+test("--plain explicitly keeps current plain dry-run output without warning", async () => {
+	await setup(async (_root, cwd, pi, ctx) => {
+		writePrompt(cwd, "review", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nReview $@");
+		await pi.emit("session_start", {}, ctx);
+		await pi.commands.get("print-prompt")!.handler!("review --plain file.ts", ctx);
+		assert.equal(pi.messages.length, 1);
+		assert.equal(pi.messages[0].details.content, "Review file.ts");
+		assert.equal(pi.notifications.length, 0);
+		assertNoExecutionSideEffects(pi);
+	});
+});
+
+test("--tui warns and falls back to plain dry-run output unless --plain is also present", async () => {
+	await setup(async (_root, cwd, pi, ctx) => {
+		writePrompt(cwd, "review", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nReview $@");
+		await pi.emit("session_start", {}, ctx);
+		await pi.commands.get("print-prompt")!.handler!("review --tui file.ts", ctx);
+		assert.equal(pi.messages.length, 1);
+		assert.equal(pi.messages[0].details.content, "Review file.ts");
+		assert.equal(pi.notifications.at(-1)?.type, "warning");
+		assert.match(pi.notifications.at(-1)!.message, /--tui.*not available.*plain/i);
+
+		pi.messages = [];
+		pi.notifications = [];
+		await pi.commands.get("print-prompt")!.handler!("review --tui --plain file.ts", ctx);
+		assert.equal(pi.messages.length, 1);
+		assert.equal(pi.messages[0].details.content, "Review file.ts");
+		assert.equal(pi.notifications.length, 0);
+		assertNoExecutionSideEffects(pi);
+	});
+});
+
 test("--model affects conditional output", async () => {
 	await setup(async (_root, cwd, pi, ctx) => {
 		writePrompt(cwd, "conditional", "---\nmodel: anthropic/claude-sonnet-4-20250514, openai/gpt-5.2\n---\n<if-model is=\"openai/*\">openai<else>other</if-model>");

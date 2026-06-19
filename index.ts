@@ -1453,6 +1453,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			return;
 		}
 
+		if (parsed.tui && !parsed.plain) {
+			notify(ctx, "--tui dry-run output is not available yet; falling back to plain output.", "warning");
+		}
 		for (const warning of result.warnings) notify(ctx, warning, "warning");
 		pi.sendMessage({
 			customType: PROMPT_TEMPLATE_DRY_RUN_MESSAGE_TYPE,

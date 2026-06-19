@@ -277,9 +277,46 @@ test("quoted runtime-looking flags stay prompt args", async () => {
 
 test("loop flags are stripped from rendered args and shown as metadata", async () => {
 	const result = assertOk(await createPromptDryRun(prompt({ content: "Args: $@" }), options("/tmp", { rawArgs: "--loop 3 keep --fresh --no-converge" })));
-	assert.equal(result.content, "Args: keep");
+	assert.equal(result.content, "[Loop 1/3]\n\nArgs: keep");
 	assert.deepEqual(result.args, ["keep"]);
 	assert.deepEqual(result.runtime.loop, { count: 3, fresh: true, converge: false });
+});
+
+test("unlimited loop dry-run shows representative first iteration loop context", async () => {
+	const result = assertOk(await createPromptDryRun(prompt({ content: "Args: $@" }), options("/tmp", { rawArgs: "--loop keep" })));
+	assert.equal(result.content, "[Loop 1]\n\nArgs: keep");
+	assert.deepEqual(result.runtime.loop, { count: null, fresh: false, converge: true });
+});
+
+test("rotating loop dry-run uses first rotated model for label and conditionals", async () => {
+	const result = assertOk(await createPromptDryRun(
+		prompt({
+			content: '<if-model is="openai/*">openai<else>other</if-model>',
+			models: [gpt.id, sonnet.id],
+			rotate: true,
+			loop: 3,
+			thinkingLevels: ["high", "low"],
+		}),
+		options("/tmp"),
+	));
+	assert.equal(result.content, "[Loop 1/3 · gpt-5.2 high]\n\nopenai");
+	assert.equal(result.model.id, gpt.id);
+	assert.equal(result.runtime.thinking, "high");
+});
+
+test("delegated prompt frontmatter cwd is shown as effective runtime cwd metadata", async () => {
+	await withTempHome(async (root) => {
+		const ctxCwd = join(root, "ctx");
+		const delegatedCwd = join(root, "delegated");
+		const cliCwd = join(root, "cli");
+		mkdirSync(ctxCwd, { recursive: true });
+		mkdirSync(delegatedCwd, { recursive: true });
+		mkdirSync(cliCwd, { recursive: true });
+		const fromPrompt = assertOk(await createPromptDryRun(prompt({ subagent: true, cwd: delegatedCwd }), options(ctxCwd)));
+		assert.equal(fromPrompt.runtime.cwd, delegatedCwd);
+		const fromCli = assertOk(await createPromptDryRun(prompt({ subagent: true, cwd: delegatedCwd }), options(ctxCwd, { rawArgs: `--cwd=${cliCwd}` })));
+		assert.equal(fromCli.runtime.cwd, cliCwd);
+	});
 });
 
 test("--cwd is displayed as runtime metadata but skills still resolve from ctx.cwd, matching runtime", async () => {

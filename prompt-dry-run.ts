@@ -212,6 +212,29 @@ function shouldDelegatePrompt(prompt: Pick<PromptWithModel, "subagent">, overrid
 	return prompt.subagent !== undefined || override?.enabled === true;
 }
 
+function applyRepresentativeLoopRotation(prompt: PromptWithModel, runtime: PromptDryRunRuntimeMetadata) {
+	if (!runtime.loop || !prompt.rotate || prompt.models.length <= 1) {
+		return { prompt, rotationLabel: undefined } as const;
+	}
+
+	const rotationIndex = 0;
+	const rotatedThinking = prompt.thinkingLevels ? prompt.thinkingLevels[rotationIndex] : prompt.thinking;
+	const rotatedPrompt: PromptWithModel = {
+		...prompt,
+		models: [prompt.models[rotationIndex]!],
+		thinking: rotatedThinking,
+	};
+	const shortModel = prompt.models[rotationIndex]!.split("/").pop() || prompt.models[rotationIndex]!;
+	const thinkingLabel = rotatedThinking ? ` ${rotatedThinking}` : "";
+	if (rotatedThinking) runtime.thinking = rotatedThinking;
+	return { prompt: rotatedPrompt, rotationLabel: `${shortModel}${thinkingLabel}` } as const;
+}
+
+function representativeLoopContext(loop: PromptDryRunLoopMetadata, rotationLabel?: string): string {
+	const iterationLabel = loop.count !== null ? `1/${loop.count}` : "1";
+	return rotationLabel ? `Loop ${iterationLabel} · ${rotationLabel}` : `Loop ${iterationLabel}`;
+}
+
 function previewSkills(
 	skills: Array<{ skillName: string; skillPath: string; skillContent: string }>,
 	showSkills: boolean,
@@ -297,7 +320,7 @@ export async function createPromptDryRun(
 	const skillResolution = resolvePromptSkills(requestedSkills, options.cwd, options.commands ?? []);
 	if (skillResolution.kind === "error") return errorResult(prompt, skillResolution.error, warnings, runtime);
 
-	const effectivePrompt: PromptWithModel = {
+	let effectivePrompt: PromptWithModel = {
 		...prompt,
 		...(parsed.model ? { models: [parsed.model] } : {}),
 		...(parsed.fork ? { inheritContext: true } : {}),
@@ -305,6 +328,7 @@ export async function createPromptDryRun(
 	};
 
 	const delegated = shouldDelegatePrompt(effectivePrompt, parsed.override);
+	if (delegated && !runtime.cwd && prompt.cwd) runtime.cwd = prompt.cwd;
 	if (delegated) {
 		runtime.delegation = {
 			enabled: true,
@@ -317,6 +341,9 @@ export async function createPromptDryRun(
 	if (requestedSkills.length > 0 && delegated) {
 		return errorResult(prompt, DRY_RUN_DELEGATED_SKILLS_UNSUPPORTED, warnings, runtime);
 	}
+
+	const loopRotation = applyRepresentativeLoopRotation(effectivePrompt, runtime);
+	effectivePrompt = loopRotation.prompt;
 
 	const prepared = await preparePromptExecution(
 		effectivePrompt,
@@ -334,11 +361,14 @@ export async function createPromptDryRun(
 	if (prepared.warning) warnings.push(prepared.warning);
 
 	const skillPreviews = skillResolution.kind === "ready" ? previewSkills(skillResolution.skills, options.showSkills === true) : [];
+	const content = runtime.loop && !delegated
+		? `[${representativeLoopContext(runtime.loop, loopRotation.rotationLabel)}]\n\n${prepared.content}`
+		: prepared.content;
 
 	return {
 		status: "ok",
 		promptName: prompt.name,
-		content: prepared.content,
+		content,
 		args: parsed.args,
 		model: prepared.selectedModel.model,
 		modelAlreadyActive: prepared.selectedModel.alreadyActive,
