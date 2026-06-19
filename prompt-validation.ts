@@ -1,5 +1,5 @@
 import { parseChainDeclaration, type ChainStep, type ChainStepOrParallel } from "./chain-parser.js";
-import { collectPromptIncludeGraphs, type PromptIncludeGraph } from "./prompt-includes.js";
+import { collectPromptIncludeGraphs, type PromptIncludeGraph, type PromptIncludeGraphEdge, type PromptIncludeGraphNode } from "./prompt-includes.js";
 import { collectPromptSourceRecords, discoverFilesystemSkills, loadPromptsWithModel, readSkillContent, resolveSkillPath, type PromptLoaderDiagnostic, type PromptSource } from "./prompt-loader.js";
 
 export interface RegisteredPromptSkill {
@@ -405,15 +405,80 @@ export function validatePromptTemplates(cwd: string, options: PromptValidationOp
 	return result;
 }
 
+function includeGraphIsRelevant(graph: PromptValidationIncludeGraph): boolean {
+	return graph.skipped || graph.edges.length > 0 || graph.diagnostics.length > 0;
+}
+
+function includeGraphRootStatus(graph: PromptValidationIncludeGraph): "ok" | "skipped" | "failed" {
+	if (graph.skipped) return "skipped";
+	if (graph.edges.some((edge) => edge.status === "failed") || graph.diagnostics.length > 0) return "failed";
+	return "ok";
+}
+
+function nodeById(graph: PromptValidationIncludeGraph): Map<string, PromptIncludeGraphNode> {
+	return new Map(graph.nodes.map((node) => [node.id, node]));
+}
+
+function includeGraphNodeLabel(graph: PromptValidationIncludeGraph, nodes: Map<string, PromptIncludeGraphNode>, nodeId: string): string {
+	const node = nodes.get(nodeId);
+	if (!node) return nodeId;
+	if (node.filePath === graph.root.filePath) return graph.root.promptName;
+	if (node.filePath) return node.filePath;
+	if (node.includePath) return `unresolved:${node.includePath}`;
+	return node.id;
+}
+
+function sortIncludeGraphEdges(edges: PromptIncludeGraphEdge[]): PromptIncludeGraphEdge[] {
+	return [...edges].sort((a, b) => a.order - b.order || lexicalCompare(a.fromNodeId, b.fromNodeId) || lexicalCompare(a.toNodeId, b.toNodeId) || lexicalCompare(a.includePath, b.includePath));
+}
+
+function sortDiagnostics(diagnostics: PromptLoaderDiagnostic[]): PromptLoaderDiagnostic[] {
+	return [...diagnostics].sort((a, b) => lexicalCompare(a.filePath, b.filePath) || lexicalCompare(a.code, b.code) || lexicalCompare(a.message, b.message));
+}
+
+function formatIncludeGraphDiagnostic(prefix: string, diagnostic: PromptLoaderDiagnostic): string {
+	return `${prefix}${sanitizeReportValue(diagnostic.code)}: ${sanitizeReportValue(diagnostic.message)}`;
+}
+
+function formatIncludeGraphSection(graphs: PromptValidationIncludeGraph[]): string[] {
+	const relevantGraphs = graphs
+		.filter(includeGraphIsRelevant)
+		.sort((a, b) => lexicalCompare(a.root.promptName, b.root.promptName) || lexicalCompare(a.root.filePath, b.root.filePath));
+	if (relevantGraphs.length === 0) return [];
+
+	const lines = ["Include graph:"];
+	for (const graph of relevantGraphs) {
+		const nodes = nodeById(graph);
+		lines.push(`- ${sanitizeReportValue(graph.root.promptName)} [${includeGraphRootStatus(graph)}] ${sanitizeReportValue(graph.root.filePath)}`);
+		for (const diagnostic of sortDiagnostics(graph.diagnostics)) {
+			lines.push(formatIncludeGraphDiagnostic("  ! ", diagnostic));
+		}
+		for (const edge of sortIncludeGraphEdges(graph.edges)) {
+			const from = includeGraphNodeLabel(graph, nodes, edge.fromNodeId);
+			const to = includeGraphNodeLabel(graph, nodes, edge.toNodeId);
+			lines.push(`  - ${sanitizeReportValue(from)} -> ${sanitizeReportValue(to)} (${sanitizeReportValue(edge.kind)} ${sanitizeReportValue(edge.includePath)}) [${sanitizeReportValue(edge.status)}]`);
+			for (const diagnostic of sortDiagnostics(edge.diagnostics)) {
+				lines.push(formatIncludeGraphDiagnostic("    ! ", diagnostic));
+			}
+		}
+	}
+	return lines;
+}
+
 export function formatPromptValidationReport(result: PromptValidationResult): string {
+	const includeGraphLines = formatIncludeGraphSection(result.includeGraphs);
 	if (result.ok) {
-		return `[pi-prompt-template-model-enhanced] Prompt validation passed: ${result.promptCount} prompt template(s) loaded.`;
+		return [
+			`[pi-prompt-template-model-enhanced] Prompt validation passed: ${result.promptCount} prompt template(s) loaded.`,
+			...includeGraphLines,
+		].join("\n");
 	}
 
-	const diagnostics = [...result.diagnostics].sort((a, b) => lexicalCompare(a.filePath, b.filePath) || lexicalCompare(a.code, b.code) || lexicalCompare(a.message, b.message));
+	const diagnostics = sortDiagnostics(result.diagnostics);
 	const lines = diagnostics.map((diagnostic) => `- ${sanitizeReportValue(diagnostic.code)} (${sanitizeReportValue(diagnostic.source)}) ${sanitizeReportValue(diagnostic.filePath)}: ${sanitizeReportValue(diagnostic.message)}`);
 	return [
 		`[pi-prompt-template-model-enhanced] Prompt validation failed: ${diagnostics.length} issue(s) found across ${result.promptCount} loaded prompt template(s).`,
 		...lines,
+		...includeGraphLines,
 	].join("\n");
 }

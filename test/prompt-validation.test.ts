@@ -107,8 +107,86 @@ test("validation result marks chain wrapper invalid include metadata graph skipp
 		assert.deepEqual(graph.edges, []);
 		assert.equal(graph.diagnostics.some((diagnostic) => diagnostic.code === "invalid-includes-chain"), true);
 		assert.equal(result.diagnostics.filter((diagnostic) => diagnostic.code === "invalid-includes-chain").length, 1);
+		const report = formatPromptValidationReport(result);
+		assert.match(report, /Include graph:/);
+		assert.match(report, /- pipeline \[skipped\] /);
+		assert.match(report, /! invalid-includes-chain:/);
 	});
 });
+
+test("validation report includes valid include graph section with edge", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts", "shared"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "shared", "rules.md"), "Shared rules");
+		writeFileSync(join(cwd, ".pi", "prompts", "review.md"), "---\nmodel: claude-sonnet-4-20250514\nincludes: [shared/rules.md]\n---\nReview $@");
+
+		const report = formatPromptValidationReport(validatePromptTemplates(cwd));
+
+		assert.match(report, /Prompt validation passed: 2 prompt template/);
+		assert.match(report, /Include graph:/);
+		assert.match(report, /- review \[ok\] /);
+		assert.match(report, /review -> .*shared\/rules\.md \(frontmatter shared\/rules\.md\) \[ok\]/);
+	});
+});
+
+test("validation report includes skipped direct missing include and diagnostic", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "review.md"), "---\nmodel: claude-sonnet-4-20250514\ninclude: shared/missing.md\n---\nReview");
+
+		const report = formatPromptValidationReport(validatePromptTemplates(cwd));
+
+		assert.match(report, /Include graph:/);
+		assert.match(report, /- review \[skipped\] /);
+		assert.match(report, /review -> unresolved:shared\/missing\.md \(frontmatter shared\/missing\.md\) \[failed\]/);
+		assert.match(report, /! include-not-found: Prompt include/);
+	});
+});
+
+test("validation report includes nested missing include chain edge", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts", "shared"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "shared", "a.md"), 'A\n<include file="missing.md" />');
+		writeFileSync(join(cwd, ".pi", "prompts", "review.md"), "---\nmodel: claude-sonnet-4-20250514\ninclude: shared/a.md\n---\nReview");
+
+		const report = formatPromptValidationReport(validatePromptTemplates(cwd));
+
+		assert.match(report, /- review \[skipped\] /);
+		assert.match(report, /review -> .*shared\/a\.md \(frontmatter shared\/a\.md\) \[ok\]/);
+		assert.match(report, /shared\/a\.md -> unresolved:missing\.md \(inline missing\.md\) \[failed\]/);
+		assert.match(report, /include-not-found/);
+	});
+});
+
+test("validation report includes failed root include graph diagnostics without edges", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "placeholder.md"), "---\nmodel: claude-sonnet-4-20250514\n---\n<includes />");
+
+		const report = formatPromptValidationReport(validatePromptTemplates(cwd));
+
+		assert.match(report, /Include graph:/);
+		assert.match(report, /- placeholder \[skipped\] /);
+		assert.match(report, /! include-placeholder-without-includes:/);
+	});
+});
+
+test("validation report omits include graph section for irrelevant graphs", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "plain.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nPlain");
+
+		const report = formatPromptValidationReport(validatePromptTemplates(cwd));
+
+		assert.doesNotMatch(report, /Include graph:/);
+	});
+});
+
 
 test("validatePromptTemplates reports loader diagnostics and unresolved skills", () => {
 	withTempHome((root) => {
@@ -528,11 +606,57 @@ test("formatPromptValidationReport escapes control characters in diagnostics", (
 			message: "message\u001b[31m",
 			key: "bad",
 		}],
-		includeGraphs: [],
+		includeGraphs: [{
+			root: {
+				promptName: "bad\nroot",
+				filePath: "/tmp/prompts/bad-root.md",
+				promptRoot: "/tmp/prompts",
+				cwd: "/tmp",
+				source: "project",
+				rawBody: "",
+				hasInlineIncludes: true,
+				hasIncludesPlaceholder: false,
+				isChainWrapper: false,
+			},
+			nodes: [{
+				id: "file:/tmp/prompts/bad-root.md",
+				kind: "prompt",
+				status: "ok",
+				filePath: "/tmp/prompts/bad-root.md",
+				diagnostics: [],
+			}, {
+				id: "unresolved:0",
+				kind: "unresolved",
+				status: "failed",
+				includePath: "evil\n- forged.md",
+				diagnostics: [],
+			}],
+			edges: [{
+				fromNodeId: "file:/tmp/prompts/bad-root.md",
+				toNodeId: "unresolved:0",
+				kind: "inline",
+				includePath: "evil\n- forged.md",
+				order: 0,
+				status: "failed",
+				diagnostics: [{
+					code: "include\ncode",
+					message: "include message\u001b[31m",
+					filePath: "/tmp/prompts/bad-root.md",
+					source: "project",
+					key: "include-bad",
+				}],
+			}],
+			diagnostics: [],
+			skipped: true,
+		}],
 	});
 
 	assert.doesNotMatch(report, /forged\.md: message\x1b/);
 	assert.match(report, /bad\\ncode/);
 	assert.match(report, /bad\\n- forged\.md/);
 	assert.match(report, /message\\u001b\[31m/);
+	assert.match(report, /bad\\nroot/);
+	assert.match(report, /evil\\n- forged\.md/);
+	assert.match(report, /include\\ncode/);
+	assert.match(report, /include message\\u001b\[31m/);
 });
