@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.11.0](https://github.com/Nabsku/pi-prompt-template-model-enhanced/compare/v0.10.0...v0.11.0) (2026-06-19)
+
+
+### Features
+
+* add prompt dry-run commands ([80548b3](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/80548b34471aa1ae98436c61f5a202d9734f831c))
+* add prompt dry-run core ([3edc51a](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/3edc51aace8eccac557bec4d0e83c859a6baa4a8))
+* add prompt dry-run TUI ([d99e7da](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/d99e7da3e62f70ecda9fcaebcf5ce1b84e306a73))
+* add prompt validation command ([a82a029](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/a82a029e56e51a29295f0b98379acaa643721a24))
+* render prompt dry-run output ([8c0cdb5](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/8c0cdb5bcc622ca38f215a146a59f9e3dca55e0a))
+
+
+### Bug Fixes
+
+* address dry-run TUI review feedback ([af3b6b0](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/af3b6b0f30ad779b79f5548aea51ac22c3fde4be))
+* align prompt dry-run loop metadata ([bd9f9ea](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/bd9f9eae3841a515b848a7b73c83b86711b6b456))
+* keep prompt dry-run out of history ([86e31b8](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/86e31b8a895a8579ec0a8d40b800c6dd6faa827b))
+* polish TUI rendering edge cases ([d5c5c77](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/d5c5c776d0ad34c75e67f147f35cb72a39e14b1e))
+* support Kitty inspector controls ([f09904c](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/f09904c5359e75e2cbf4a784bdcddc487d6ad8c7))
+* support Kitty picker input ([2679c62](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/2679c6237d85d455a34ff87a76eb463843010b1c))
+
 ## [Unreleased]
 
 ### Added
