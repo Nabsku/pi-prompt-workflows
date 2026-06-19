@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.1](https://github.com/Nabsku/pi-prompt-template-model-enhanced/compare/v0.11.0...v0.11.1) (2026-06-19)
+
+
+### Bug Fixes
+
+* allow skills in delegated prompts ([d7c0e0e](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/d7c0e0e1c8a8e2b728aa2fa20c9e5037002b761e))
+
 ## [0.11.0](https://github.com/Nabsku/pi-prompt-template-model-enhanced/compare/v0.10.0...v0.11.0) (2026-06-19)
 
 
