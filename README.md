@@ -83,10 +83,15 @@ Start a Python REPL session and help me debug: $@
 
 Run `/validate-prompts` to check prompt templates before using them. It reloads the project and user prompt directories, validates frontmatter, include paths, include cycles, chain declarations, reserved command names, and skill references that can be resolved from registered or filesystem skills.
 
+Validation also reports an include graph for prompts that declare frontmatter includes (`include` / `includes`), use inline include directives, or fail include processing. Each relevant prompt is listed with its include dependencies, including nested partial-to-partial includes.
+
 A clean library reports success:
 
 ```text
 [pi-prompt-template-model-enhanced] Prompt validation passed: 4 prompt template(s) loaded.
+Include graph:
+- review [ok] /repo/.pi/prompts/review.md
+  - review -> /repo/.pi/prompts/shared/rules.md (frontmatter shared/rules.md) [ok]
 ```
 
 Invalid libraries fail with explicit diagnostics:
@@ -95,7 +100,13 @@ Invalid libraries fail with explicit diagnostics:
 [pi-prompt-template-model-enhanced] Prompt validation failed: 2 issue(s) found across 3 loaded prompt template(s).
 - include-not-found (project) /repo/.pi/prompts/review.md: Prompt include "shared/rules.md" was not found ...
 - skill-not-found (project) /repo/.pi/prompts/debug.md: Prompt template ... references skill "tmux", but it was not found ...
+Include graph:
+- review [skipped] /repo/.pi/prompts/review.md
+  - review -> unresolved:shared/rules.md (frontmatter shared/rules.md) [failed]
+    ! include-not-found: Prompt include "shared/rules.md" was not found ...
 ```
+
+Include graph statuses are concise: `[ok]` means the prompt or edge resolved successfully, `[skipped]` means the loader skipped that prompt because include processing failed or was invalid, and `[failed]` marks a failed edge or root diagnostic. Prompts skipped for missing, cyclic, or invalid includes still appear in the include graph with `[skipped]`, failed include edges, and diagnostic codes such as `include-not-found` or `include-cycle`.
 
 ## Dry-run and TUI preview
 
