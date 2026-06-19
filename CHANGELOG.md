@@ -2,11 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+- Added `/print-prompt` and `/dry-run-prompt` to preview rendered prompt templates without execution.
+- Added a Pi-native dry-run TUI: no-name dry-run commands open a searchable template picker in Pi TUI mode, while named templates open a read-only inspector for prompt body, metadata, skills, warnings, and the raw report.
+
 ### Changed
 - Added `/validate-prompts` to validate prompt templates, includes, chain declarations, and skill references before runtime.
 - Updated development-only Pi packages from the deprecated `@mariozechner/*` namespace to `@earendil-works/*` `0.79.7`, and bumped `tsx` to `^4.22.4`.
 - Added Dependabot version updates for npm development dependencies and GitHub Actions.
 - Added Release Please release automation and npm trusted publishing workflow.
+
+### Fixed
+- Kept dry-run output out of LLM/session history by writing plain previews to stdout instead of custom session messages.
+- Aligned dry-run delegation metadata with runtime behavior for default agents, missing delegated `cwd`, loop prefixes, and parallel delegated task preambles.
 
 ## [0.10.0] - 2026-06-18
 

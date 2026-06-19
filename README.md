@@ -28,6 +28,8 @@ No more manually switching models, copying standard instructions between prompts
 - **Thinking control**: set per-command thinking levels.
 - **Prompt includes**: reuse shared Markdown partials with `includes`, `include`, `<includes />`, and inline `<include file="..." />` directives.
 - **Multiple skills**: inject one skill with `skill`, many skills with `skills`, or constrained wildcard groups like `golang-*`.
+- **Dry-run preview**: inspect the exact rendered prompt body, metadata, warnings, and optional skill content before execution.
+- **Pi-native TUI**: browse templates and inspect dry-run output interactively in Pi TUI mode without typing template names.
 - **Execution control**: loops, model rotation, fresh context, boomerang collapse, delegated subagents, chains, and best-of-N compare prompts.
 
 ## Installation
@@ -94,6 +96,39 @@ Invalid libraries fail with explicit diagnostics:
 - include-not-found (project) /repo/.pi/prompts/review.md: Prompt include "shared/rules.md" was not found ...
 - skill-not-found (project) /repo/.pi/prompts/debug.md: Prompt template ... references skill "tmux", but it was not found ...
 ```
+
+## Dry-run and TUI preview
+
+Use `/print-prompt` or `/dry-run-prompt` to preview what a prompt template would send before it executes. The preview uses the same include rendering, model conditionals, argument substitution, skill resolution, loop metadata, delegation metadata, and runtime flags as normal execution, but it does not switch models, send user messages, run deterministic commands, or start subagents.
+
+```text
+/print-prompt review src/server.ts
+/dry-run-prompt review --model=gpt-5.2 src/server.ts
+```
+
+In non-TUI contexts these commands print a Markdown report to stdout. By default, full skill content is hidden; add `--show-skills` when you explicitly want the preview to include loaded skill bodies.
+
+```text
+/print-prompt review --show-skills src/server.ts
+```
+
+In Pi TUI mode, the commands open an interactive picker/inspector by default:
+
+```text
+/dry-run-prompt          # pick a template from a searchable list
+/print-prompt            # same picker, useful when you do not remember the template name
+/dry-run-prompt review   # open the inspector directly for review
+```
+
+TUI behavior:
+
+- no template name opens a searchable template picker;
+- a template name opens the inspector directly;
+- `--plain` forces the stdout/plain report even in TUI mode;
+- unsupported templates, such as deterministic or chain templates, show the same diagnostic as the plain path;
+- full skill content remains hidden unless the dry-run result was created with `--show-skills`.
+
+The inspector is read-only. It has no execute button and does not mutate the session.
 
 ## Frontmatter Reference
 
