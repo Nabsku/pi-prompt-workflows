@@ -99,3 +99,47 @@ test("validate-prompts command reports errors", async () => {
 		assert.match(pi.notifications[0]!.message, /skill-not-found/);
 	});
 });
+
+test("validate-prompts command error notification includes direct missing include graph report", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "review.md"), "---\nmodel: claude-sonnet-4-20250514\ninclude: shared/missing.md\n---\nReview");
+
+		const pi = new FakePi();
+		const ctx = createContext(cwd, pi);
+		promptModelExtension(pi as never);
+
+		await pi.commands.get("validate-prompts")!.handler("", ctx);
+
+		assert.equal(pi.notifications.length, 1);
+		assert.equal(pi.notifications[0]!.type, "error");
+		assert.match(pi.notifications[0]!.message, /Prompt validation failed/);
+		assert.match(pi.notifications[0]!.message, /Include graph:/);
+		assert.match(pi.notifications[0]!.message, /- review \[skipped\] /);
+		assert.match(pi.notifications[0]!.message, /review -> unresolved:shared\/missing\.md \(frontmatter shared\/missing\.md\) \[failed\]/);
+		assert.match(pi.notifications[0]!.message, /include-not-found/);
+	});
+});
+
+test("validate-prompts command success notification includes valid include graph report", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts", "shared"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "shared", "rules.md"), "Shared rules");
+		writeFileSync(join(cwd, ".pi", "prompts", "review.md"), "---\nmodel: claude-sonnet-4-20250514\nincludes: [shared/rules.md]\n---\nReview $@");
+
+		const pi = new FakePi();
+		const ctx = createContext(cwd, pi);
+		promptModelExtension(pi as never);
+
+		await pi.commands.get("validate-prompts")!.handler("", ctx);
+
+		assert.equal(pi.notifications.length, 1);
+		assert.equal(pi.notifications[0]!.type, "info");
+		assert.match(pi.notifications[0]!.message, /Prompt validation passed/);
+		assert.match(pi.notifications[0]!.message, /Include graph:/);
+		assert.match(pi.notifications[0]!.message, /- review \[ok\] /);
+		assert.match(pi.notifications[0]!.message, /review -> .*shared\/rules\.md \(frontmatter shared\/rules\.md\) \[ok\]/);
+	});
+});
