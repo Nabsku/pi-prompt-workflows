@@ -48,6 +48,8 @@ import {
 } from "./deterministic-step.js";
 import { renderDeterministicCompletion, renderDeterministicResult } from "./deterministic-renderer.js";
 import { formatPromptValidationReport, validatePromptTemplates, type RegisteredPromptSkill } from "./prompt-validation.js";
+import { createPromptDryRun, parseDryRunCommand } from "./prompt-dry-run.js";
+import { formatPromptDryRun } from "./prompt-dry-run-renderer.js";
 
 interface LoopState {
 	currentIteration: number;
@@ -97,6 +99,8 @@ const DEFAULT_COMPARE_FINAL_APPLIER_TASK = [
 	"4. Run obvious relevant verification when practical.",
 	"5. Report changed files and verification commands run.",
 ].join("\n");
+
+const PROMPT_TEMPLATE_DRY_RUN_MESSAGE_TYPE = "prompt-template-dry-run";
 
 export default function promptModelExtension(pi: ExtensionAPI) {
 	let prompts = new Map<string, PromptWithModel>();
@@ -1419,6 +1423,45 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 	}
 
+	async function runDryRunCommand(args: string, ctx: ExtensionCommandContext) {
+		storedCommandCtx = ctx;
+		refreshPrompts(ctx.cwd, ctx);
+		const parsed = parseDryRunCommand(args);
+		if (!parsed.promptName) {
+			notify(ctx, "Usage: /print-prompt <template> [args] [--show-skills]", "error");
+			return;
+		}
+
+		const prompt = prompts.get(parsed.promptName) ?? chainPrompts.get(parsed.promptName);
+		if (!prompt) {
+			notify(ctx, `Prompt "${parsed.promptName}" not found`, "error");
+			return;
+		}
+
+		const result = await createPromptDryRun(prompt, {
+			cwd: ctx.cwd,
+			rawArgs: parsed.remainingArgs,
+			currentModel: getCurrentModel(ctx),
+			modelRegistry: ctx.modelRegistry,
+			commands: pi.getCommands() as RuntimeSkillCommand[],
+			showSkills: parsed.showSkills,
+		});
+
+		if (result.status === "error") {
+			for (const warning of result.warnings) notify(ctx, warning, "warning");
+			notify(ctx, result.error, "error");
+			return;
+		}
+
+		for (const warning of result.warnings) notify(ctx, warning, "warning");
+		pi.sendMessage({
+			customType: PROMPT_TEMPLATE_DRY_RUN_MESSAGE_TYPE,
+			content: formatPromptDryRun(result),
+			display: true,
+			details: result,
+		});
+	}
+
 	async function runPromptCommand(name: string, args: string, ctx: ExtensionCommandContext) {
 		storedCommandCtx = ctx;
 		refreshPrompts(ctx.cwd, ctx);
@@ -1727,6 +1770,18 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			const validation = validatePromptTemplates(ctx.cwd, { registeredSkills: collectRegisteredPromptSkills() });
 			notify(ctx, formatPromptValidationReport(validation), validation.ok ? "info" : "error");
+		},
+	});
+	pi.registerCommand("print-prompt", {
+		description: "Print the rendered prompt template without running it",
+		handler: async (args, ctx) => {
+			await runDryRunCommand(args, ctx);
+		},
+	});
+	pi.registerCommand("dry-run-prompt", {
+		description: "Dry-run a prompt template and show what would be sent",
+		handler: async (args, ctx) => {
+			await runDryRunCommand(args, ctx);
 		},
 	});
 	toolManager.registerCommand();

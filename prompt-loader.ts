@@ -9,6 +9,8 @@ import { hasPromptIncludeDirectives, renderPromptIncludes } from "./prompt-inclu
 const VALID_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
 export const RESERVED_COMMAND_NAMES = new Set([
 	"chain-prompts",
+	"print-prompt",
+	"dry-run-prompt",
 	"prompt-tool",
 	"validate-prompts",
 	"settings",
