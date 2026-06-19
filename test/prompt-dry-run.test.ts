@@ -1,0 +1,260 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createPromptDryRun, type PromptDryRunResult } from "../prompt-dry-run.js";
+import { loadPromptsWithModel, type PromptWithModel } from "../prompt-loader.js";
+import type { RuntimeSkillCommand } from "../prompt-skills.js";
+
+const sonnet = { provider: "anthropic", id: "claude-sonnet-4-20250514" };
+const haiku = { provider: "anthropic", id: "claude-haiku-4-5" };
+const gpt = { provider: "openai", id: "gpt-5.2" };
+
+const registry = {
+	find(provider: string, modelId: string) {
+		return [sonnet, haiku, gpt].find((model) => model.provider === provider && model.id === modelId);
+	},
+	getAll() {
+		return [sonnet, haiku, gpt];
+	},
+	getAvailable() {
+		return [sonnet, haiku, gpt];
+	},
+	async getApiKeyAndHeaders() {
+		return { ok: true, apiKey: "token" };
+	},
+	isUsingOAuth() {
+		return false;
+	},
+};
+
+function prompt(overrides: Partial<PromptWithModel> = {}): PromptWithModel {
+	return {
+		name: "demo",
+		description: "",
+		content: "Body $@",
+		models: [sonnet.id],
+		restore: false,
+		source: "project",
+		filePath: "/tmp/demo.md",
+		...overrides,
+	};
+}
+
+function options(root: string, overrides: Partial<Parameters<typeof createPromptDryRun>[1]> = {}): Parameters<typeof createPromptDryRun>[1] {
+	return {
+		cwd: root,
+		modelRegistry: registry as never,
+		commands: [],
+		...overrides,
+	};
+}
+
+async function withTempHome<T>(run: (root: string) => Promise<T> | T): Promise<T> {
+	const root = mkdtempSync(join(tmpdir(), "pi-prompt-dry-run-"));
+	const previousHome = process.env.HOME;
+	process.env.HOME = root;
+	try {
+		return await run(root);
+	} finally {
+		process.env.HOME = previousHome;
+		rmSync(root, { recursive: true, force: true });
+	}
+}
+
+function assertOk(result: PromptDryRunResult) {
+	assert.equal(result.status, "ok", result.status === "error" ? result.error : undefined);
+	return result.status === "ok" ? result : assert.fail("expected ok dry-run");
+}
+
+function assertError(result: PromptDryRunResult) {
+	assert.equal(result.status, "error");
+	return result.status === "error" ? result : assert.fail("expected error dry-run");
+}
+
+function writeProjectSkill(cwd: string, name: string, content: string): string {
+	const skillDir = join(cwd, ".pi", "skills", name);
+	mkdirSync(skillDir, { recursive: true });
+	const skillPath = join(skillDir, "SKILL.md");
+	writeFileSync(skillPath, content);
+	return skillPath;
+}
+
+function skillCommand(name: string, skillPath: string): RuntimeSkillCommand {
+	return { name, source: "skill", sourceInfo: { path: skillPath } };
+}
+
+test("renders includes + $@ args through existing loader/preparation path", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompt-partials"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-partials", "args.md"), "Args: $@");
+		writeFileSync(join(cwd, ".pi", "prompts", "args-demo.md"), "---\nmodel: claude-sonnet-4-20250514\ninclude: args.md\n---\nTail");
+		const loaded = loadPromptsWithModel(cwd);
+		const result = assertOk(await createPromptDryRun(loaded.prompts.get("args-demo")!, options(cwd, { rawArgs: "one two" })));
+		assert.equal(result.content, "Args: one two\n\nTail");
+		assert.deepEqual(result.args, ["one", "two"]);
+	});
+});
+
+test("renders <if-model> against resolved model", async () => {
+	const result = assertOk(await createPromptDryRun(prompt({ content: '<if-model is="anthropic/*">anthropic<else>other</if-model>' }), options("/tmp")));
+	assert.equal(result.content, "anthropic");
+	assert.equal(result.model.id, sonnet.id);
+});
+
+test("honors runtime --model override for model selection and conditionals", async () => {
+	const result = assertOk(await createPromptDryRun(prompt({ content: '<if-model is="openai/*">openai<else>other</if-model>' }), options("/tmp", { rawArgs: "--model=gpt-5.2" })));
+	assert.equal(result.content, "openai");
+	assert.equal(result.model.id, gpt.id);
+	assert.equal(result.runtime.model, "gpt-5.2");
+});
+
+test("inherits current model when prompt has no model", async () => {
+	const result = assertOk(await createPromptDryRun(prompt({ models: [], content: '<if-model is="anthropic/*">ok</if-model>' }), options("/tmp", { currentModel: sonnet as never })));
+	assert.equal(result.content, "ok");
+	assert.equal(result.model.id, sonnet.id);
+});
+
+test("returns error when no model exists and no current model exists", async () => {
+	const result = assertError(await createPromptDryRun(prompt({ models: [], content: "body" }), options("/tmp")));
+	assert.match(result.error, /has no `model` configured and there is no active session model/i);
+});
+
+test("returns warning but prints content for malformed conditional warning", async () => {
+	const result = assertOk(await createPromptDryRun(prompt({ content: 'before <if-model>broken</if-model> after' }), options("/tmp")));
+	assert.equal(result.content, 'before <if-model>broken</if-model> after');
+	assert.match(result.warnings.join("\n"), /requires an `is` attribute/);
+});
+
+test("returns error for empty rendered prompt", async () => {
+	const result = assertError(await createPromptDryRun(prompt({ content: '<if-model is="openai/gpt-5.2">hidden</if-model>' }), options("/tmp")));
+	assert.equal(result.error, "Prompt `demo` rendered to an empty message.");
+});
+
+test("resolves skills but defaults to metadata-only skill entries", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		const skillPath = writeProjectSkill(cwd, "tmux", "tmux content");
+		const result = assertOk(await createPromptDryRun(prompt({ skill: "tmux" }), options(cwd)));
+		assert.deepEqual(result.skills, [{ skillName: "tmux", skillPath }]);
+	});
+});
+
+test("includes skill content only when showSkills: true", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		const skillPath = writeProjectSkill(cwd, "tmux", "tmux content");
+		const hidden = assertOk(await createPromptDryRun(prompt({ skill: "tmux" }), options(cwd)));
+		assert.deepEqual(hidden.skills, [{ skillName: "tmux", skillPath }]);
+		const shown = assertOk(await createPromptDryRun(prompt({ skill: "tmux" }), options(cwd, { showSkills: true })));
+		assert.deepEqual(shown.skills, [{ skillName: "tmux", skillPath, skillContent: "tmux content" }]);
+	});
+});
+
+test("returns runtime-compatible error for skill-bearing delegated prompt", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		writeProjectSkill(cwd, "tmux", "tmux content");
+		const result = assertError(await createPromptDryRun(prompt({ skill: "tmux", subagent: true }), options(cwd)));
+		assert.equal(result.error, "Prompts with skill or skills frontmatter cannot run as subagents in v1.");
+	});
+});
+
+test("returns unsupported error for chain prompts", async () => {
+	const result = assertError(await createPromptDryRun(prompt({ chain: "one -> two" }), options("/tmp")));
+	assert.equal(result.error, "Dry-run for chain templates is not supported in v1. Use /validate-prompts for structural checks.");
+});
+
+test("returns unsupported error for compare prompts", async () => {
+	const result = assertError(await createPromptDryRun(prompt({ workers: [{ agent: "worker" }] }), options("/tmp")));
+	assert.equal(result.error, "Dry-run for compare prompts is not supported in v1.");
+});
+
+test("returns unsupported error for deterministic prompts", async () => {
+	const result = assertError(await createPromptDryRun(prompt({ deterministic: { execution: { kind: "run", command: "date" }, handoff: "always", nonInteractive: true } }), options("/tmp")));
+	assert.equal(result.error, "Dry-run for deterministic prompts is not supported in v1 because it would require running configured commands/scripts.");
+});
+
+test("records loop/restore/thinking/boomerang metadata without executing anything", async () => {
+	const result = assertOk(await createPromptDryRun(prompt({ restore: true, thinking: "high", loop: 2, fresh: true, converge: false, boomerang: true }), options("/tmp", { rawArgs: "--fresh --no-converge" })));
+	assert.deepEqual(result.runtime.loop, { count: 2, fresh: true, converge: false });
+	assert.equal(result.runtime.restore, true);
+	assert.equal(result.runtime.thinking, "high");
+	assert.equal(result.runtime.boomerang, true);
+});
+
+test("records delegation metadata for --subagent, --subagent=reviewer, and --fork", async () => {
+	const base = prompt();
+	assert.deepEqual(assertOk(await createPromptDryRun(base, options("/tmp", { rawArgs: "--subagent task" }))).runtime.delegation, { enabled: true });
+	assert.deepEqual(assertOk(await createPromptDryRun(base, options("/tmp", { rawArgs: "--subagent=reviewer task" }))).runtime.delegation, { enabled: true, agent: "reviewer" });
+	const forked = assertOk(await createPromptDryRun(base, options("/tmp", { rawArgs: "--fork task" })));
+	assert.deepEqual(forked.runtime.delegation, { enabled: true, fork: true, inheritContext: true });
+});
+
+test("validates/records --cwd without changing process cwd", async () => {
+	await withTempHome(async (root) => {
+		const startCwd = process.cwd();
+		const runtimeCwd = join(root, "runtime-file");
+		writeFileSync(runtimeCwd, "file path accepted like runtime");
+		const result = assertOk(await createPromptDryRun(prompt(), options(root, { rawArgs: `--cwd=${runtimeCwd} arg` })));
+		assert.equal(result.runtime.cwd, runtimeCwd);
+		assert.equal(process.cwd(), startCwd);
+		const invalid = assertError(await createPromptDryRun(prompt(), options(root, { rawArgs: "--cwd=relative arg" })));
+		assert.equal(invalid.error, "Invalid --cwd path: must be absolute");
+		assert.equal(process.cwd(), startCwd);
+	});
+});
+
+test("quoted runtime-looking flags stay prompt args", async () => {
+	const result = assertOk(await createPromptDryRun(prompt({ content: "Args: $@" }), options("/tmp", { rawArgs: '"--model=gpt-5.2" "--cwd=/tmp" "--loop" keep' })));
+	assert.equal(result.content, "Args: --model=gpt-5.2 --cwd=/tmp --loop keep");
+	assert.deepEqual(result.args, ["--model=gpt-5.2", "--cwd=/tmp", "--loop", "keep"]);
+	assert.equal(result.runtime.model, undefined);
+	assert.equal(result.runtime.cwd, undefined);
+	assert.equal(result.runtime.loop, undefined);
+});
+
+test("loop flags are stripped from rendered args and shown as metadata", async () => {
+	const result = assertOk(await createPromptDryRun(prompt({ content: "Args: $@" }), options("/tmp", { rawArgs: "--loop 3 keep --fresh --no-converge" })));
+	assert.equal(result.content, "Args: keep");
+	assert.deepEqual(result.args, ["keep"]);
+	assert.deepEqual(result.runtime.loop, { count: 3, fresh: true, converge: false });
+});
+
+test("--cwd is displayed as runtime metadata but skills still resolve from ctx.cwd, matching runtime", async () => {
+	await withTempHome(async (root) => {
+		const ctxCwd = join(root, "ctx");
+		const runtimeCwd = join(root, "runtime");
+		const ctxSkill = writeProjectSkill(ctxCwd, "shared", "ctx skill");
+		writeProjectSkill(runtimeCwd, "shared", "runtime skill");
+		const result = assertOk(await createPromptDryRun(prompt({ skill: "shared" }), options(ctxCwd, { rawArgs: `--cwd=${runtimeCwd}`, showSkills: true })));
+		assert.equal(result.runtime.cwd, runtimeCwd);
+		assert.deepEqual(result.skills, [{ skillName: "shared", skillPath: ctxSkill, skillContent: "ctx skill" }]);
+	});
+});
+
+test("default details omit skillContent; --show-skills includes it", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		const registeredPath = join(root, "registered.md");
+		writeFileSync(registeredPath, "registered content");
+		const commands = [skillCommand("skill:external", registeredPath)];
+		const hidden = assertOk(await createPromptDryRun(prompt({ skills: ["external"] }), options(cwd, { commands })));
+		assert.equal("skillContent" in hidden.details.skills[0]!, false);
+		const shown = assertOk(await createPromptDryRun(prompt({ skills: ["external"] }), options(cwd, { commands, showSkills: true })));
+		assert.equal(shown.details.skills[0]?.skillContent, "registered content");
+	});
+});
+
+test("running dry-run for a skill prompt exposes no side-effect hooks or pending messages", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		writeProjectSkill(cwd, "tmux", "tmux content");
+		const result = assertOk(await createPromptDryRun(prompt({ skill: "tmux" }), options(cwd)));
+		assert.equal("pendingSkillMessage" in result, false);
+		assert.equal("hooks" in result, false);
+	});
+});
