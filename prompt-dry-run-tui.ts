@@ -1,4 +1,4 @@
-import { truncateToWidth, type Component } from "@earendil-works/pi-tui";
+import { decodeKittyPrintable, Key, matchesKey, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import type { PromptDryRunResult } from "./prompt-dry-run.js";
 
 export interface PromptTemplateCatalogItem {
@@ -154,25 +154,28 @@ export class PromptDryRunPicker implements Component {
 
 	handleInput(data: string): void {
 		const items = this.filteredCatalog();
-		if (data === "q" || data === "\u001b" || data === "\u0003") {
+		if (matchesKey(data, "q") || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
 			this.done?.({ action: "closed" });
 			return;
 		}
-		if (data === "\r" || data === "\n") {
+		if (matchesKey(data, Key.enter) || data === "\n") {
 			const item = items[this.selectedIndex];
 			if (item) this.done?.({ action: "selected", templateName: item.name });
 			return;
 		}
-		if (data === "\u007f" || data === "\b") {
+		if (matchesKey(data, Key.backspace)) {
 			this.search = this.search.slice(0, -1);
 			this.selectedIndex = 0;
 			return;
 		}
-		if (data === "j" || data === "\u001b[B") this.selectedIndex = Math.min(items.length - 1, this.selectedIndex + 1);
-		else if (data === "k" || data === "\u001b[A") this.selectedIndex = Math.max(0, this.selectedIndex - 1);
-		else if (data.length === 1 && data >= " " && data !== "\u007f") {
-			this.search += data;
-			this.selectedIndex = 0;
+		if (matchesKey(data, "j") || matchesKey(data, Key.down)) this.selectedIndex = Math.min(items.length - 1, this.selectedIndex + 1);
+		else if (matchesKey(data, "k") || matchesKey(data, Key.up)) this.selectedIndex = Math.max(0, this.selectedIndex - 1);
+		else {
+			const printable = decodeKittyPrintable(data) ?? (data.length === 1 && data >= " " && data !== "\u007f" ? data : undefined);
+			if (printable !== undefined) {
+				this.search += printable;
+				this.selectedIndex = 0;
+			}
 		}
 	}
 
