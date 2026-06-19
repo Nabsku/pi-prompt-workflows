@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { extractPromptInlineIncludes, hasPromptIncludesPlaceholder, renderPromptIncludes } from "../prompt-includes.js";
+import { collectPromptIncludeGraphs, extractPromptInlineIncludes, hasPromptIncludesPlaceholder, renderPromptIncludes } from "../prompt-includes.js";
 import type { RenderPromptIncludesResult } from "../prompt-includes.js";
+import type { PromptSourceRecord } from "../prompt-loader.js";
 
 interface IncludeFixture {
 	home: string;
@@ -66,6 +67,27 @@ function assertFail(result: RenderPromptIncludesResult): asserts result is Extra
 	if (result.ok) {
 		assert.fail(`expected render to fail, content:\n${result.content}`);
 	}
+}
+
+function sourceRecord(fixture: IncludeFixture, overrides: Partial<PromptSourceRecord> = {}): PromptSourceRecord {
+	return {
+		promptName: "prompt",
+		filePath: fixture.promptFilePath,
+		promptRoot: fixture.promptRoot,
+		cwd: fixture.cwd,
+		source: "project",
+		rawBody: "body",
+		hasInlineIncludes: false,
+		hasIncludesPlaceholder: false,
+		isChainWrapper: false,
+		...overrides,
+	};
+}
+
+function collectSingleGraph(fixture: IncludeFixture, record: PromptSourceRecord) {
+	const result = collectPromptIncludeGraphs({ records: [record], homeDir: fixture.home });
+	assert.equal(result.graphs.length, 1);
+	return result.graphs[0];
 }
 
 test("frontmatter includes prepend in deterministic order when no placeholder exists", () => {
@@ -506,5 +528,156 @@ test("debug mode emits include boundary comments", () => {
 		assert.match(result.content, /<!-- BEGIN include: debug\.md -->/);
 		assert.match(result.content, /debug body/);
 		assert.match(result.content, /<!-- END include: debug\.md -->/);
+	});
+});
+
+test("include graph records frontmatter includes in declaration order", () => {
+	withFixture((fixture) => {
+		writeFileSync(join(fixture.projectPartials, "one.md"), "one");
+		writeFileSync(join(fixture.projectPartials, "two.md"), "two");
+
+		const graph = collectSingleGraph(fixture, sourceRecord(fixture, { includes: ["two.md", "one.md"] }));
+
+		assert.deepEqual(graph.edges.map((edge) => [edge.kind, edge.includePath, edge.status]), [
+			["frontmatter", "two.md", "ok"],
+			["frontmatter", "one.md", "ok"],
+		]);
+		assert.deepEqual(graph.edges.map((edge) => edge.order), [0, 1]);
+	});
+});
+
+test("include graph records inline includes in body order", () => {
+	withFixture((fixture) => {
+		writeFileSync(join(fixture.projectPartials, "one.md"), "one");
+		writeFileSync(join(fixture.projectPartials, "two.md"), "two");
+
+		const graph = collectSingleGraph(
+			fixture,
+			sourceRecord(fixture, { rawBody: 'a <include file="one.md" /> b <include file="two.md" />', hasInlineIncludes: true }),
+		);
+
+		assert.deepEqual(graph.edges.map((edge) => [edge.kind, edge.includePath, edge.status]), [
+			["inline", "one.md", "ok"],
+			["inline", "two.md", "ok"],
+		]);
+	});
+});
+
+test("include graph records nested partial includes relative to current partial", () => {
+	withFixture((fixture) => {
+		const sharedPartials = join(fixture.projectPartials, "shared");
+		mkdirSync(sharedPartials, { recursive: true });
+		const outerPath = join(sharedPartials, "outer.md");
+		const innerPath = join(sharedPartials, "inner.md");
+		writeFileSync(outerPath, 'outer <include file="inner.md" />');
+		writeFileSync(innerPath, "inner");
+
+		const graph = collectSingleGraph(fixture, sourceRecord(fixture, { includes: ["shared/outer.md"] }));
+		const nestedEdge = graph.edges.find((edge) => edge.includePath === "inner.md");
+
+		assert.ok(nestedEdge);
+		assert.equal(nestedEdge.fromNodeId, `file:${realpathSync(outerPath)}`);
+		assert.equal(nestedEdge.toNodeId, `file:${realpathSync(innerPath)}`);
+	});
+});
+
+test("include graph records repeated edges without duplicate traversal", () => {
+	withFixture((fixture) => {
+		writeFileSync(join(fixture.projectPartials, "repeat.md"), 'repeat <include file="inner.md" />');
+		writeFileSync(join(fixture.projectPartials, "inner.md"), "inner");
+
+		const graph = collectSingleGraph(fixture, sourceRecord(fixture, { includes: ["repeat.md", "repeat.md"] }));
+
+		assert.equal(graph.edges.filter((edge) => edge.includePath === "repeat.md").length, 2);
+		assert.equal(graph.edges.filter((edge) => edge.includePath === "inner.md").length, 1);
+	});
+});
+
+test("include graph represents missing include as failed edge and node", () => {
+	withFixture((fixture) => {
+		const graph = collectSingleGraph(fixture, sourceRecord(fixture, { includes: ["missing.md"] }));
+
+		assert.equal(graph.edges.length, 1);
+		assert.equal(graph.edges[0].status, "failed");
+		assert.equal(graph.edges[0].diagnostics.some((diagnostic) => diagnostic.code === "include-not-found"), true);
+		assert.equal(graph.nodes.some((node) => node.kind === "unresolved" && node.status === "failed"), true);
+	});
+});
+
+test("include graph represents cycle as failed edge", () => {
+	withFixture((fixture) => {
+		writeFileSync(join(fixture.projectPartials, "a.md"), 'a <include file="b.md" />');
+		writeFileSync(join(fixture.projectPartials, "b.md"), 'b <include file="a.md" />');
+
+		const graph = collectSingleGraph(fixture, sourceRecord(fixture, { includes: ["a.md"] }));
+		const cycleEdge = graph.edges.find((edge) => edge.includePath === "a.md" && edge.status === "failed");
+
+		assert.ok(cycleEdge);
+		assert.equal(cycleEdge.diagnostics.some((diagnostic) => diagnostic.code === "include-cycle"), true);
+	});
+});
+
+test("include graph represents path escape as failed edge when resolver reports it", () => {
+	withFixture((fixture) => {
+		writeFileSync(join(fixture.promptRoot, "outside-prompt-dir.md"), "outside");
+
+		const graph = collectSingleGraph(fixture, sourceRecord(fixture, { includes: ["../outside-prompt-dir.md"] }));
+
+		assert.equal(graph.edges.length, 1);
+		assert.equal(graph.edges[0].status, "failed");
+		assert.equal(graph.edges[0].diagnostics.some((diagnostic) => diagnostic.code === "include-path-escaped"), true);
+	});
+});
+
+test("include graph records <includes /> without frontmatter includes as failed root diagnostic", () => {
+	withFixture((fixture) => {
+		const graph = collectSingleGraph(
+			fixture,
+			sourceRecord(fixture, { rawBody: "before <includes /> after", hasIncludesPlaceholder: true, includes: undefined }),
+		);
+		const rootNode = graph.nodes.find((node) => node.kind === "prompt");
+
+		assert.equal(graph.diagnostics.some((diagnostic) => diagnostic.code === "include-placeholder-without-includes"), true);
+		assert.ok(rootNode);
+		assert.equal(rootNode.status, "failed");
+		assert.equal(rootNode.diagnostics.some((diagnostic) => diagnostic.code === "include-placeholder-without-includes"), true);
+	});
+});
+
+test("include graph records invalid chain include metadata as failed root diagnostic without body edges", () => {
+	withFixture((fixture) => {
+		writeFileSync(join(fixture.projectPartials, "ignored.md"), "ignored");
+
+		const graph = collectSingleGraph(
+			fixture,
+			sourceRecord(fixture, {
+				rawBody: '<include file="ignored.md" />',
+				isChainWrapper: true,
+				includeMetadataInvalid: true,
+				skippedReason: "invalid-includes-chain",
+			}),
+		);
+		const rootNode = graph.nodes.find((node) => node.kind === "prompt");
+
+		assert.deepEqual(graph.edges, []);
+		assert.equal(graph.diagnostics.some((diagnostic) => diagnostic.code === "invalid-includes-chain"), true);
+		assert.match(graph.diagnostics.map((diagnostic) => diagnostic.message).join("\n"), /include\/includes cannot be used on chain wrapper templates/);
+		assert.ok(rootNode);
+		assert.equal(rootNode.status, "failed");
+		assert.equal(rootNode.diagnostics.some((diagnostic) => diagnostic.code === "invalid-includes-chain"), true);
+	});
+});
+
+test("include graph ignores chain wrapper body include directives", () => {
+	withFixture((fixture) => {
+		writeFileSync(join(fixture.projectPartials, "ignored.md"), "ignored");
+
+		const graph = collectSingleGraph(
+			fixture,
+			sourceRecord(fixture, { rawBody: '<include file="ignored.md" />', hasInlineIncludes: false, isChainWrapper: true }),
+		);
+
+		assert.deepEqual(graph.edges, []);
+		assert.equal(graph.nodes.length, 1);
 	});
 });

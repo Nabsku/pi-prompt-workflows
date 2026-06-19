@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
-import type { PromptLoaderDiagnostic, PromptSource } from "./prompt-loader.js";
+import type { PromptLoaderDiagnostic, PromptSource, PromptSourceRecord } from "./prompt-loader.js";
 
 export interface RenderPromptIncludesInput {
 	content: string;
@@ -30,6 +30,46 @@ export interface ResolvePromptIncludePathInput {
 export type ResolvePromptIncludePathResult =
 	| { ok: true; filePath: string }
 	| { ok: false; diagnostics: PromptLoaderDiagnostic[] };
+
+export interface CollectPromptIncludeGraphsInput {
+	records: PromptSourceRecord[];
+	homeDir?: string;
+}
+
+export interface CollectPromptIncludeGraphsResult {
+	graphs: PromptIncludeGraph[];
+}
+
+export interface PromptIncludeGraph {
+	root: PromptSourceRecord;
+	nodes: PromptIncludeGraphNode[];
+	edges: PromptIncludeGraphEdge[];
+	diagnostics: PromptLoaderDiagnostic[];
+}
+
+export type PromptIncludeGraphNodeKind = "prompt" | "partial" | "unresolved";
+export type PromptIncludeGraphNodeStatus = "ok" | "failed";
+
+export interface PromptIncludeGraphNode {
+	id: string;
+	kind: PromptIncludeGraphNodeKind;
+	status: PromptIncludeGraphNodeStatus;
+	filePath?: string;
+	includePath?: string;
+	diagnostics: PromptLoaderDiagnostic[];
+}
+
+export type PromptIncludeGraphEdgeKind = "frontmatter" | "inline";
+
+export interface PromptIncludeGraphEdge {
+	fromNodeId: string;
+	toNodeId: string;
+	kind: PromptIncludeGraphEdgeKind;
+	includePath: string;
+	order: number;
+	status: PromptIncludeGraphNodeStatus;
+	diagnostics: PromptLoaderDiagnostic[];
+}
 
 interface IncludeRoot {
 	label: string;
@@ -117,6 +157,92 @@ export function resolvePromptIncludePath(input: ResolvePromptIncludePathInput): 
 	const resolved = resolveIncludePath(input.includePath, context, context.promptFilePath);
 	if (!resolved) return { ok: false, diagnostics };
 	return { ok: true, filePath: resolved.filePath };
+}
+
+export function collectPromptIncludeGraphs(input: CollectPromptIncludeGraphsInput): CollectPromptIncludeGraphsResult {
+	return {
+		graphs: input.records.map((record) => collectPromptIncludeGraph(record, input.homeDir)),
+	};
+}
+
+function collectPromptIncludeGraph(record: PromptSourceRecord, homeDir?: string): PromptIncludeGraph {
+	const diagnostics: PromptLoaderDiagnostic[] = [];
+	const context = createIncludeRenderContext({
+		content: record.rawBody,
+		includes: record.includes,
+		promptFilePath: record.filePath,
+		promptRoot: record.promptRoot,
+		cwd: record.cwd,
+		source: record.source,
+		homeDir,
+		diagnostics,
+	});
+	const nodes = new Map<string, PromptIncludeGraphNode>();
+	const edges: PromptIncludeGraphEdge[] = [];
+	const traversedPartials = new Set<string>();
+	let nextUnresolvedNodeId = 0;
+	let nextOrder = 0;
+
+	const rootNodeId = nodeIdForFile(context.promptFilePath);
+	pushNode(nodes, {
+		id: rootNodeId,
+		kind: "prompt",
+		status: "ok",
+		filePath: context.promptFilePath,
+		diagnostics: [],
+	});
+
+	if (record.includeMetadataInvalid === true && record.skippedReason) {
+		addRootDiagnostic(context, nodes, rootNodeId, createIncludeMetadataInvalidGraphDiagnostic(context, record));
+	} else if (!record.isChainWrapper && record.hasIncludesPlaceholder && record.includes === undefined) {
+		addRootDiagnostic(
+			context,
+			nodes,
+			rootNodeId,
+			createDiagnostic(
+				context,
+				context.promptFilePath,
+				"include-placeholder-without-includes",
+				'Prompt body uses <includes /> but frontmatter does not declare "include" or "includes"; add include/includes metadata or remove the placeholder.',
+			),
+		);
+	}
+
+	if (!record.isChainWrapper && record.includeMetadataInvalid !== true) {
+		for (const includePath of record.includes ?? []) {
+			collectIncludeEdge({
+				includePath,
+				kind: "frontmatter",
+				fromNodeId: rootNodeId,
+				currentFilePath: context.promptFilePath,
+				context,
+				nodes,
+				edges,
+				traversedPartials,
+				stack: canonicalPromptStackEntry(context.promptFilePath) ? [canonicalPromptStackEntry(context.promptFilePath)!] : [],
+				nextOrder: () => nextOrder++,
+				nextUnresolvedNodeId: () => nextUnresolvedNodeId++,
+			});
+		}
+
+		for (const includePath of extractPromptInlineIncludes(record.rawBody)) {
+			collectIncludeEdge({
+				includePath,
+				kind: "inline",
+				fromNodeId: rootNodeId,
+				currentFilePath: context.promptFilePath,
+				context,
+				nodes,
+				edges,
+				traversedPartials,
+				stack: canonicalPromptStackEntry(context.promptFilePath) ? [canonicalPromptStackEntry(context.promptFilePath)!] : [],
+				nextOrder: () => nextOrder++,
+				nextUnresolvedNodeId: () => nextUnresolvedNodeId++,
+			});
+		}
+	}
+
+	return { root: record, nodes: [...nodes.values()], edges, diagnostics };
 }
 
 function createIncludeRenderContext(input: RenderPromptIncludesInput & { diagnostics?: PromptLoaderDiagnostic[] }): IncludeRenderContext {
@@ -257,6 +383,203 @@ function renderIncludeFile(includePath: string, context: IncludeRenderContext, s
 	if (!context.debugBoundaries) return renderedBody;
 
 	return [`<!-- BEGIN include: ${includePath.trim()} -->`, renderedBody, `<!-- END include: ${includePath.trim()} -->`].join("\n");
+}
+
+interface CollectIncludeEdgeInput {
+	includePath: string;
+	kind: PromptIncludeGraphEdgeKind;
+	fromNodeId: string;
+	currentFilePath: string;
+	context: IncludeRenderContext;
+	nodes: Map<string, PromptIncludeGraphNode>;
+	edges: PromptIncludeGraphEdge[];
+	traversedPartials: Set<string>;
+	stack: string[];
+	nextOrder: () => number;
+	nextUnresolvedNodeId: () => number;
+}
+
+function collectIncludeEdge(input: CollectIncludeEdgeInput): void {
+	const diagnosticStart = input.context.diagnostics.length;
+	const edgeOrder = input.nextOrder();
+	const resolved = resolveIncludePath(input.includePath, input.context, input.currentFilePath);
+	const resolveDiagnostics = input.context.diagnostics.slice(diagnosticStart);
+	if (!resolved) {
+		const toNodeId = `unresolved:${input.nextUnresolvedNodeId()}`;
+		const diagnostics = [...resolveDiagnostics];
+		pushNode(input.nodes, {
+			id: toNodeId,
+			kind: "unresolved",
+			status: "failed",
+			includePath: input.includePath,
+			diagnostics,
+		});
+		input.edges.push({
+			fromNodeId: input.fromNodeId,
+			toNodeId,
+			kind: input.kind,
+			includePath: input.includePath,
+			order: edgeOrder,
+			status: "failed",
+			diagnostics,
+		});
+		return;
+	}
+
+	const toNodeId = nodeIdForFile(resolved.filePath);
+	const existingNode = input.nodes.get(toNodeId);
+	pushNode(input.nodes, {
+		id: toNodeId,
+		kind: "partial",
+		status: "ok",
+		filePath: resolved.filePath,
+		diagnostics: [],
+	});
+
+	if (input.stack.includes(resolved.filePath)) {
+		const diagnostic = createDiagnostic(
+			input.context,
+			input.currentFilePath,
+			"include-cycle",
+			`Cyclic prompt include detected for ${JSON.stringify(input.includePath)}: ${[...input.stack, resolved.filePath].join(" -> ")}.`,
+		);
+		input.context.diagnostics.push(diagnostic);
+		const diagnostics = [diagnostic];
+		input.nodes.set(toNodeId, {
+			...(existingNode ?? input.nodes.get(toNodeId)!),
+			status: "failed",
+			diagnostics: [...(existingNode?.diagnostics ?? []), diagnostic],
+		});
+		input.edges.push({
+			fromNodeId: input.fromNodeId,
+			toNodeId,
+			kind: input.kind,
+			includePath: input.includePath,
+			order: edgeOrder,
+			status: "failed",
+			diagnostics,
+		});
+		return;
+	}
+
+	if (input.stack.length > MAX_INCLUDE_DEPTH) {
+		const diagnostic = createDiagnostic(
+			input.context,
+			input.currentFilePath,
+			"include-depth-exceeded",
+			`Prompt include ${JSON.stringify(input.includePath)} exceeds the maximum nested include depth of ${MAX_INCLUDE_DEPTH}.`,
+		);
+		input.context.diagnostics.push(diagnostic);
+		input.nodes.set(toNodeId, {
+			...(existingNode ?? input.nodes.get(toNodeId)!),
+			status: "failed",
+			diagnostics: [...(existingNode?.diagnostics ?? []), diagnostic],
+		});
+		input.edges.push({
+			fromNodeId: input.fromNodeId,
+			toNodeId,
+			kind: input.kind,
+			includePath: input.includePath,
+			order: edgeOrder,
+			status: "failed",
+			diagnostics: [diagnostic],
+		});
+		return;
+	}
+
+	if (input.traversedPartials.has(resolved.filePath)) {
+		input.edges.push({
+			fromNodeId: input.fromNodeId,
+			toNodeId,
+			kind: input.kind,
+			includePath: input.includePath,
+			order: edgeOrder,
+			status: "ok",
+			diagnostics: [],
+		});
+		return;
+	}
+	input.traversedPartials.add(resolved.filePath);
+
+	let rawContent: string;
+	try {
+		rawContent = readFileSync(resolved.filePath, "utf8");
+	} catch (error) {
+		const diagnostic = createDiagnostic(
+			input.context,
+			input.currentFilePath,
+			"include-read-error",
+			`Unable to read prompt include ${JSON.stringify(input.includePath)} at ${resolved.filePath}: ${error instanceof Error ? error.message : String(error)}.`,
+		);
+		input.context.diagnostics.push(diagnostic);
+		input.nodes.set(toNodeId, {
+			...(input.nodes.get(toNodeId)!),
+			status: "failed",
+			diagnostics: [...(input.nodes.get(toNodeId)?.diagnostics ?? []), diagnostic],
+		});
+		input.edges.push({
+			fromNodeId: input.fromNodeId,
+			toNodeId,
+			kind: input.kind,
+			includePath: input.includePath,
+			order: edgeOrder,
+			status: "failed",
+			diagnostics: [diagnostic],
+		});
+		return;
+	}
+
+	input.edges.push({
+		fromNodeId: input.fromNodeId,
+		toNodeId,
+		kind: input.kind,
+		includePath: input.includePath,
+		order: edgeOrder,
+		status: "ok",
+		diagnostics: [],
+	});
+
+	const body = stripMarkdownFrontmatter(rawContent);
+	const nextStack = [...input.stack, resolved.filePath];
+	for (const nestedIncludePath of extractPromptInlineIncludes(body)) {
+		collectIncludeEdge({
+			...input,
+			includePath: nestedIncludePath,
+			kind: "inline",
+			fromNodeId: toNodeId,
+			currentFilePath: resolved.filePath,
+			stack: nextStack,
+		});
+	}
+}
+
+function nodeIdForFile(filePath: string): string {
+	return `file:${filePath}`;
+}
+
+function pushNode(nodes: Map<string, PromptIncludeGraphNode>, node: PromptIncludeGraphNode): void {
+	if (!nodes.has(node.id)) nodes.set(node.id, node);
+}
+
+function addRootDiagnostic(context: IncludeRenderContext, nodes: Map<string, PromptIncludeGraphNode>, rootNodeId: string, diagnostic: PromptLoaderDiagnostic): void {
+	context.diagnostics.push(diagnostic);
+	const rootNode = nodes.get(rootNodeId);
+	if (rootNode) {
+		nodes.set(rootNodeId, {
+			...rootNode,
+			status: "failed",
+			diagnostics: [...rootNode.diagnostics, diagnostic],
+		});
+	}
+}
+
+function createIncludeMetadataInvalidGraphDiagnostic(context: IncludeRenderContext, record: PromptSourceRecord): PromptLoaderDiagnostic {
+	const code = record.skippedReason ?? "invalid-include-metadata";
+	const message =
+		code === "invalid-includes-chain"
+			? `Include graph skipped for ${record.filePath}: frontmatter include/includes cannot be used on chain wrapper templates; put include/includes on referenced step templates instead.`
+			: `Include graph skipped for ${record.filePath}: invalid include metadata (${code}).`;
+	return createDiagnostic(context, record.filePath, code, message, record.filePath);
 }
 
 function resolveIncludePath(includePath: string, context: IncludeRenderContext, currentFilePath: string): ResolvedPromptIncludePath | undefined {
