@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { renderPromptIncludes } from "../prompt-includes.js";
+import { extractPromptInlineIncludes, hasPromptIncludesPlaceholder, renderPromptIncludes } from "../prompt-includes.js";
 import type { RenderPromptIncludesResult } from "../prompt-includes.js";
 
 interface IncludeFixture {
@@ -123,6 +123,19 @@ test("inline <include file=... /> controls exact placement for one-off includes"
 		assertOk(result);
 		assert.equal(result.content, "alpha inserted omega");
 	});
+});
+
+test("extractPromptInlineIncludes returns inline include paths in source order", () => {
+	assert.deepEqual(extractPromptInlineIncludes('a <include file="one.md" /> b <include file="two.md" />'), ["one.md", "two.md"]);
+});
+
+test("extractPromptInlineIncludes ignores non-include lookalikes", () => {
+	assert.deepEqual(extractPromptInlineIncludes('<include-file file="no.md" /> <include file="yes.md" />'), ["yes.md"]);
+});
+
+test("hasPromptIncludesPlaceholder detects includes placeholder", () => {
+	assert.equal(hasPromptIncludesPlaceholder("before <includes /> after"), true);
+	assert.equal(hasPromptIncludesPlaceholder('before <include file="x.md" /> after'), false);
 });
 
 test("nested inline includes work", () => {

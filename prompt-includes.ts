@@ -58,10 +58,22 @@ const HAS_INLINE_INCLUDE_PATTERN = /<include\s+file\s*=\s*(["'])([^"']+)\1\s*\/\
 const INLINE_INCLUDE_PATTERN = /<include\s+file\s*=\s*(["'])([^"']+)\1\s*\/\s*>/g;
 const URL_SCHEME_PATTERN = /^[A-Za-z][A-Za-z0-9+.-]*:/;
 const GLOB_META_PATTERN = /[*?\[\]]/;
-const MAX_INCLUDE_DEPTH = 64;
+export const MAX_INCLUDE_DEPTH = 64;
 
 export function hasPromptIncludeDirectives(content: string): boolean {
 	return HAS_INCLUDES_PLACEHOLDER_PATTERN.test(content) || HAS_INLINE_INCLUDE_PATTERN.test(content);
+}
+
+export function extractPromptInlineIncludes(content: string): string[] {
+	return Array.from(content.matchAll(INLINE_INCLUDE_PATTERN), (match) => match[2]);
+}
+
+export function hasPromptIncludesPlaceholder(content: string): boolean {
+	return HAS_INCLUDES_PLACEHOLDER_PATTERN.test(content);
+}
+
+export function stripPromptPartialFrontmatter(content: string): string {
+	return stripMarkdownFrontmatter(content);
 }
 
 export function renderPromptIncludes(input: RenderPromptIncludesInput): RenderPromptIncludesResult {
