@@ -4,21 +4,50 @@ on:
   release:
     types:
       - published
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish, for example v0.11.1
+        required: true
+        type: string
 
 permissions:
   contents: read
   id-token: write
+
+concurrency:
+  group: npm-publish-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   npm:
     name: Publish to npm
     runs-on: ubuntu-latest
     environment: npm-publish
-    if: ${{ !github.event.release.prerelease }}
+    if: ${{ github.event_name == 'workflow_dispatch' || !github.event.release.prerelease }}
 
     steps:
-      - name: Checkout
+      - name: Resolve release tag
+        id: release
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            tag="$INPUT_TAG"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid stable release tag: $tag" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout release tag
         uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ steps.release.outputs.tag }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -36,16 +65,33 @@ jobs:
         run: npm audit --omit=dev
 
       - name: Verify release tag matches package version
+        id: package
         run: |
           set -euo pipefail
+          name="$(node -p 'require("./package.json").name')"
           version="$(node -p 'require("./package.json").version')"
-          if [[ "v${version}" != "${GITHUB_REF_NAME}" ]]; then
-            echo "Release tag ${GITHUB_REF_NAME} does not match package version v${version}" >&2
+          if [[ "v${version}" != "${{ steps.release.outputs.tag }}" ]]; then
+            echo "Release tag ${{ steps.release.outputs.tag }} does not match package version v${version}" >&2
             exit 1
+          fi
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Check npm version availability
+        id: npm
+        run: |
+          set -euo pipefail
+          if npm view "${{ steps.package.outputs.name }}@${{ steps.package.outputs.version }}" version --json --min-release-age=0 >/dev/null 2>&1; then
+            echo "${{ steps.package.outputs.name }}@${{ steps.package.outputs.version }} is already published; skipping npm publish."
+            echo "already_published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "already_published=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Check package contents
+        if: ${{ steps.npm.outputs.already_published != 'true' }}
         run: npm pack --dry-run
 
       - name: Publish with provenance
+        if: ${{ steps.npm.outputs.already_published != 'true' }}
         run: npm publish --access public --provenance
