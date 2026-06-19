@@ -12,6 +12,7 @@ export interface PromptValidationOptions {
 }
 
 export interface PromptValidationIncludeGraph extends PromptIncludeGraph {
+	effective: boolean;
 	skipped: boolean;
 }
 
@@ -382,10 +383,11 @@ function collectValidationIncludeGraphs(cwd: string, loaded: ReturnType<typeof l
 	const loadedPromptPaths = new Set([...loaded.prompts.values()].map((prompt) => prompt.filePath));
 	const includeGraphs = collectPromptIncludeGraphs({ records: sourceRecords.records }).graphs;
 	return includeGraphs.map((graph) => {
+		const effective = loadedPromptPaths.has(graph.root.filePath);
 		const skipped =
-			!loadedPromptPaths.has(graph.root.filePath) &&
+			!effective &&
 			(graphRootHasIncludeRelatedLoaderDiagnostic(graph, loaded.diagnostics) || graphHasFailedIncludeSubtree(graph));
-		return { ...graph, skipped };
+		return { ...graph, effective, skipped };
 	});
 }
 
@@ -406,7 +408,9 @@ export function validatePromptTemplates(cwd: string, options: PromptValidationOp
 }
 
 function includeGraphIsRelevant(graph: PromptValidationIncludeGraph): boolean {
-	return graph.skipped || graph.edges.length > 0 || graph.diagnostics.length > 0;
+	if (graph.skipped) return true;
+	if (graphHasFailedIncludeSubtree(graph)) return true;
+	return graph.effective && (graph.edges.length > 0 || graph.diagnostics.length > 0);
 }
 
 function includeGraphRootStatus(graph: PromptValidationIncludeGraph): "ok" | "skipped" | "failed" {

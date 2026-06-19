@@ -2235,27 +2235,32 @@ function isIncludeGraphRelevantSkippedRecord(record: PromptSourceRecord): boolea
 export function collectPromptSourceRecords(cwd: string, includePlainPrompts = true): CollectPromptSourceRecordsResult {
 	const globalDir = join(homedir(), ".pi", "agent", "prompts");
 	const projectDir = resolve(cwd, ".pi", "prompts");
-	const recordMap = new Map<string, PromptSourceRecord>();
+	const recordMap = new Map<string, PromptSourceRecord[]>();
 	const diagnostics: PromptLoaderDiagnostic[] = [];
 	const loaderResult = loadPromptsWithModel(cwd, includePlainPrompts);
 	const effectivePromptPaths = new Set([...loaderResult.prompts.values()].map((prompt) => prompt.filePath));
 
+	function replaceRecord(bucket: PromptSourceRecord[], existing: PromptSourceRecord, record: PromptSourceRecord): PromptSourceRecord[] {
+		return bucket.map((item) => (item === existing ? record : item));
+	}
+
 	function addRecord(record: PromptSourceRecord) {
-		if (!effectivePromptPaths.has(record.filePath) && !isIncludeGraphRelevantSkippedRecord(record)) {
-			return;
-		}
-
-		const existing = recordMap.get(record.promptName);
-		if (!existing) {
-			recordMap.set(record.promptName, record);
-			return;
-		}
-
-		const existingIsEffective = effectivePromptPaths.has(existing.filePath);
 		const recordIsEffective = effectivePromptPaths.has(record.filePath);
-		if (existing.source === record.source) {
+		if (!recordIsEffective && !isIncludeGraphRelevantSkippedRecord(record)) {
+			return;
+		}
+
+		const existingBucket = recordMap.get(record.promptName);
+		if (!existingBucket) {
+			recordMap.set(record.promptName, [record]);
+			return;
+		}
+
+		const sameSourceExisting = existingBucket.find((existing) => existing.source === record.source);
+		if (sameSourceExisting) {
+			const existingIsEffective = effectivePromptPaths.has(sameSourceExisting.filePath);
 			if (!existingIsEffective && recordIsEffective) {
-				recordMap.set(record.promptName, record);
+				recordMap.set(record.promptName, replaceRecord(existingBucket, sameSourceExisting, record));
 				return;
 			}
 			if (!existingIsEffective || !recordIsEffective) {
@@ -2266,16 +2271,24 @@ export function collectPromptSourceRecords(cwd: string, includePlainPrompts = tr
 					"duplicate-command-name",
 					record.filePath,
 					record.source,
-					`Skipping ${record.source} prompt template "${record.promptName}" at ${record.filePath} because it conflicts with ${existing.filePath}.`,
+					`Skipping ${record.source} prompt template "${record.promptName}" at ${record.filePath} because it conflicts with ${sameSourceExisting.filePath}.`,
 				),
 			);
 			return;
 		}
 
-		if (existingIsEffective && !recordIsEffective) {
+		if (!recordIsEffective) {
+			recordMap.set(record.promptName, [...existingBucket, record]);
 			return;
 		}
-		recordMap.set(record.promptName, record);
+
+		recordMap.set(
+			record.promptName,
+			[
+				...existingBucket.filter((existing) => !effectivePromptPaths.has(existing.filePath) && isIncludeGraphRelevantSkippedRecord(existing)),
+				record,
+			],
+		);
 	}
 
 	const globalResult = collectPromptSourceRecordsFromDir(globalDir, "user", true, cwd, globalDir);
@@ -2284,7 +2297,7 @@ export function collectPromptSourceRecords(cwd: string, includePlainPrompts = tr
 	for (const record of globalResult.records) addRecord(record);
 	for (const record of projectResult.records) addRecord(record);
 
-	return { records: [...recordMap.values()], diagnostics: dedupeDiagnostics([...diagnostics, ...loaderResult.diagnostics]) };
+	return { records: [...recordMap.values()].flat(), diagnostics: dedupeDiagnostics([...diagnostics, ...loaderResult.diagnostics]) };
 }
 
 export function loadPromptsWithModel(cwd: string, includePlainPrompts = false): LoadPromptsWithModelResult {

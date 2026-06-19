@@ -294,6 +294,25 @@ test("source records let project prompt override user prompt of same name", () =
 	});
 });
 
+test("source records preserve user include-skipped prompt under same-name project override", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(root, ".pi", "agent", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(root, ".pi", "agent", "prompts", "same.md"), "---\nmodel: claude-sonnet-4-20250514\ninclude: missing.md\n---\nuser");
+		writeFileSync(join(cwd, ".pi", "prompts", "same.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nproject");
+
+		const records = collectPromptSourceRecords(cwd, true);
+		const sameRecords = records.records.filter((record) => record.promptName === "same").sort((a, b) => a.source.localeCompare(b.source));
+		assert.equal(sameRecords.length, 2);
+		assert.equal(sameRecords[0]?.source, "project");
+		assert.equal(sameRecords[0]?.rawBody, "project");
+		assert.equal(sameRecords[1]?.source, "user");
+		assert.deepEqual(sameRecords[1]?.includes, ["missing.md"]);
+		assert.equal(records.diagnostics.some((diagnostic) => diagnostic.code === "include-not-found" && diagnostic.source === "user"), true);
+	});
+});
+
 test("source records same-source duplicate prompt does not create ambiguous duplicate graph roots", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
