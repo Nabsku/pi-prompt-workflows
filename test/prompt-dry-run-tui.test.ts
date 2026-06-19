@@ -245,7 +245,7 @@ test("inspector tab, numeric jump, back, scroll, and quit keybindings are render
 	const viewModel = createPromptDryRunTuiViewModel(okResult, plainReport);
 	const inspector = new PromptDryRunInspector(viewModel, undefined, undefined, (value) => doneValues.push(value));
 
-	inspector.handleInput("\t");
+	inspector.handleInput("	");
 	assert.match(renderText(inspector.render(80)), /\[Metadata\]|Metadata/i);
 	inspector.handleInput("3");
 	assert.match(renderText(inspector.render(80)), /\[Skills\]|Skills/i);
@@ -257,6 +257,47 @@ test("inspector tab, numeric jump, back, scroll, and quit keybindings are render
 	assert.deepEqual(doneValues.at(-1), { action: "back" });
 	inspector.handleInput("q");
 	assert.deepEqual(doneValues.at(-1), { action: "closed" });
+});
+
+test("inspector supports Kitty CSI-u close, back, tab, numeric panes, and scroll controls", () => {
+	const doneValues: unknown[] = [];
+	const viewModel = createPromptDryRunTuiViewModel(okResult, plainReport);
+	const inspector = new PromptDryRunInspector(viewModel, undefined, undefined, (value) => doneValues.push(value));
+
+	setKittyProtocolActive(true);
+	try {
+		inspector.handleInput("\x1b[9u");
+		assert.match(renderText(inspector.render(80)), /\[Metadata\]/);
+
+		inspector.handleInput("\x1b[53u");
+		let text = renderText(inspector.render(80));
+		assert.match(text, /\[Raw\]/);
+		assert.match(text, /line 1\/9/);
+
+		inspector.handleInput("\x1b[106u");
+		text = renderText(inspector.render(80));
+		assert.match(text, /line 2\/9/);
+
+		inspector.handleInput("\x1b[107u");
+		text = renderText(inspector.render(80));
+		assert.match(text, /line 1\/9/);
+
+		inspector.handleInput("\x1b[1;1B");
+		text = renderText(inspector.render(80));
+		assert.match(text, /line 2\/9/);
+
+		inspector.handleInput("\x1b[1;1A");
+		text = renderText(inspector.render(80));
+		assert.match(text, /line 1\/9/);
+
+		inspector.handleInput("\x1b[98u");
+		assert.deepEqual(doneValues.at(-1), { action: "back" });
+
+		inspector.handleInput("\x1b[113u");
+		assert.deepEqual(doneValues.at(-1), { action: "closed" });
+	} finally {
+		setKittyProtocolActive(false);
+	}
 });
 
 test("inspector includes full skill content only when --show-skills data is present in the shared dry-run result", () => {

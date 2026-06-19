@@ -226,27 +226,28 @@ export class PromptDryRunInspector implements Component {
 	}
 
 	handleInput(data: string): void {
-		if (data === "q" || data === "\u001b" || data === "\u0003") {
+		if (matchesKey(data, "q") || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
 			this.done?.({ action: "closed" });
 			return;
 		}
-		if (data === "b") {
+		if (matchesKey(data, "b")) {
 			this.done?.({ action: "back" });
 			return;
 		}
-		if (data === "	") {
+		if (matchesKey(data, Key.tab)) {
 			this.paneIndex = (this.paneIndex + 1) % PANE_NAMES.length;
 			this.scroll = 0;
 			return;
 		}
-		if (/^[1-5]$/.test(data)) {
-			this.paneIndex = Number(data) - 1;
+		const paneKey = (["1", "2", "3", "4", "5"] as const).find((key) => matchesKey(data, key));
+		if (paneKey) {
+			this.paneIndex = Number(paneKey) - 1;
 			this.scroll = 0;
 			return;
 		}
-		if (data === "j" || data === "\u001b[B") {
+		if (matchesKey(data, "j") || matchesKey(data, Key.down)) {
 			this.scroll = Math.min(this.scroll + 1, Math.max(0, this.paneText().split("\n").length - 1));
-		} else if (data === "k" || data === "\u001b[A") {
+		} else if (matchesKey(data, "k") || matchesKey(data, Key.up)) {
 			this.scroll = Math.max(0, this.scroll - 1);
 		}
 	}
