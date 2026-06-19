@@ -7,6 +7,7 @@ import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { preparePromptExecution } from "./prompt-execution.js";
 import type { PromptWithModel } from "./prompt-loader.js";
 import { notify } from "./notifications.js";
+import { buildSkillLoadedMessage, getRequestedSkills, resolvePromptSkills, type RuntimeSkillCommand } from "./prompt-skills.js";
 import {
 	DEFAULT_SUBAGENT_NAME,
 	appendDelegatedLiveOutput,
@@ -165,6 +166,7 @@ interface PreparedDelegatedTask {
 async function prepareDelegatedTask(
 	task: DelegatedParallelTaskInput,
 	ctx: ExtensionContext,
+	commands: RuntimeSkillCommand[],
 	currentModel: Model<any> | undefined,
 	override: SubagentOverride | undefined,
 	inheritedModel: Model<any> | undefined,
@@ -196,9 +198,18 @@ async function prepareDelegatedTask(
 		throw new Error(prepared.message);
 	}
 	if (prepared.warning) notify(ctx, prepared.warning, "warning");
+	const requestedSkills = getRequestedSkills(task.prompt);
+	const skillResolution = resolvePromptSkills(requestedSkills, ctx.cwd, commands);
+	if (skillResolution.kind === "error") {
+		throw new Error(skillResolution.error);
+	}
+	const skillPreamble = skillResolution.kind === "ready" ? buildSkillLoadedMessage(skillResolution.skills).content : undefined;
 	let taskText = prepared.content;
 	if (!task.prompt.inheritContext && taskPreamble) {
 		taskText = `${taskPreamble}\n\n---\n\n${prepared.content}`;
+	}
+	if (skillPreamble) {
+		taskText = `${skillPreamble}\n\n---\n\n${taskText}`;
 	}
 	if (task.taskPrefix) {
 		taskText = `${task.taskPrefix}\n\n${taskText}`;
@@ -538,6 +549,7 @@ async function requestDelegatedRun(
 
 export async function executeSubagentPromptStep(options: DelegatedPromptOptions): Promise<DelegatedPromptOutcome | undefined> {
 	const { pi, ctx, currentModel, override, signal, inheritedModel, taskPreamble, allowPartialFailures } = options;
+	const commands = typeof (pi as { getCommands?: () => RuntimeSkillCommand[] }).getCommands === "function" ? (pi as { getCommands: () => RuntimeSkillCommand[] }).getCommands() : [];
 	const runtime = await ensureSubagentRuntime(ctx.cwd);
 	const isParallelRequest = "parallel" in options;
 
@@ -548,7 +560,7 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 
 	const preparedTasks: PreparedDelegatedTask[] = [];
 	for (const task of tasks) {
-		const preparedTask = await prepareDelegatedTask(task, ctx, currentModel, override, inheritedModel, taskPreamble, runtime);
+		const preparedTask = await prepareDelegatedTask(task, ctx, commands, currentModel, override, inheritedModel, taskPreamble, runtime);
 		preparedTasks.push(preparedTask);
 	}
 

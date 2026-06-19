@@ -191,19 +191,7 @@ function validateParallelRuntimeSettings(cwd: string, result: PromptValidationRe
 		.map((step) => ({ step, target: prompts.get(step.name) }))
 		.filter((entry): entry is { step: ChainStep; target: LoadedPrompt } => entry.target !== undefined && !entry.target.chain);
 
-	const runtimeDelegatableTargets = targets.filter((entry) => uniqueSkillNames(entry.target.skills).length === 0);
-	for (const entry of targets) {
-		const skillNames = uniqueSkillNames(entry.target.skills);
-		if (skillNames.length === 0) continue;
-		result.diagnostics.push(
-			createValidationDiagnostic(
-				"parallel-skill-subagent-incompatible",
-				prompt.filePath,
-				prompt.source,
-				`Prompt template ${prompt.filePath} references parallel chain step template ${JSON.stringify(entry.step.name)}, but parallel() steps require delegated execution and skill frontmatter (${skillNames.join(", ")}) cannot run as a subagent in v1.`,
-			),
-		);
-	}
+	const runtimeDelegatableTargets = targets;
 	if (targets.length < 2) return;
 
 	if (runtimeDelegatableTargets.length >= 2) {

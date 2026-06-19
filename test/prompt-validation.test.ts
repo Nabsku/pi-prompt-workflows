@@ -193,7 +193,7 @@ test("validatePromptTemplates rejects mixed inheritContext between plain and inh
 	});
 });
 
-test("validatePromptTemplates rejects skill-bearing parallel targets because skills cannot run as subagents", () => {
+test("validatePromptTemplates allows skill-bearing parallel targets", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
 		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
@@ -204,12 +204,9 @@ test("validatePromptTemplates rejects skill-bearing parallel targets because ski
 		writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "parallel(plain-skill, worker)"\n---\nignored');
 
 		const result = validatePromptTemplates(cwd);
-		const diagnostic = result.diagnostics.find((entry) => entry.code === "parallel-skill-subagent-incompatible");
 
-		assert.equal(result.ok, false);
-		assert.ok(diagnostic);
-		assert.match(diagnostic.message, /parallel\(\) steps require delegated execution/);
-		assert.match(diagnostic.message, /skill frontmatter \(some-skill\) cannot run as a subagent in v1/);
+		assert.equal(result.ok, true);
+		assert.equal(result.diagnostics.some((entry) => entry.code === "parallel-skill-subagent-incompatible"), false);
 	});
 });
 

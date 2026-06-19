@@ -106,7 +106,7 @@ Use `/print-prompt` or `/dry-run-prompt` to preview what a prompt template would
 /dry-run-prompt review --model=gpt-5.2 src/server.ts
 ```
 
-In non-TUI contexts these commands print a Markdown report to stdout. By default, full skill content is hidden; add `--show-skills` when you explicitly want the preview to include loaded skill bodies.
+In non-TUI contexts these commands print a Markdown report to stdout. By default, full skill content is hidden; add `--show-skills` when you explicitly want the preview to include loaded skill bodies. For delegated prompts, skill content is still reported in the report's skills section rather than inlined into the prompt body preview; at runtime the resolved skill block is prepended to the child task text before delegation.
 
 ```text
 /print-prompt review --show-skills src/server.ts
@@ -274,6 +274,8 @@ Resolution order:
 4. `~/.pi/agent/skills/<name>/SKILL.md` or `~/.pi/agent/skills/<name>.md`
 5. `~/.agents/skills/<name>/SKILL.md` or `~/.agents/skills/<name>.md`
 
+Here `<cwd>` is the Pi session/project cwd used to register and execute the prompt command. Delegated prompts may also set frontmatter `cwd:` or receive runtime `--cwd`, but those values choose where the child agent runs; they do not change which skill library is searched. This keeps direct prompts, runtime `--subagent`, `--fork`, dry-run, and validation on one predictable skill lookup path.
+
 ### Skill wildcards
 
 `skill` and `skills:` entries may use one constrained wildcard form: a non-empty prefix followed by a final `*`. This means `skill: golang-*` is valid too; it can inject more than one matching skill while preserving the same ordering and de-dupe rules.
@@ -298,7 +300,7 @@ Skill-to-skill references are not recursive in v1. Loaded skills are treated as 
 
 Chain wrapper templates ignore `skill` and `skills`; put skill frontmatter on the step templates instead. When a chain runs a step, that step uses its own skill configuration.
 
-Delegated prompts cannot combine `subagent:` with `skill` or `skills` in v1. Such prompts are rejected at registration time. Runtime delegation overrides such as `--subagent` and `--fork` also reject prompts or chain steps that declare skills, so they do not silently run without requested skill context.
+Delegated prompts can combine `subagent:` with `skill` or `skills`. The resolved skill content is prepended to the delegated task before the prompt body, so the child agent receives the same resolved skill content instead of silently dropping it. Runtime `--subagent` uses the same behavior for direct prompts and chain steps; runtime `--fork` uses it for direct prompts, while chain steps use their own `inheritContext` frontmatter.
 
 Compare prompts (`bestOfN`) cannot combine with `skill` or `skills` in v1 because compare execution delegates worker/reviewer/final-applier tasks. Add required skill instructions to the compare prompt body instead.
 

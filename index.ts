@@ -51,7 +51,6 @@ import { formatPromptValidationReport, validatePromptTemplates, type RegisteredP
 import {
 	DRY_RUN_CHAIN_UNSUPPORTED,
 	DRY_RUN_COMPARE_UNSUPPORTED,
-	DRY_RUN_DELEGATED_SKILLS_UNSUPPORTED,
 	DRY_RUN_DETERMINISTIC_UNSUPPORTED,
 	createPromptDryRun,
 	parseDryRunCommand,
@@ -234,11 +233,6 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			notify(ctx, skillResolution.error, "error");
 			return "aborted";
 		}
-		if (requestedSkills.length > 0 && shouldDelegatePrompt(prompt, override)) {
-			notify(ctx, "Prompts with skill or skills frontmatter cannot run as subagents in v1.", "error");
-			return "aborted";
-		}
-
 		let deterministicPreamble: string | undefined;
 		if (prompt.deterministic) {
 			try {
@@ -1245,12 +1239,6 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 							taskPreamble = `[Previous chain steps]\n\n${chainStepSummaries.join("\n\n")}`;
 						}
 
-						if (stepTemplate.tasks.some((task) => getRequestedSkills(task.prompt).length > 0 && shouldDelegatePrompt(task.prompt, subagentOverride))) {
-							notify(ctx, "Prompts with skill or skills frontmatter cannot run as subagents in v1.", "error");
-							aborted = true;
-							break;
-						}
-
 						let delegated;
 						try {
 							delegated = await executeSubagentPromptStep({
@@ -1448,7 +1436,6 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		if (prompt.chain) return DRY_RUN_CHAIN_UNSUPPORTED;
 		if (prompt.workers !== undefined || prompt.reviewers !== undefined || prompt.finalApplier !== undefined) return DRY_RUN_COMPARE_UNSUPPORTED;
 		if (prompt.deterministic) return DRY_RUN_DETERMINISTIC_UNSUPPORTED;
-		if (getRequestedSkills(prompt).length > 0 && shouldDelegatePrompt(prompt)) return DRY_RUN_DELEGATED_SKILLS_UNSUPPORTED;
 		return undefined;
 	}
 

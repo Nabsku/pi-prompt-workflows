@@ -34,6 +34,7 @@
 - Added Release Please release automation and npm trusted publishing workflow.
 
 ### Fixed
+- Delegated prompt templates can now combine `subagent:`/runtime `--subagent` with `skill` or `skills`; resolved skill content is prepended to delegated task text instead of rejecting the template.
 - Kept dry-run output out of LLM/session history by writing plain previews to stdout instead of custom session messages.
 - Aligned dry-run delegation metadata with runtime behavior for default agents, missing delegated `cwd`, loop prefixes, and parallel delegated task preambles.
 

@@ -2385,52 +2385,232 @@ test("--model flag overrides prompt model in loop iterations", async () => {
 	});
 });
 
-test("runtime subagent override is rejected when prompt skills are configured", async () => {
+test("runtime subagent override injects prompt skills into delegated task", async () => {
 	await withTempHome(async (root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		mkdirSync(join(cwd, ".pi", "skills", "tmux"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "check.md"), `---\nmodel: ${MODEL_ID}\nskill: tmux\n---\ncheck code`);
-		writeFileSync(join(cwd, ".pi", "skills", "tmux", "SKILL.md"), "tmux content");
+		await withSubagentRuntime(root, async () => {
+			const cwd = join(root, "project");
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			mkdirSync(join(cwd, ".pi", "skills", "tmux"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", "check.md"), `---\nmodel: ${MODEL_ID}\nskill: tmux\n---\ncheck code`);
+			writeFileSync(join(cwd, ".pi", "skills", "tmux", "SKILL.md"), "tmux content");
 
-		const pi = new FakePi();
-		promptModelExtension(pi as never);
-		const { ctx, getNotifications } = createContext(cwd, pi);
-		await pi.emit("session_start", {}, ctx);
+			const pi = new FakePi();
+			promptModelExtension(pi as never);
+			const { ctx } = createBranchingContext(cwd, pi);
+			await pi.emit("session_start", {}, ctx);
 
-		await pi.commands.get("check")!.handler("--subagent", ctx);
+			let delegatedTask = "";
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+				const request = payload as any;
+				delegatedTask = request.task;
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
+					isError: false,
+				});
+			});
 
-		assert.deepEqual(pi.userMessages, []);
-		assert.deepEqual(pi.setModelCalls, []);
-		assert.match(getNotifications().join("\n"), /cannot run as subagents/i);
-		assert.equal(await pi.emitWithResult("before_agent_start", { systemPrompt: "BASE" }, ctx), undefined);
+			await pi.commands.get("check")!.handler("--subagent", ctx);
+
+			assert.deepEqual(pi.userMessages, ["[Delegated result: check]\n\ndone"]);
+			assert.match(delegatedTask, /<skill name="tmux">\ntmux content\n<\/skill>/);
+			assert.match(delegatedTask, /---\n\ncheck code/);
+			assert.equal(await pi.emitWithResult("before_agent_start", { systemPrompt: "BASE" }, ctx), undefined);
+		});
 	});
 });
 
-test("parallel chain runtime subagent override is rejected when step skills are configured", async () => {
+test("parallel chain runtime subagent override injects step skills into delegated task", async () => {
 	await withTempHome(async (root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		mkdirSync(join(cwd, ".pi", "skills", "tmux"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "parallel(check-a, check-b)"\n---\nignored');
-		writeFileSync(join(cwd, ".pi", "prompts", "check-a.md"), `---\nmodel: ${MODEL_ID}\nskill: tmux\n---\nCHECK-A`);
-		writeFileSync(join(cwd, ".pi", "prompts", "check-b.md"), `---\nmodel: ${MODEL_ID}\n---\nCHECK-B`);
-		writeFileSync(join(cwd, ".pi", "skills", "tmux", "SKILL.md"), "tmux content");
+		await withSubagentRuntime(root, async () => {
+			const cwd = join(root, "project");
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			mkdirSync(join(cwd, ".pi", "skills", "tmux"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "parallel(check-a, check-b)"\n---\nignored');
+			writeFileSync(join(cwd, ".pi", "prompts", "check-a.md"), `---\nmodel: ${MODEL_ID}\nskill: tmux\n---\nCHECK-A`);
+			writeFileSync(join(cwd, ".pi", "prompts", "check-b.md"), `---\nmodel: ${MODEL_ID}\n---\nCHECK-B`);
+			writeFileSync(join(cwd, ".pi", "skills", "tmux", "SKILL.md"), "tmux content");
 
-		const pi = new FakePi();
-		let delegatedRequests = 0;
-		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, () => {
-			delegatedRequests++;
+			const pi = new FakePi();
+			const delegatedTasks: string[] = [];
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+				const request = payload as any;
+				delegatedTasks.push(...request.tasks.map((task: any) => task.task));
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
+					parallelResults: request.tasks.map((task: any) => ({ agent: task.agent, messages: [{ role: "assistant", content: [{ type: "text", text: `done ${task.task}` }] }], isError: false })),
+					isError: false,
+				});
+			});
+			promptModelExtension(pi as never);
+			const { ctx } = createBranchingContext(cwd, pi);
+			await pi.emit("session_start", {}, ctx);
+
+			await pi.commands.get("pipeline")!.handler("--subagent", ctx);
+
+			assert.equal(delegatedTasks.length, 2);
+			assert.match(delegatedTasks[0] ?? "", /<skill name="tmux">\ntmux content\n<\/skill>/);
+			assert.match(delegatedTasks[0] ?? "", /CHECK-A/);
+			assert.doesNotMatch(delegatedTasks[1] ?? "", /<skill name="tmux">/);
+			assert.match(delegatedTasks[1] ?? "", /CHECK-B/);
 		});
-		promptModelExtension(pi as never);
-		const { ctx, getNotifications } = createContext(cwd, pi);
-		await pi.emit("session_start", {}, ctx);
+	});
+});
 
-		await pi.commands.get("pipeline")!.handler("--subagent", ctx);
 
-		assert.equal(delegatedRequests, 0);
-		assert.deepEqual(pi.userMessages, []);
-		assert.match(getNotifications().join("\n"), /cannot run as subagents/i);
+test("frontmatter subagent injects prompt skills into delegated task", async () => {
+	await withTempHome(async (root) => {
+		await withSubagentRuntime(root, async () => {
+			const cwd = join(root, "project");
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			mkdirSync(join(cwd, ".pi", "skills", "review"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", "check.md"), `---
+model: ${MODEL_ID}
+subagent: true
+skills:
+  - review
+---
+check body`);
+			writeFileSync(join(cwd, ".pi", "skills", "review", "SKILL.md"), "review skill content");
+
+			const pi = new FakePi();
+			let delegatedTask = "";
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+				const request = payload as any;
+				delegatedTask = request.task;
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
+					isError: false,
+				});
+			});
+			promptModelExtension(pi as never);
+			const { ctx } = createBranchingContext(cwd, pi);
+			await pi.emit("session_start", {}, ctx);
+
+			await pi.commands.get("check")!.handler("", ctx);
+
+			assert.match(delegatedTask, /^<skill name="review">\nreview skill content\n<\/skill>\n\n---\n\ncheck body$/);
+			assert.equal(await pi.emitWithResult("before_agent_start", { systemPrompt: "BASE" }, ctx), undefined);
+		});
+	});
+});
+
+test("runtime fork injects prompt skills into inherited delegated task", async () => {
+	await withTempHome(async (root) => {
+		await withSubagentRuntime(root, async () => {
+			const cwd = join(root, "project");
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			mkdirSync(join(cwd, ".pi", "skills", "review"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", "check.md"), `---
+model: ${MODEL_ID}
+skill: review
+---
+check body`);
+			writeFileSync(join(cwd, ".pi", "skills", "review", "SKILL.md"), "review skill content");
+
+			const pi = new FakePi();
+			let requestContext = "";
+			let delegatedTask = "";
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+				const request = payload as any;
+				requestContext = request.context;
+				delegatedTask = request.task;
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
+					isError: false,
+				});
+			});
+			promptModelExtension(pi as never);
+			const { ctx } = createBranchingContext(cwd, pi);
+			await pi.emit("session_start", {}, ctx);
+
+			await pi.commands.get("check")!.handler("--fork", ctx);
+
+			assert.equal(requestContext, "fork");
+			assert.match(delegatedTask, /^<skill name="review">\nreview skill content\n<\/skill>\n\n---\n\ncheck body$/);
+		});
+	});
+});
+
+test("delegated prompt skills resolve from session cwd even when prompt cwd differs", async () => {
+	await withTempHome(async (root) => {
+		await withSubagentRuntime(root, async () => {
+			const sessionCwd = join(root, "session-project");
+			const delegatedCwd = join(root, "delegated-project");
+			mkdirSync(join(sessionCwd, ".pi", "prompts"), { recursive: true });
+			mkdirSync(join(sessionCwd, ".pi", "skills", "shared"), { recursive: true });
+			mkdirSync(join(delegatedCwd, ".pi", "skills", "shared"), { recursive: true });
+			writeFileSync(join(sessionCwd, ".pi", "prompts", "check.md"), `---
+model: ${MODEL_ID}
+subagent: true
+cwd: ${delegatedCwd}
+skill: shared
+---
+check body`);
+			writeFileSync(join(sessionCwd, ".pi", "skills", "shared", "SKILL.md"), "session skill content");
+			writeFileSync(join(delegatedCwd, ".pi", "skills", "shared", "SKILL.md"), "delegated cwd skill content");
+
+			const pi = new FakePi();
+			let requestCwd = "";
+			let delegatedTask = "";
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+				const request = payload as any;
+				requestCwd = request.cwd;
+				delegatedTask = request.task;
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
+					isError: false,
+				});
+			});
+			promptModelExtension(pi as never);
+			const { ctx } = createBranchingContext(sessionCwd, pi);
+			await pi.emit("session_start", {}, ctx);
+
+			await pi.commands.get("check")!.handler("", ctx);
+
+			assert.equal(requestCwd, delegatedCwd);
+			assert.match(delegatedTask, /session skill content/);
+			assert.doesNotMatch(delegatedTask, /delegated cwd skill content/);
+		});
+	});
+});
+
+test("missing delegated prompt skill aborts before subagent request", async () => {
+	await withTempHome(async (root) => {
+		await withSubagentRuntime(root, async () => {
+			const cwd = join(root, "project");
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", "check.md"), `---
+model: ${MODEL_ID}
+subagent: true
+skill: missing
+---
+check body`);
+
+			const pi = new FakePi();
+			let requestCount = 0;
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, () => {
+				requestCount++;
+			});
+			promptModelExtension(pi as never);
+			const { ctx, getNotifications } = createContext(cwd, pi);
+			await pi.emit("session_start", {}, ctx);
+
+			await pi.commands.get("check")!.handler("", ctx);
+
+			assert.equal(requestCount, 0);
+			assert.match(getNotifications().join("\n"), /Skill "missing" not found/);
+			assert.deepEqual(pi.userMessages, []);
+		});
 	});
 });
 

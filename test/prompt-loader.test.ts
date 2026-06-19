@@ -182,7 +182,7 @@ test("chain wrapper templates ignore skill and skills without diagnostics", () =
 	});
 });
 
-test("loadPromptsWithModel rejects subagent prompts combined with skill frontmatter", () => {
+test("loadPromptsWithModel allows subagent prompts combined with skill frontmatter", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
 		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
@@ -190,10 +190,11 @@ test("loadPromptsWithModel rejects subagent prompts combined with skill frontmat
 		writeFileSync(join(cwd, ".pi", "prompts", "subagent-skills.md"), "---\nmodel: claude-sonnet-4-20250514\nsubagent: delegate\nskills: [tmux]\n---\nbody");
 
 		const result = loadPromptsWithModel(cwd);
-		assert.equal(result.prompts.has("subagent-skill"), false);
-		assert.equal(result.prompts.has("subagent-skills"), false);
-		assert.equal(result.diagnostics.filter((diagnostic) => diagnostic.code === "invalid-subagent-skills").length, 2);
-		assert.match(result.diagnostics.map((diagnostic) => diagnostic.message).join("\n"), /subagent.*skill/i);
+		assert.equal(result.prompts.get("subagent-skill")?.subagent, "delegate");
+		assert.deepEqual(result.prompts.get("subagent-skill")?.skills, ["tmux"]);
+		assert.equal(result.prompts.get("subagent-skills")?.subagent, "delegate");
+		assert.deepEqual(result.prompts.get("subagent-skills")?.skills, ["tmux"]);
+		assert.equal(result.diagnostics.filter((diagnostic) => diagnostic.code === "invalid-subagent-skills").length, 0);
 	});
 });
 

@@ -212,12 +212,17 @@ test("includes skill content only when showSkills: true", async () => {
 	});
 });
 
-test("returns runtime-compatible error for skill-bearing delegated prompt", async () => {
+test("dry-run previews skill-bearing delegated prompts", async () => {
 	await withTempHome(async (root) => {
 		const cwd = join(root, "project");
-		writeProjectSkill(cwd, "tmux", "tmux content");
-		const result = assertError(await createPromptDryRun(prompt({ skill: "tmux", subagent: true }), options(cwd)));
-		assert.equal(result.error, "Prompts with skill or skills frontmatter cannot run as subagents in v1.");
+		const skillPath = writeProjectSkill(cwd, "tmux", "tmux content");
+		const result = assertOk(await createPromptDryRun(prompt({ skill: "tmux", subagent: true }), options(cwd)));
+		assert.deepEqual(result.runtime.delegation, { enabled: true, agent: "delegate" });
+		assert.equal(result.content, "Body ");
+		assert.doesNotMatch(result.content, /tmux content/);
+		assert.deepEqual(result.skills, [{ skillName: "tmux", skillPath }]);
+		const shown = assertOk(await createPromptDryRun(prompt({ skill: "tmux", subagent: true }), options(cwd, { showSkills: true })));
+		assert.deepEqual(shown.skills, [{ skillName: "tmux", skillPath, skillContent: "tmux content" }]);
 	});
 });
 

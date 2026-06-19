@@ -1845,17 +1845,6 @@ function loadPromptsWithModelFromDir(
 					);
 					continue;
 				}
-				if (subagent !== undefined && (Object.hasOwn(frontmatter, "skill") || Object.hasOwn(frontmatter, "skills"))) {
-					diagnostics.push(
-						createDiagnostic(
-							"invalid-subagent-skills",
-							fullPath,
-							source,
-							`Skipping prompt template at ${fullPath}: frontmatter field "subagent" cannot be combined with "skill" or "skills" in v1.`,
-						),
-					);
-					continue;
-				}
 				const skillResult = chain ? { ok: true as const } : normalizePromptSkills(frontmatter, fullPath, source, diagnostics);
 				if (!skillResult.ok) continue;
 				const skill = skillResult.skill;

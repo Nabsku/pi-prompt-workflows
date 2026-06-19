@@ -19,8 +19,6 @@ export const DRY_RUN_CHAIN_UNSUPPORTED =
 export const DRY_RUN_COMPARE_UNSUPPORTED = "Dry-run for compare prompts is not supported in v1.";
 export const DRY_RUN_DETERMINISTIC_UNSUPPORTED =
 	"Dry-run for deterministic prompts is not supported in v1 because it would require running configured commands/scripts.";
-export const DRY_RUN_DELEGATED_SKILLS_UNSUPPORTED =
-	"Prompts with skill or skills frontmatter cannot run as subagents in v1.";
 
 export interface PromptDryRunSkillPreview {
 	skillName: string;
@@ -345,10 +343,6 @@ export async function createPromptDryRun(
 		};
 	}
 	if (effectivePrompt.inheritContext) runtime.inheritContext = true;
-
-	if (requestedSkills.length > 0 && delegated) {
-		return errorResult(prompt, DRY_RUN_DELEGATED_SKILLS_UNSUPPORTED, warnings, runtime);
-	}
 
 	const loopRotation = applyRepresentativeLoopRotation(effectivePrompt, runtime);
 	effectivePrompt = loopRotation.prompt;
