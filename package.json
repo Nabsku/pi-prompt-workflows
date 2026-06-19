@@ -32,6 +32,7 @@
     "model-selection.ts",
     "notifications.ts",
     "prompt-execution.ts",
+    "prompt-dry-run.ts",
     "prompt-includes.ts",
     "prompt-loader.ts",
     "prompt-skills.ts",
