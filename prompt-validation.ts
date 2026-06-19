@@ -1,5 +1,6 @@
 import { parseChainDeclaration, type ChainStep, type ChainStepOrParallel } from "./chain-parser.js";
-import { discoverFilesystemSkills, loadPromptsWithModel, readSkillContent, resolveSkillPath, type PromptLoaderDiagnostic, type PromptSource } from "./prompt-loader.js";
+import { collectPromptIncludeGraphs, type PromptIncludeGraph } from "./prompt-includes.js";
+import { collectPromptSourceRecords, discoverFilesystemSkills, loadPromptsWithModel, readSkillContent, resolveSkillPath, type PromptLoaderDiagnostic, type PromptSource } from "./prompt-loader.js";
 
 export interface RegisteredPromptSkill {
 	skillName: string;
@@ -10,11 +11,36 @@ export interface PromptValidationOptions {
 	registeredSkills?: RegisteredPromptSkill[];
 }
 
+export interface PromptValidationIncludeGraph extends PromptIncludeGraph {
+	skipped: boolean;
+}
+
 export interface PromptValidationResult {
 	ok: boolean;
 	promptCount: number;
 	diagnostics: PromptLoaderDiagnostic[];
+	includeGraphs: PromptValidationIncludeGraph[];
 }
+
+const INCLUDE_RELATED_DIAGNOSTIC_CODES = new Set([
+	"include-absolute-disallowed",
+	"include-cycle",
+	"include-depth-exceeded",
+	"include-glob-disallowed",
+	"include-invalid-path",
+	"include-non-markdown",
+	"include-not-file",
+	"include-not-found",
+	"include-path-escaped",
+	"include-placeholder-without-includes",
+	"include-read-error",
+	"include-url-disallowed",
+	"invalid-include",
+	"invalid-include-metadata",
+	"invalid-includes",
+	"invalid-includes-chain",
+	"invalid-includes-conflict",
+]);
 
 function createValidationDiagnostic(code: string, filePath: string, source: PromptSource, message: string): PromptLoaderDiagnostic {
 	return {
@@ -339,12 +365,37 @@ function validatePromptSkills(cwd: string, result: PromptValidationResult, promp
 	}
 }
 
+function isIncludeRelatedDiagnostic(diagnostic: PromptLoaderDiagnostic): boolean {
+	return INCLUDE_RELATED_DIAGNOSTIC_CODES.has(diagnostic.code);
+}
+
+function graphHasFailedIncludeSubtree(graph: PromptIncludeGraph): boolean {
+	return graph.edges.some((edge) => edge.status === "failed") || graph.diagnostics.some(isIncludeRelatedDiagnostic);
+}
+
+function graphRootHasIncludeRelatedLoaderDiagnostic(graph: PromptIncludeGraph, diagnostics: PromptLoaderDiagnostic[]): boolean {
+	return diagnostics.some((diagnostic) => diagnostic.filePath === graph.root.filePath && isIncludeRelatedDiagnostic(diagnostic));
+}
+
+function collectValidationIncludeGraphs(cwd: string, loaded: ReturnType<typeof loadPromptsWithModel>): PromptValidationIncludeGraph[] {
+	const sourceRecords = collectPromptSourceRecords(cwd, true);
+	const loadedPromptPaths = new Set([...loaded.prompts.values()].map((prompt) => prompt.filePath));
+	const includeGraphs = collectPromptIncludeGraphs({ records: sourceRecords.records }).graphs;
+	return includeGraphs.map((graph) => {
+		const skipped =
+			!loadedPromptPaths.has(graph.root.filePath) &&
+			(graphRootHasIncludeRelatedLoaderDiagnostic(graph, loaded.diagnostics) || graphHasFailedIncludeSubtree(graph));
+		return { ...graph, skipped };
+	});
+}
+
 export function validatePromptTemplates(cwd: string, options: PromptValidationOptions = {}): PromptValidationResult {
 	const loaded = loadPromptsWithModel(cwd, true);
 	const result: PromptValidationResult = {
 		ok: loaded.diagnostics.length === 0,
 		promptCount: loaded.prompts.size,
 		diagnostics: [...loaded.diagnostics],
+		includeGraphs: collectValidationIncludeGraphs(cwd, loaded),
 	};
 
 	validatePromptChains(cwd, result, loaded.prompts);
