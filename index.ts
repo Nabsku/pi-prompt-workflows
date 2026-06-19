@@ -1486,11 +1486,6 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	}
 
 	function notifyDryRunError(ctx: ExtensionCommandContext, message: string) {
-		const maybeUi = (ctx as ExtensionCommandContext & { ui?: { notify?: (message: string, type: "error") => void } }).ui;
-		if (maybeUi && typeof maybeUi.notify === "function") {
-			maybeUi.notify(message, "error");
-			return;
-		}
 		notify(ctx, message, "error");
 	}
 
