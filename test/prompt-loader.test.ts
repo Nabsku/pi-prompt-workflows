@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildPromptCommandDescription, loadPromptsWithModel, RESERVED_COMMAND_NAMES, resolveSkillPath } from "../prompt-loader.js";
+import { buildPromptCommandDescription, collectPromptSourceRecords, loadPromptsWithModel, RESERVED_COMMAND_NAMES, resolveSkillPath } from "../prompt-loader.js";
 
 function withTempHome(run: (root: string) => void) {
 	const root = mkdtempSync(join(tmpdir(), "pi-prompt-template-model-enhanced-"));
@@ -235,6 +235,131 @@ test("loadPromptsWithModel can include plain prompts for chain resolution withou
 		assert.equal(defaultResult.prompts.has("review"), false);
 		assert.equal(chainResult.prompts.get("review")?.content, "body");
 		assert.deepEqual(chainResult.prompts.get("review")?.models, []);
+	});
+});
+
+test("source record exists for a prompt with missing include that runtime loader skips", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "missing-include.md"), "---\nmodel: claude-sonnet-4-20250514\ninclude: shared/missing.md\n---\nbody");
+
+		const runtime = loadPromptsWithModel(cwd);
+		assert.equal(runtime.prompts.has("missing-include"), false);
+		assert.equal(runtime.diagnostics.some((diagnostic) => diagnostic.code === "include-not-found"), true);
+
+		const records = collectPromptSourceRecords(cwd, true);
+		const missing = records.records.find((record) => record.promptName === "missing-include");
+		assert.ok(missing);
+		assert.deepEqual(missing.includes, ["shared/missing.md"]);
+		assert.equal(missing.rawBody, "body");
+		assert.equal(missing.isChainWrapper, false);
+		assert.equal(records.diagnostics.some((diagnostic) => diagnostic.code === "include-not-found"), true);
+	});
+});
+
+test("source record keeps raw body and normalized includes", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "with-source.md"),
+			'---\nmodel: claude-sonnet-4-20250514\nincludes: [" shared/common.md ", "shared/evidence.md"]\n---\nintro\n<includes />\n<include file="shared/inline.md" />',
+		);
+
+		const records = collectPromptSourceRecords(cwd, true);
+		const record = records.records.find((item) => item.promptName === "with-source");
+		assert.ok(record);
+		assert.deepEqual(record.includes, ["shared/common.md", "shared/evidence.md"]);
+		assert.equal(record.rawBody, 'intro\n<includes />\n<include file="shared/inline.md" />');
+		assert.equal(record.hasInlineIncludes, true);
+		assert.equal(record.hasIncludesPlaceholder, true);
+	});
+});
+
+test("source records let project prompt override user prompt of same name", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(root, ".pi", "agent", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(root, ".pi", "agent", "prompts", "same.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nuser");
+		writeFileSync(join(cwd, ".pi", "prompts", "same.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nproject");
+
+		const records = collectPromptSourceRecords(cwd, true);
+		assert.equal(records.records.filter((record) => record.promptName === "same").length, 1);
+		const record = records.records.find((item) => item.promptName === "same");
+		assert.ok(record);
+		assert.equal(record.source, "project");
+		assert.equal(record.rawBody, "project");
+	});
+});
+
+test("source records same-source duplicate prompt does not create ambiguous duplicate graph roots", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts", "alpha"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompts", "zeta"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "alpha", "dup.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nalpha");
+		writeFileSync(join(cwd, ".pi", "prompts", "zeta", "dup.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nzeta");
+
+		const records = collectPromptSourceRecords(cwd, true);
+		const duplicates = records.records.filter((record) => record.promptName === "dup");
+		assert.equal(duplicates.length, 1);
+		assert.equal(duplicates[0]?.rawBody, "alpha");
+		assert.equal(records.diagnostics.some((diagnostic) => diagnostic.code === "duplicate-command-name"), true);
+	});
+});
+
+test("source records same-source duplicate with include failure keeps loader diagnostic without ambiguous duplicate roots", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts", "alpha"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompts", "zeta"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "alpha", "dup.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nalpha");
+		writeFileSync(join(cwd, ".pi", "prompts", "zeta", "dup.md"), "---\nmodel: claude-sonnet-4-20250514\ninclude: shared/missing.md\n---\nzeta");
+
+		const records = collectPromptSourceRecords(cwd, true);
+		assert.equal(records.records.filter((record) => record.promptName === "dup").length, 1);
+		assert.equal(records.records.find((record) => record.promptName === "dup")?.rawBody, "alpha");
+		assert.equal(records.diagnostics.some((diagnostic) => diagnostic.code === "include-not-found"), true);
+	});
+});
+
+test("source records same-source duplicate uses later valid prompt when first duplicate is include-skipped", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts", "alpha"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompts", "zeta"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "alpha", "dup.md"), "---\nmodel: claude-sonnet-4-20250514\ninclude: shared/missing.md\n---\nalpha");
+		writeFileSync(join(cwd, ".pi", "prompts", "zeta", "dup.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nzeta");
+
+		const runtime = loadPromptsWithModel(cwd);
+		assert.equal(runtime.prompts.get("dup")?.content, "zeta");
+		assert.equal(runtime.diagnostics.some((diagnostic) => diagnostic.code === "include-not-found"), true);
+
+		const records = collectPromptSourceRecords(cwd, true);
+		const duplicates = records.records.filter((record) => record.promptName === "dup");
+		assert.equal(duplicates.length, 1);
+		assert.equal(duplicates[0]?.rawBody, "zeta");
+		assert.equal(records.diagnostics.some((diagnostic) => diagnostic.code === "include-not-found"), true);
+		assert.equal(records.diagnostics.some((diagnostic) => diagnostic.code === "duplicate-command-name"), false);
+	});
+});
+
+test("source record chain wrapper body directives are marked and ignored for graph scanning", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "review"\n---\n<include file="missing.md" />\n<includes />');
+
+		const records = collectPromptSourceRecords(cwd, true);
+		const record = records.records.find((item) => item.promptName === "pipeline");
+		assert.ok(record);
+		assert.equal(record.isChainWrapper, true);
+		assert.equal(record.rawBody, '<include file="missing.md" />\n<includes />');
+		assert.equal(record.hasInlineIncludes, false);
+		assert.equal(record.hasIncludesPlaceholder, false);
+		assert.equal(record.includes, undefined);
 	});
 });
 
@@ -532,6 +657,61 @@ test("loadPromptsWithModel ignores model-less prompts with only invalid extensio
 		const result = loadPromptsWithModel(cwd);
 		assert.equal(result.prompts.has("invalid-loop-only"), false);
 		assert.match(result.diagnostics.map((item) => item.message).join("\n"), /invalid loop value/i);
+
+		const records = collectPromptSourceRecords(cwd, false);
+		assert.equal(records.records.some((record) => record.promptName === "invalid-loop-only"), false);
+		assert.equal(records.diagnostics.some((diagnostic) => diagnostic.code === "invalid-loop"), true);
+	});
+});
+
+test("loadPromptsWithModel treats model-less thinking as extension config and source records keep it", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "thinking-only.md"), '---\ndescription: "thinking only"\nthinking: high\n---\nbody');
+
+		const result = loadPromptsWithModel(cwd, false);
+		const prompt = result.prompts.get("thinking-only");
+		assert.ok(prompt);
+		assert.deepEqual(prompt.models, []);
+		assert.equal(prompt.thinking, "high");
+
+		const records = collectPromptSourceRecords(cwd, false);
+		const record = records.records.find((item) => item.promptName === "thinking-only");
+		assert.ok(record);
+		assert.equal(record.rawBody, "body");
+	});
+});
+
+test("loadPromptsWithModel skips model-less invalid skill only and source records exclude it", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "invalid-skill-only.md"), '---\ndescription: "invalid skill only"\nskill: 42\n---\nbody');
+
+		const result = loadPromptsWithModel(cwd, false);
+		assert.equal(result.prompts.has("invalid-skill-only"), false);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "invalid-skills"), true);
+
+		const records = collectPromptSourceRecords(cwd, false);
+		assert.equal(records.records.some((record) => record.promptName === "invalid-skill-only"), false);
+		assert.equal(records.diagnostics.some((diagnostic) => diagnostic.code === "invalid-skills"), true);
+	});
+});
+
+test("source records exclude model-less invalid skill only when including plain prompts", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "invalid-skill-only.md"), '---\ndescription: "invalid skill only"\nskill: 42\n---\nbody');
+
+		const runtime = loadPromptsWithModel(cwd, true);
+		assert.equal(runtime.prompts.has("invalid-skill-only"), false);
+		assert.equal(runtime.diagnostics.some((diagnostic) => diagnostic.code === "invalid-skills"), true);
+
+		const records = collectPromptSourceRecords(cwd, true);
+		assert.equal(records.records.some((record) => record.promptName === "invalid-skill-only"), false);
+		assert.equal(records.diagnostics.some((diagnostic) => diagnostic.code === "invalid-skills"), true);
 	});
 });
 

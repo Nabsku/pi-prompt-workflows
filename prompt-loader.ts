@@ -4,7 +4,12 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { parseChainDeclaration } from "./chain-parser.js";
-import { hasPromptIncludeDirectives, renderPromptIncludes } from "./prompt-includes.js";
+import {
+	extractPromptInlineIncludes,
+	hasPromptIncludeDirectives,
+	hasPromptIncludesPlaceholder,
+	renderPromptIncludes,
+} from "./prompt-includes.js";
 
 const VALID_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
 export const RESERVED_COMMAND_NAMES = new Set([
@@ -105,6 +110,26 @@ export interface PromptLoaderDiagnostic {
 
 export interface LoadPromptsWithModelResult {
 	prompts: Map<string, PromptWithModel>;
+	diagnostics: PromptLoaderDiagnostic[];
+}
+
+export interface PromptSourceRecord {
+	promptName: string;
+	filePath: string;
+	promptRoot: string;
+	cwd: string;
+	source: PromptSource;
+	rawBody: string;
+	includes?: string[];
+	hasInlineIncludes: boolean;
+	hasIncludesPlaceholder: boolean;
+	isChainWrapper: boolean;
+	includeMetadataInvalid?: boolean;
+	skippedReason?: string;
+}
+
+export interface CollectPromptSourceRecordsResult {
+	records: PromptSourceRecord[];
 	diagnostics: PromptLoaderDiagnostic[];
 }
 
@@ -2009,6 +2034,257 @@ function loadPromptsWithModelFromDir(
 	}
 
 	return { prompts, diagnostics };
+}
+
+function collectPromptSourceRecordsFromDir(
+	dir: string,
+	source: PromptSource,
+	includePlainPrompts: boolean,
+	loadCwd: string,
+	promptRoot = dir,
+	subdir = "",
+	visitedDirectories = new Set<string>(),
+): { records: PromptSourceRecord[]; diagnostics: PromptLoaderDiagnostic[] } {
+	const records: PromptSourceRecord[] = [];
+	const diagnostics: PromptLoaderDiagnostic[] = [];
+
+	if (!existsSync(dir)) {
+		return { records, diagnostics };
+	}
+
+	let canonicalDir: string;
+	try {
+		canonicalDir = realpathSync(dir);
+	} catch (error) {
+		diagnostics.push(
+			createDiagnostic(
+				"unreadable-directory",
+				dir,
+				source,
+				`Skipping prompt directory ${dir}: ${error instanceof Error ? error.message : String(error)}.`,
+			),
+		);
+		return { records, diagnostics };
+	}
+
+	if (visitedDirectories.has(canonicalDir)) {
+		diagnostics.push(
+			createDiagnostic(
+				"directory-cycle",
+				dir,
+				source,
+				`Skipping already visited prompt directory at ${dir}.`,
+			),
+		);
+		return { records, diagnostics };
+	}
+
+	visitedDirectories.add(canonicalDir);
+
+	try {
+		const entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) => lexicalCompare(a.name, b.name));
+
+		for (const entry of entries) {
+			const fullPath = join(dir, entry.name);
+
+			let isFile = entry.isFile();
+			let isDirectory = entry.isDirectory();
+			if (entry.isSymbolicLink()) {
+				try {
+					const stats = statSync(fullPath);
+					isFile = stats.isFile();
+					isDirectory = stats.isDirectory();
+				} catch (error) {
+					diagnostics.push(
+						createDiagnostic(
+							"unreadable-symlink",
+							fullPath,
+							source,
+							`Skipping unreadable symlink at ${fullPath}: ${error instanceof Error ? error.message : String(error)}.`,
+						),
+					);
+					continue;
+				}
+			}
+
+			if (isDirectory) {
+				const nextSubdir = subdir ? `${subdir}:${entry.name}` : entry.name;
+				const nested = collectPromptSourceRecordsFromDir(fullPath, source, includePlainPrompts, loadCwd, promptRoot, nextSubdir, visitedDirectories);
+				records.push(...nested.records);
+				diagnostics.push(...nested.diagnostics);
+				continue;
+			}
+
+			if (!isFile || !entry.name.endsWith(".md")) continue;
+
+			try {
+				const rawContent = readFileSync(fullPath, "utf-8");
+				const parsed = parseFrontmatter<Record<string, unknown>>(rawContent);
+				const frontmatter = normalizeFrontmatterRecord(parsed.frontmatter, fullPath, source, diagnostics);
+				if (!frontmatter) continue;
+
+				const promptName = entry.name.slice(0, -3);
+				if (RESERVED_COMMAND_NAMES.has(promptName)) {
+					records.push({
+						promptName,
+						filePath: fullPath,
+						promptRoot,
+						cwd: loadCwd,
+						source,
+						rawBody: parsed.body,
+						hasInlineIncludes: false,
+						hasIncludesPlaceholder: false,
+						isChainWrapper: false,
+						skippedReason: "reserved-command-name",
+					});
+					continue;
+				}
+
+				const includesDiagnosticStart = diagnostics.length;
+				const includesResult = normalizePromptIncludes(frontmatter, fullPath, source, diagnostics);
+				const includes = includesResult.ok ? includesResult.includes : undefined;
+				const chain = normalizeChain(frontmatter.chain, fullPath, source, diagnostics);
+				const isChainWrapper = chain !== undefined;
+				const includeMetadataInvalid = !includesResult.ok || (isChainWrapper && includesResult.ok && includesResult.declaredKey !== undefined);
+				const skippedReason = !includesResult.ok ? diagnostics[includesDiagnosticStart]?.code : includeMetadataInvalid ? "invalid-includes-chain" : undefined;
+				const hasInlineIncludes = isChainWrapper ? false : extractPromptInlineIncludes(parsed.body).length > 0;
+				const hasIncludesPlaceholder = isChainWrapper ? false : hasPromptIncludesPlaceholder(parsed.body);
+
+				const fresh = normalizeFresh(frontmatter.fresh, fullPath, source, diagnostics);
+				const loop = normalizeLoop(frontmatter.loop, fullPath, source, diagnostics);
+				const converge = normalizeConverge(frontmatter.converge, fullPath, source, diagnostics);
+				const boomerang = normalizeBoomerang(frontmatter.boomerang, fullPath, source, diagnostics);
+
+				if (!includePlainPrompts) {
+					const hasModelField = Object.hasOwn(frontmatter, "model");
+					const hasSourceGraphFeature =
+						isChainWrapper ||
+						includes !== undefined ||
+						hasInlineIncludes ||
+						hasIncludesPlaceholder ||
+						Object.hasOwn(frontmatter, "skill") ||
+						Object.hasOwn(frontmatter, "skills") ||
+						fresh === true ||
+						loop !== undefined ||
+						converge === false ||
+						boomerang === true ||
+						Object.hasOwn(frontmatter, "subagent") ||
+						Object.hasOwn(frontmatter, "parallel") ||
+						Object.hasOwn(frontmatter, "deterministic") ||
+						Object.hasOwn(frontmatter, "run") ||
+						Object.hasOwn(frontmatter, "script") ||
+						Object.hasOwn(frontmatter, "bestOfN") ||
+						Object.hasOwn(frontmatter, "worktree") ||
+						/<if-model(?:\s|>)|<else(?:\s|>)|<\/if-model\s*>|<\/else(?:\s|>)/.test(parsed.body);
+					if (!hasModelField && !hasSourceGraphFeature) continue;
+				}
+
+				records.push({
+					promptName,
+					filePath: fullPath,
+					promptRoot,
+					cwd: loadCwd,
+					source,
+					rawBody: parsed.body,
+					...(includes !== undefined ? { includes } : {}),
+					hasInlineIncludes,
+					hasIncludesPlaceholder,
+					isChainWrapper,
+					...(includeMetadataInvalid ? { includeMetadataInvalid: true, skippedReason } : {}),
+				});
+			} catch (error) {
+				diagnostics.push(
+					createDiagnostic(
+						"invalid-prompt-file",
+						fullPath,
+						source,
+						`Skipping prompt template at ${fullPath}: ${error instanceof Error ? error.message : String(error)}.`,
+					),
+				);
+			}
+		}
+	} catch (error) {
+		diagnostics.push(
+			createDiagnostic(
+				"unreadable-directory",
+				dir,
+				source,
+				`Skipping prompt directory ${dir}: ${error instanceof Error ? error.message : String(error)}.`,
+			),
+		);
+	}
+
+	return { records, diagnostics };
+}
+
+function dedupeDiagnostics(diagnostics: PromptLoaderDiagnostic[]): PromptLoaderDiagnostic[] {
+	const seen = new Set<string>();
+	const deduped: PromptLoaderDiagnostic[] = [];
+	for (const diagnostic of diagnostics) {
+		if (seen.has(diagnostic.key)) continue;
+		seen.add(diagnostic.key);
+		deduped.push(diagnostic);
+	}
+	return deduped;
+}
+
+function isIncludeGraphRelevantSkippedRecord(record: PromptSourceRecord): boolean {
+	return record.includes !== undefined || record.hasInlineIncludes || record.hasIncludesPlaceholder || record.includeMetadataInvalid === true;
+}
+
+export function collectPromptSourceRecords(cwd: string, includePlainPrompts = true): CollectPromptSourceRecordsResult {
+	const globalDir = join(homedir(), ".pi", "agent", "prompts");
+	const projectDir = resolve(cwd, ".pi", "prompts");
+	const recordMap = new Map<string, PromptSourceRecord>();
+	const diagnostics: PromptLoaderDiagnostic[] = [];
+	const loaderResult = loadPromptsWithModel(cwd, includePlainPrompts);
+	const effectivePromptPaths = new Set([...loaderResult.prompts.values()].map((prompt) => prompt.filePath));
+
+	function addRecord(record: PromptSourceRecord) {
+		if (!effectivePromptPaths.has(record.filePath) && !isIncludeGraphRelevantSkippedRecord(record)) {
+			return;
+		}
+
+		const existing = recordMap.get(record.promptName);
+		if (!existing) {
+			recordMap.set(record.promptName, record);
+			return;
+		}
+
+		const existingIsEffective = effectivePromptPaths.has(existing.filePath);
+		const recordIsEffective = effectivePromptPaths.has(record.filePath);
+		if (existing.source === record.source) {
+			if (!existingIsEffective && recordIsEffective) {
+				recordMap.set(record.promptName, record);
+				return;
+			}
+			if (!existingIsEffective || !recordIsEffective) {
+				return;
+			}
+			diagnostics.push(
+				createDiagnostic(
+					"duplicate-command-name",
+					record.filePath,
+					record.source,
+					`Skipping ${record.source} prompt template "${record.promptName}" at ${record.filePath} because it conflicts with ${existing.filePath}.`,
+				),
+			);
+			return;
+		}
+
+		if (existingIsEffective && !recordIsEffective) {
+			return;
+		}
+		recordMap.set(record.promptName, record);
+	}
+
+	const globalResult = collectPromptSourceRecordsFromDir(globalDir, "user", true, cwd, globalDir);
+	const projectResult = collectPromptSourceRecordsFromDir(projectDir, "project", true, cwd, projectDir);
+	diagnostics.push(...globalResult.diagnostics, ...projectResult.diagnostics);
+	for (const record of globalResult.records) addRecord(record);
+	for (const record of projectResult.records) addRecord(record);
+
+	return { records: [...recordMap.values()], diagnostics: dedupeDiagnostics([...diagnostics, ...loaderResult.diagnostics]) };
 }
 
 export function loadPromptsWithModel(cwd: string, includePlainPrompts = false): LoadPromptsWithModelResult {
