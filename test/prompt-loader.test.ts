@@ -1266,6 +1266,64 @@ test("loadPromptsWithModel avoids recursive symlink loops", () => {
 	});
 });
 
+test("loadPromptsWithModel rejects symlinked prompt-library roots", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const outsideLibrary = join(root, "outside-library");
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		mkdirSync(outsideLibrary, { recursive: true });
+		writeFileSync(join(outsideLibrary, "external.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nexternal command");
+		symlinkSync(outsideLibrary, join(cwd, ".pi", "prompt-library"), "dir");
+
+		const runtime = loadPromptsWithModel(cwd);
+		assert.equal(runtime.prompts.has("external"), false);
+		assert.equal(runtime.diagnostics.some((diagnostic) => diagnostic.code === "symlink-outside-prompt-root"), true);
+
+		const records = collectPromptSourceRecords(cwd, true);
+		assert.equal(records.records.some((record) => record.promptName === "external"), false);
+		assert.equal(records.diagnostics.some((diagnostic) => diagnostic.code === "symlink-outside-prompt-root"), true);
+	});
+});
+
+test("loadPromptsWithModel rejects visible symlinks to dot-prefixed prompt-library targets", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const projectLibrary = join(cwd, ".pi", "prompt-library");
+		mkdirSync(join(projectLibrary, ".hidden-dir"), { recursive: true });
+		writeFileSync(join(projectLibrary, ".hidden.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nhidden file command");
+		writeFileSync(join(projectLibrary, ".hidden-dir", "nested.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nhidden dir command");
+		symlinkSync(join(projectLibrary, ".hidden.md"), join(projectLibrary, "visible-file.md"), "file");
+		symlinkSync(join(projectLibrary, ".hidden-dir"), join(projectLibrary, "visible-dir"), "dir");
+
+		const runtime = loadPromptsWithModel(cwd, true);
+		assert.equal(runtime.prompts.has("visible-file"), false);
+		assert.equal(runtime.prompts.has("nested"), false);
+		assert.equal(runtime.diagnostics.filter((diagnostic) => diagnostic.code === "dot-prefixed-prompt-library-entry").length, 2);
+
+		const records = collectPromptSourceRecords(cwd, true);
+		assert.equal(records.records.some((record) => record.promptName === "visible-file"), false);
+		assert.equal(records.records.some((record) => record.promptName === "nested"), false);
+		assert.equal(records.diagnostics.filter((diagnostic) => diagnostic.code === "dot-prefixed-prompt-library-entry").length, 2);
+	});
+});
+
+test("prompt-library includes reject dot-prefixed files and directories", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const projectLibrary = join(cwd, ".pi", "prompt-library");
+		mkdirSync(join(projectLibrary, ".hidden-dir"), { recursive: true });
+		writeFileSync(join(projectLibrary, "hidden-file.md"), "---\nmodel: claude-sonnet-4-20250514\ninclude: .hidden.md\n---\nbody");
+		writeFileSync(join(projectLibrary, "hidden-dir.md"), "---\nmodel: claude-sonnet-4-20250514\ninclude: .hidden-dir/rules.md\n---\nbody");
+		writeFileSync(join(projectLibrary, ".hidden.md"), "hidden file rules");
+		writeFileSync(join(projectLibrary, ".hidden-dir", "rules.md"), "hidden dir rules");
+
+		const result = loadPromptsWithModel(cwd, true);
+		assert.equal(result.prompts.has("hidden-file"), false);
+		assert.equal(result.prompts.has("hidden-dir"), false);
+		assert.equal(result.diagnostics.filter((diagnostic) => diagnostic.code === "include-dotfile-disallowed").length, 2);
+	});
+});
+
 test("loadPromptsWithModel rejects non-object frontmatter roots", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");

@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { hasTrustRequiringProjectResources, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
 	extractChainContextFlag,
@@ -128,6 +128,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	let accumulatedSummaries: string[] = [];
 	let lastDiagnostics = "";
 	let storedCommandCtx: ExtensionCommandContext | null = null;
+	const approvedProjectPromptLibraryCwds = new Set<string>();
 	const UNLIMITED_LOOP_CAP = 999;
 
 	const toolManager = createToolManager(pi, {
@@ -146,6 +147,60 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 	function getCurrentModel(ctx: Pick<ExtensionContext, "model">): Model<any> | undefined {
 		return runtimeModel ?? ctx.model;
+	}
+
+	function isProjectPromptLibraryPrompt(prompt: PromptWithModel): boolean {
+		return prompt.source === "project" && prompt.rootKind === "prompt-library";
+	}
+
+	function contextIsProjectTrusted(ctx: ExtensionContext): boolean {
+		const checker = (ctx as ExtensionContext & { isProjectTrusted?: () => boolean }).isProjectTrusted;
+		return typeof checker === "function" ? checker() : true;
+	}
+
+	function needsExtensionProjectPromptLibraryApproval(ctx: ExtensionContext): boolean {
+		// Older Pi versions do not treat .pi/prompt-library as a trust-requiring
+		// project resource. In that case ctx.isProjectTrusted() can be true simply
+		// because Pi saw no core-known resources. Require extension-local session
+		// approval before executing project prompt-library commands.
+		return !contextIsProjectTrusted(ctx) || !hasTrustRequiringProjectResources(ctx.cwd);
+	}
+
+	async function ensureProjectPromptLibraryApproved(prompt: PromptWithModel, ctx: ExtensionCommandContext): Promise<boolean> {
+		if (!isProjectPromptLibraryPrompt(prompt)) return true;
+		if (!needsExtensionProjectPromptLibraryApproval(ctx)) return true;
+
+		const cwdKey = resolvePath(ctx.cwd);
+		if (approvedProjectPromptLibraryCwds.has(cwdKey)) return true;
+
+		const message =
+			`Project prompt-library command \`${prompt.name}\` is loaded from ${prompt.filePath}. ` +
+			"Pi core project trust may not cover .pi/prompt-library in this version. Approve running project prompt-library commands for this session?";
+
+		if (!ctx.hasUI || typeof (ctx.ui as { confirm?: unknown }).confirm !== "function") {
+			notify(ctx, `${message} Run in an interactive UI session and approve it, or move trusted commands to .pi/prompts.`, "error");
+			return false;
+		}
+
+		const approved = await ctx.ui.confirm("Approve project prompt-library command", message, { timeout: 30_000 });
+		if (!approved) {
+			notify(ctx, `Project prompt-library command \`${prompt.name}\` was not approved.`, "warning");
+			return false;
+		}
+
+		approvedProjectPromptLibraryCwds.add(cwdKey);
+		return true;
+	}
+
+	async function ensureProjectPromptLibraryStepsApproved(promptsToCheck: PromptWithModel[], ctx: ExtensionCommandContext): Promise<boolean> {
+		const seen = new Set<string>();
+		for (const prompt of promptsToCheck) {
+			const key = prompt.filePath;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return false;
+		}
+		return true;
 	}
 
 	pi.registerMessageRenderer<SkillLoadedDetails>("skill-loaded", renderSkillLoaded);
@@ -227,6 +282,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		taskPreamble?: string,
 		loopContext?: string,
 	): Promise<PromptStepResult | "aborted"> {
+		if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return "aborted";
+
 		const requestedSkills = getRequestedSkills(prompt);
 		const skillResolution = resolvePromptSkills(requestedSkills, ctx.cwd, pi.getCommands() as RuntimeSkillCommand[]);
 		if (skillResolution.kind === "error") {
@@ -682,6 +739,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		currentModel: Model<any> | undefined,
 		runtime: { cwd?: string; model?: string; subagentOverride?: SubagentOverride; fork?: boolean },
 	) {
+		if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return;
+
 		if (runtime.subagentOverride) {
 			notify(ctx, `--subagent is not supported for compare prompts (ignored)`, "warning");
 		}
@@ -1239,6 +1298,11 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 							taskPreamble = `[Previous chain steps]\n\n${chainStepSummaries.join("\n\n")}`;
 						}
 
+						if (!(await ensureProjectPromptLibraryStepsApproved(stepTemplate.tasks.map((task) => task.prompt), ctx))) {
+							aborted = true;
+							break;
+						}
+
 						let delegated;
 						try {
 							delegated = await executeSubagentPromptStep({
@@ -1573,6 +1637,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			notify(ctx, `Prompt "${name}" no longer exists`, "error");
 			return;
 		}
+		if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return;
 
 		const subagent = extractSubagentOverride(args);
 		const runtimeCwd = subagent.cwd ? expandCwdPath(subagent.cwd) : undefined;
@@ -1723,6 +1788,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 	function resetSessionScopedState(ctx: ExtensionContext) {
 		storedCommandCtx = null;
+		approvedProjectPromptLibraryCwds.clear();
 		pendingSkillMessage = undefined;
 		previousModel = undefined;
 		previousThinking = undefined;

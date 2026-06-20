@@ -63,7 +63,7 @@ async function withTempHome(run: (root: string) => Promise<void>) {
 	}
 }
 
-function createContext(cwd: string, pi: FakePi) {
+function createContext(cwd: string, pi: FakePi, options: { trusted?: boolean; hasUI?: boolean; confirm?: () => boolean | Promise<boolean> } = {}) {
 	return {
 		cwd,
 		get model() { return pi.currentModel; },
@@ -74,15 +74,17 @@ function createContext(cwd: string, pi: FakePi) {
 			async getApiKeyAndHeaders() { return { ok: true, apiKey: "token" }; },
 			isUsingOAuth() { return false; },
 		},
-		hasUI: true,
+		hasUI: options.hasUI ?? true,
 		ui: {
 			notify(message: string, type: string) { pi.notifications.push({ message, type }); },
 			writeStderr(message: string) { pi.stderr.push(message); },
 			setStatus() {},
 			setWorkingMessage() {},
 			onTerminalInput() { return () => {}; },
+			async confirm() { return options.confirm ? await options.confirm() : true; },
 			theme: { fg(_token: string, text: string) { return text; } },
 		},
+		isProjectTrusted() { return options.trusted ?? true; },
 		isIdle() { return false; },
 		async waitForIdle() { pi.waitForIdleCalls++; },
 		sessionManager: { getLeafId() { return "root"; }, getBranch() { return []; } },
@@ -345,5 +347,76 @@ test("prompt-library reserved names do not overwrite extension slash commands", 
 		assert.equal(pi.notifications.at(-1)?.type, "error");
 		assert.match(pi.notifications.at(-1)?.message ?? "", /Prompt "print-prompt" not found/);
 		assertNoExecutionSideEffects(pi);
+	});
+});
+
+test("project prompt-library execution blocks in untrusted non-UI contexts", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(cwd, { recursive: true });
+		writeLibraryPrompt(cwd, "review-lib", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nLibrary review $@");
+		const pi = new FakePi();
+		const ctx = createContext(cwd, pi, { trusted: false, hasUI: false });
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("review-lib")!.handler!("src/server.ts", ctx);
+
+		assert.equal(pi.userMessages.length, 0);
+	});
+});
+
+test("project prompt-library execution asks once for session approval in untrusted UI contexts", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(cwd, { recursive: true });
+		writeLibraryPrompt(cwd, "review-lib", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nLibrary review $@");
+		const pi = new FakePi();
+		let confirmCalls = 0;
+		const ctx = createContext(cwd, pi, {
+			trusted: false,
+			confirm: () => {
+				confirmCalls++;
+				return true;
+			},
+		});
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("review-lib")!.handler!("one", ctx);
+		await pi.commands.get("review-lib")!.handler!("two", ctx);
+		await pi.emit("session_start", {}, ctx);
+		await pi.commands.get("review-lib")!.handler!("three", ctx);
+
+		assert.equal(confirmCalls, 2);
+		assert.equal(pi.userMessages.length, 3);
+		assert.match(pi.userMessages[0] ?? "", /Library review one/);
+		assert.match(pi.userMessages[1] ?? "", /Library review two/);
+		assert.match(pi.userMessages[2] ?? "", /Library review three/);
+	});
+});
+
+test("project prompt-library execution asks when Pi trust is true only because core saw no resources", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(cwd, { recursive: true });
+		writeLibraryPrompt(cwd, "review-lib", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nLibrary review $@");
+		const pi = new FakePi();
+		let confirmCalls = 0;
+		const ctx = createContext(cwd, pi, {
+			trusted: true,
+			confirm: () => {
+				confirmCalls++;
+				return true;
+			},
+		});
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("review-lib")!.handler!("one", ctx);
+		await pi.commands.get("review-lib")!.handler!("two", ctx);
+
+		assert.equal(confirmCalls, 1);
+		assert.equal(pi.userMessages.length, 2);
 	});
 });

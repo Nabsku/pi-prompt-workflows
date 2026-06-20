@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { formatPromptValidationReport, validatePromptTemplates } from "../prompt-validation.js";
@@ -669,6 +669,44 @@ test("validatePromptTemplates ignores unsafe registered wildcard matches", () =>
 
 		assert.equal(result.ok, false);
 		assert.deepEqual(result.diagnostics.map((diagnostic) => diagnostic.code), ["skill-wildcard-not-found"]);
+	});
+});
+
+test("validatePromptTemplates skips prompt-library symlinks that escape the prompt root", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const libraryRoot = join(cwd, ".pi", "prompt-library");
+		const externalRoot = join(root, "external-prompts");
+		mkdirSync(libraryRoot, { recursive: true });
+		mkdirSync(externalRoot, { recursive: true });
+		writeFileSync(join(externalRoot, "escape.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nExternal command");
+		symlinkSync(externalRoot, join(libraryRoot, "linked-dir"), "dir");
+		symlinkSync(join(externalRoot, "escape.md"), join(libraryRoot, "linked-file.md"), "file");
+
+		const result = validatePromptTemplates(cwd);
+
+		assert.equal(result.ok, false);
+		assert.equal(result.promptCount, 0);
+		assert.ok(result.diagnostics.filter((diagnostic) => diagnostic.code === "symlink-outside-prompt-root").length >= 2);
+	});
+});
+
+test("validatePromptTemplates skips dot-prefixed files and directories in prompt-library", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const libraryRoot = join(cwd, ".pi", "prompt-library");
+		mkdirSync(join(libraryRoot, ".hidden-dir"), { recursive: true });
+		writeFileSync(join(libraryRoot, ".hidden.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nHidden file command");
+		writeFileSync(join(libraryRoot, ".hidden-dir", "nested.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nHidden directory command");
+		writeFileSync(join(libraryRoot, "visible.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nVisible command");
+
+		const result = validatePromptTemplates(cwd);
+
+		assert.equal(result.ok, true);
+		assert.equal(result.promptCount, 1);
+		assert.equal(result.includeGraphs.some((entry) => entry.root.promptName === ".hidden"), false);
+		assert.equal(result.includeGraphs.some((entry) => entry.root.promptName === "nested"), false);
+		assert.equal(result.includeGraphs.some((entry) => entry.root.promptName === "visible"), true);
 	});
 });
 

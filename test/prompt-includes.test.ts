@@ -790,6 +790,28 @@ test("prompt-library prompts include sibling relative partials", () => {
 	});
 });
 
+test("prompt-library includes reject dot-prefixed path segments while legacy prompt-partials still allow them", () => {
+	withFixture((fixture) => {
+		mkdirSync(join(fixture.projectLibrary, ".hidden-dir"), { recursive: true });
+		writeFileSync(join(fixture.projectLibrary, ".hidden.md"), "hidden file rules");
+		writeFileSync(join(fixture.projectLibrary, ".hidden-dir", "rules.md"), "hidden dir rules");
+
+		const hiddenFile = render(fixture, "body", [".hidden.md"]);
+		assertFail(hiddenFile);
+		assert.equal(hiddenFile.diagnostics.some((diagnostic) => diagnostic.code === "include-dotfile-disallowed"), true);
+
+		const hiddenDir = render(fixture, "body", [".hidden-dir/rules.md"]);
+		assertFail(hiddenDir);
+		assert.equal(hiddenDir.diagnostics.some((diagnostic) => diagnostic.code === "include-dotfile-disallowed"), true);
+
+		mkdirSync(join(fixture.projectPartials, ".legacy"), { recursive: true });
+		writeFileSync(join(fixture.projectPartials, ".legacy", "rules.md"), "legacy hidden partial rules");
+		const legacyPartial = render(fixture, "body", [".legacy/rules.md"]);
+		assertOk(legacyPartial);
+		assert.equal(legacyPartial.content, "legacy hidden partial rules\n\nbody");
+	});
+});
+
 test("project prompts fall back to user prompt-library when project library has no match", () => {
 	withFixture((fixture) => {
 		mkdirSync(join(fixture.userLibrary, "partials"), { recursive: true });

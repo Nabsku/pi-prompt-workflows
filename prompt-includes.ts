@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
+import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { PromptLoaderDiagnostic, PromptRootKind, PromptSource, PromptSourceRecord } from "./prompt-loader.js";
 
 export interface RenderPromptIncludesInput {
@@ -79,6 +79,7 @@ interface IncludeRoot {
 	path: string;
 	canonicalPath?: string;
 	expectedCanonicalPath?: string | null;
+	rejectDotPrefixedSegments?: boolean;
 }
 
 interface IncludeRenderContext {
@@ -268,11 +269,13 @@ function createIncludeRenderContext(input: RenderPromptIncludesInput & { diagnos
 		label: "project prompt-library",
 		path: resolve(join(input.cwd, ".pi", "prompt-library")),
 		expectedCanonicalPath: canonicalCwd ? resolve(canonicalCwd, ".pi", "prompt-library") : null,
+		rejectDotPrefixedSegments: true,
 	};
 	const userPromptLibrary: IncludeRoot = {
 		label: "user prompt-library",
 		path: resolve(join(homeDir, ".pi", "agent", "prompt-library")),
 		expectedCanonicalPath: canonicalHomeDir ? resolve(canonicalHomeDir, ".pi", "agent", "prompt-library") : null,
+		rejectDotPrefixedSegments: true,
 	};
 	const globalPromptPartials: IncludeRoot = {
 		label: "global prompt partials",
@@ -287,6 +290,7 @@ function createIncludeRenderContext(input: RenderPromptIncludesInput & { diagnos
 	const promptRoot: IncludeRoot = {
 		label: "original prompt root",
 		path: resolve(input.promptRoot),
+		...(input.rootKind === "prompt-library" ? { rejectDotPrefixedSegments: true } : {}),
 		...(resolve(input.promptRoot) === projectPromptLibrary.path ? { expectedCanonicalPath: projectPromptLibrary.expectedCanonicalPath } : {}),
 		...(resolve(input.promptRoot) === userPromptLibrary.path ? { expectedCanonicalPath: userPromptLibrary.expectedCanonicalPath } : {}),
 	};
@@ -896,6 +900,18 @@ function validateExistingIncludeCandidate(
 		return undefined;
 	}
 
+	if (hasDotPrefixedSegmentUnderPromptLibrary(candidate, canonicalPath, context)) {
+		context.diagnostics.push(
+			createDiagnostic(
+				context,
+				currentFilePath,
+				"include-dotfile-disallowed",
+				`Prompt include ${JSON.stringify(includePath)} is not allowed: dot-prefixed files and directories under prompt-library roots are ignored.`,
+			),
+		);
+		return undefined;
+	}
+
 	if (!hasMarkdownExtension(canonicalPath)) {
 		context.diagnostics.push(
 			createDiagnostic(
@@ -945,6 +961,19 @@ function hasUrlScheme(path: string): boolean {
 
 function hasGlobMeta(path: string): boolean {
 	return GLOB_META_PATTERN.test(path);
+}
+
+function hasDotPrefixedSegmentUnderPromptLibrary(candidate: string, canonicalPath: string, context: IncludeRenderContext): boolean {
+	for (const root of context.knownRoots) {
+		if (!root.rejectDotPrefixedSegments || !root.canonicalPath) continue;
+		if (isPathInside(root.path, candidate) && hasDotPrefixedSegment(relative(resolve(root.path), resolve(candidate)))) return true;
+		if (isPathInside(root.canonicalPath, canonicalPath) && hasDotPrefixedSegment(relative(root.canonicalPath, canonicalPath))) return true;
+	}
+	return false;
+}
+
+function hasDotPrefixedSegment(path: string): boolean {
+	return path.split(/[\\/]+/).some((segment) => segment.startsWith("."));
 }
 
 function isPathInsideAny(roots: string[], path: string): boolean {

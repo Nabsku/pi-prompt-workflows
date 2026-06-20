@@ -162,6 +162,9 @@ function createContext(
 			notify(message: string) {
 				notifications.push(message);
 			},
+			async confirm() {
+				return true;
+			},
 			setStatus() {},
 			theme: {
 				fg(_token: string, text: string) {

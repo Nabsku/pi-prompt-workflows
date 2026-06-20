@@ -324,7 +324,13 @@ Prompt includes let you write the common parts of your prompts once and reuse th
 
 `.pi/prompt-library/` is an extension-managed prompt library. Pi core does not load files from this directory. If you want a file managed only by this extension rather than Pi core, place it in `.pi/prompt-library/` instead of `.pi/prompts/`.
 
-Prompt-library files can be executable extension prompt templates, chain steps, or include targets. A prompt-library file becomes an extension command only when it is command-capable under the same rules as `.pi/prompts` templates: for example, it has extension frontmatter such as `model`, `chain`, `skill`, `skills`, `include`, `includes`, or other supported extension fields. Plain Markdown fragments under `partials/` are intended to be included and should not appear as slash commands, chain steps, or dry-run targets.
+User prompt-library files live at `~/.pi/agent/prompt-library/` (that is the current OS user's home directory as reported by the runtime, not the repository root).
+
+Prompt-library files can be executable extension prompt templates, chain steps, or include targets. A prompt-library file becomes an extension command only when it is command-capable under the same rules as `.pi/prompts` templates: for example, it has extension frontmatter such as `model`, `chain`, `skill`, `skills`, `include`, `includes`, or other supported extension fields. Plain Markdown fragments under `partials/` are intended to be included and should not appear as slash commands, chain steps, or dry-run targets. The `partials/` directory name is a convention, not an enforced policy: any plain, non-command-capable prompt-library Markdown file can be included, and command-capable files can live under any non-hidden directory.
+
+Dot-prefixed files and directories under prompt-library roots are ignored. Symlinks are followed only when their resolved target remains inside the canonical prompt root; symlinks that escape the root are skipped.
+
+Project prompt-library commands are protected by Pi's project trust when the core runtime marks the project trusted. Some Pi core versions may not include `.pi/prompt-library/` in their project trust resource discovery. As an extension-side mitigation, running an untrusted project prompt-library command requires a per-session UI approval; non-UI contexts block execution until the project is trusted or the command is moved to a trusted prompt root such as `.pi/prompts/`.
 
 For example, a project prompt can include a standards fragment from the project prompt library:
 
@@ -450,6 +456,8 @@ With that layout, `review.md` can include `shared/repo-rules.md`, `partials/repo
 - `chain:` wrapper templates cannot use frontmatter `include` or `includes` in v1. Put includes on the step templates instead.
 - `~/...` paths are allowed only when they resolve under a Pi prompt root or prompt-partials root. Other absolute paths are rejected.
 - Include boundary comments appear only in debug/diagnostic mode. Normal prompt content does not contain `<!-- BEGIN include ... -->` / `<!-- END include ... -->` comments.
+- Prompt and prompt-library command names are still plain basenames. There is no source or directory namespace for slash commands; if two effective templates use the same basename, normal source precedence/duplicate handling decides which one registers.
+- `validate-prompts` validates extension-visible prompts, command-capable prompt-library files, and include graphs. It is not a general filesystem audit; plain unreferenced fragments are ignored except when they are pulled into an include graph.
 
 ## Inline Model Conditionals
 

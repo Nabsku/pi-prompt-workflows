@@ -1,6 +1,6 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { parseChainDeclaration } from "./chain-parser.js";
@@ -1547,6 +1547,96 @@ function getPromptRoots(cwd: string): PromptRoot[] {
 	];
 }
 
+function isPathInsideOrEqual(path: string, root: string): boolean {
+	const canonicalPath = realpathSync(path);
+	const canonicalRoot = realpathSync(root);
+	return canonicalPath === canonicalRoot || canonicalPath.startsWith(`${canonicalRoot}/`);
+}
+
+function shouldSkipPromptLibraryEntry(entryName: string, rootKind: PromptRootKind): boolean {
+	return rootKind === "prompt-library" && entryName.startsWith(".");
+}
+
+function hasDotPrefixedPathSegment(path: string): boolean {
+	return path.split(/[\\/]+/).some((segment) => segment.startsWith("."));
+}
+
+function promptLibrarySymlinkTargetHasDotSegment(fullPath: string, promptRoot: string, rootKind: PromptRootKind): boolean {
+	if (rootKind !== "prompt-library") return false;
+	const relativeTarget = relative(realpathSync(promptRoot), realpathSync(fullPath));
+	return relativeTarget.length > 0 && hasDotPrefixedPathSegment(relativeTarget);
+}
+
+function rejectPromptLibrarySymlinkRoot(
+	dir: string,
+	promptRoot: string,
+	rootKind: PromptRootKind,
+	source: PromptSource,
+	diagnostics: PromptLoaderDiagnostic[],
+): boolean {
+	if (rootKind !== "prompt-library" || dir !== promptRoot) return false;
+	try {
+		if (!lstatSync(dir).isSymbolicLink()) return false;
+		diagnostics.push(
+			createDiagnostic(
+				"symlink-outside-prompt-root",
+				dir,
+				source,
+				`Skipping prompt-library root at ${dir}: prompt-library roots must not be symlinks.`,
+			),
+		);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function resolvePromptSymlinkEntryKind(
+	fullPath: string,
+	promptRoot: string,
+	rootKind: PromptRootKind,
+	source: PromptSource,
+	diagnostics: PromptLoaderDiagnostic[],
+): { isFile: boolean; isDirectory: boolean } {
+	try {
+		if (!isPathInsideOrEqual(fullPath, promptRoot)) {
+			diagnostics.push(
+				createDiagnostic(
+					"symlink-outside-prompt-root",
+					fullPath,
+					source,
+					`Skipping symlink at ${fullPath}: resolved target is outside prompt root ${promptRoot}.`,
+				),
+			);
+			return { isFile: false, isDirectory: false };
+		}
+		if (promptLibrarySymlinkTargetHasDotSegment(fullPath, promptRoot, rootKind)) {
+			diagnostics.push(
+				createDiagnostic(
+					"dot-prefixed-prompt-library-entry",
+					fullPath,
+					source,
+					`Skipping symlink at ${fullPath}: resolved target uses dot-prefixed files or directories under prompt-library root ${promptRoot}.`,
+				),
+			);
+			return { isFile: false, isDirectory: false };
+		}
+
+		const stats = statSync(fullPath);
+		return { isFile: stats.isFile(), isDirectory: stats.isDirectory() };
+	} catch (error) {
+		diagnostics.push(
+			createDiagnostic(
+				"unreadable-symlink",
+				fullPath,
+				source,
+				`Skipping unreadable symlink at ${fullPath}: ${error instanceof Error ? error.message : String(error)}.`,
+			),
+		);
+		return { isFile: false, isDirectory: false };
+	}
+}
+
 const MODEL_CONDITIONAL_DIRECTIVE_PATTERN = /<if-model(?:\s|>)|<else(?:\s|>)|<\/if-model\s*>|<\/else(?:\s|>)/;
 
 function isPromptCapable(input: {
@@ -1598,6 +1688,9 @@ function loadPromptsWithModelFromDir(
 	if (!existsSync(dir)) {
 		return { prompts, diagnostics };
 	}
+	if (rejectPromptLibrarySymlinkRoot(dir, promptRoot, rootKind, source, diagnostics)) {
+		return { prompts, diagnostics };
+	}
 
 	let canonicalDir: string;
 	try {
@@ -1633,25 +1726,15 @@ function loadPromptsWithModelFromDir(
 
 		for (const entry of entries) {
 			const fullPath = join(dir, entry.name);
+			if (shouldSkipPromptLibraryEntry(entry.name, rootKind)) continue;
 
 			let isFile = entry.isFile();
 			let isDirectory = entry.isDirectory();
 			if (entry.isSymbolicLink()) {
-				try {
-					const stats = statSync(fullPath);
-					isFile = stats.isFile();
-					isDirectory = stats.isDirectory();
-				} catch (error) {
-					diagnostics.push(
-						createDiagnostic(
-							"unreadable-symlink",
-							fullPath,
-							source,
-							`Skipping unreadable symlink at ${fullPath}: ${error instanceof Error ? error.message : String(error)}.`,
-						),
-					);
-					continue;
-				}
+				const resolvedKind = resolvePromptSymlinkEntryKind(fullPath, promptRoot, rootKind, source, diagnostics);
+				isFile = resolvedKind.isFile;
+				isDirectory = resolvedKind.isDirectory;
+				if (!isFile && !isDirectory) continue;
 			}
 
 			if (isDirectory) {
@@ -2114,6 +2197,9 @@ function collectPromptSourceRecordsFromDir(
 	if (!existsSync(dir)) {
 		return { records, diagnostics };
 	}
+	if (rejectPromptLibrarySymlinkRoot(dir, promptRoot, rootKind, source, diagnostics)) {
+		return { records, diagnostics };
+	}
 
 	let canonicalDir: string;
 	try {
@@ -2149,25 +2235,15 @@ function collectPromptSourceRecordsFromDir(
 
 		for (const entry of entries) {
 			const fullPath = join(dir, entry.name);
+			if (shouldSkipPromptLibraryEntry(entry.name, rootKind)) continue;
 
 			let isFile = entry.isFile();
 			let isDirectory = entry.isDirectory();
 			if (entry.isSymbolicLink()) {
-				try {
-					const stats = statSync(fullPath);
-					isFile = stats.isFile();
-					isDirectory = stats.isDirectory();
-				} catch (error) {
-					diagnostics.push(
-						createDiagnostic(
-							"unreadable-symlink",
-							fullPath,
-							source,
-							`Skipping unreadable symlink at ${fullPath}: ${error instanceof Error ? error.message : String(error)}.`,
-						),
-					);
-					continue;
-				}
+				const resolvedKind = resolvePromptSymlinkEntryKind(fullPath, promptRoot, rootKind, source, diagnostics);
+				isFile = resolvedKind.isFile;
+				isDirectory = resolvedKind.isDirectory;
+				if (!isFile && !isDirectory) continue;
 			}
 
 			if (isDirectory) {

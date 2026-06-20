@@ -27,6 +27,7 @@ const INCLUDE_RELATED_DIAGNOSTIC_CODES = new Set([
 	"include-absolute-disallowed",
 	"include-cycle",
 	"include-depth-exceeded",
+	"include-dotfile-disallowed",
 	"include-glob-disallowed",
 	"include-invalid-path",
 	"include-non-markdown",
