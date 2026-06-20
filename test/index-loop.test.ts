@@ -3061,3 +3061,67 @@ test("parallel chain loops treat delegated worktree diffs as changes", async () 
 		});
 	});
 });
+
+test("prompt-library scalar-skill command execution resolves and injects requested skill", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "skills", "tmux"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "skills", "tmux", "SKILL.md"), "tmux execution skill");
+		writeFileSync(join(cwd, ".pi", "prompt-library", "skilled-lib.md"), "---\nskill: tmux\n---\nTASK $@");
+
+		const pi = new FakePi();
+		const { ctx } = createContext(cwd, pi);
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("skilled-lib")!.handler("demo", ctx);
+		assert.deepEqual(pi.userMessages, ["TASK demo"]);
+		const beforeStart = await pi.emitWithResult("before_agent_start", { systemPrompt: "BASE" }, ctx);
+		const message = beforeStart?.message as { customType?: string; content?: string; details?: { skills?: Array<{ skillName?: string }> } } | undefined;
+		assert.equal(message?.customType, "skill-loaded");
+		assert.match(message?.content ?? "", /tmux execution skill/);
+		assert.equal(message?.details?.skills?.[0]?.skillName, "tmux");
+	});
+});
+
+test("chain-prompts can reference command-capable prompt-library steps", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-library", "analyze.md"), `---\nmodel: ${MODEL_ID}\n---\nANALYZE $@`);
+
+		const pi = new FakePi();
+		const { ctx, getNotifications } = createContext(cwd, pi);
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+
+		const chainPrompts = pi.commands.get("chain-prompts");
+		assert.ok(chainPrompts);
+		await chainPrompts.handler("analyze file.ts", ctx);
+
+		assert.equal(pi.userMessages.length, 1);
+		assert.match(pi.userMessages[0] ?? "", /ANALYZE file\.ts/);
+		assert.ok(!getNotifications().some((message) => /Templates not found: analyze/.test(message)));
+	});
+});
+
+test("chain-prompts cannot reference plain prompt-library fragments", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-library", "rules.md"), "Plain shared rules fragment");
+
+		const pi = new FakePi();
+		const { ctx, getNotifications } = createContext(cwd, pi);
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+
+		const chainPrompts = pi.commands.get("chain-prompts");
+		assert.ok(chainPrompts);
+		await chainPrompts.handler("rules", ctx);
+
+		assert.equal(pi.userMessages.length, 0);
+		assert.ok(getNotifications().some((message) => /Templates not found: rules/.test(message)));
+	});
+});

@@ -20,6 +20,7 @@ interface FakeCommand {
 
 class FakePi {
 	commands = new Map<string, FakeCommand>();
+	commandRegistrations: string[] = [];
 	renderers = new Map<string, unknown>();
 	hooks = new Map<string, Array<(event: any, ctx: any) => Promise<any> | any>>();
 	notifications: Array<{ message: string; type: string }> = [];
@@ -32,7 +33,7 @@ class FakePi {
 	currentModel = SONNET;
 
 	registerMessageRenderer(type: string, renderer: unknown) { this.renderers.set(type, renderer); }
-	registerCommand(name: string, command: FakeCommand) { this.commands.set(name, { ...command, name }); }
+	registerCommand(name: string, command: FakeCommand) { this.commandRegistrations.push(name); this.commands.set(name, { ...command, name }); }
 	registerTool() {}
 	getCommands() { return Array.from(this.commands.values()); }
 	on(event: string, handler: (event: any, ctx: any) => Promise<any> | any) {
@@ -92,6 +93,11 @@ function createContext(cwd: string, pi: FakePi) {
 function writePrompt(cwd: string, name: string, body: string) {
 	mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 	writeFileSync(join(cwd, ".pi", "prompts", `${name}.md`), body);
+}
+
+function writeLibraryPrompt(cwd: string, name: string, body: string) {
+	mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
+	writeFileSync(join(cwd, ".pi", "prompt-library", `${name}.md`), body);
 }
 
 function writeSkill(cwd: string, name: string, content: string) {
@@ -263,6 +269,81 @@ test("unsupported chain, deterministic, and compare prompts report clear errors 
 		await pi.commands.get("print-prompt")!.handler!("compare", ctx);
 		assert.match(pi.notifications.at(-1)!.message, /Dry-run for compare prompts is not supported/);
 		assert.equal(pi.messages.length, 0);
+		assertNoExecutionSideEffects(pi);
+	});
+});
+
+test("command-capable prompt-library prompt registers as slash command and print-prompt renders it without execution", async () => {
+	await setup(async (_root, cwd, pi, ctx) => {
+		writeLibraryPrompt(cwd, "review", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nLibrary review $@");
+		await pi.emit("session_start", {}, ctx);
+
+		assert.ok(pi.commands.has("review"));
+		const output = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("review src/lib.ts", ctx));
+
+		assert.match(output, /# Prompt dry-run: review/);
+		assert.match(output, /Library review src\/lib\.ts/);
+		assertNoExecutionSideEffects(pi);
+	});
+});
+
+test("scalar-skill prompt-library prompt registers and dry-run resolves requested skill", async () => {
+	await setup(async (_root, cwd, pi, ctx) => {
+		writeSkill(cwd, "tmux", "tmux skill content from project");
+		writeLibraryPrompt(cwd, "skilled-lib", "---\nskill: tmux\n---\nUse tmux skill");
+		await pi.emit("session_start", {}, ctx);
+
+		assert.ok(pi.commands.has("skilled-lib"));
+		const output = await captureStdout(() => pi.commands.get("dry-run-prompt")!.handler!("skilled-lib --show-skills", ctx));
+
+		assert.match(output, /Status: ok/);
+		assert.match(output, /Use tmux skill/);
+		assert.match(output, /tmux skill content from project/);
+		assertNoExecutionSideEffects(pi);
+	});
+});
+
+test("plain include-only prompt-library fragment does not register and cannot be printed", async () => {
+	await setup(async (_root, cwd, pi, ctx) => {
+		writeLibraryPrompt(cwd, "rules", "Shared rules fragment only");
+		await pi.emit("session_start", {}, ctx);
+
+		assert.equal(pi.commands.has("rules"), false);
+		await pi.commands.get("print-prompt")!.handler!("rules", ctx);
+		assert.equal(pi.notifications.at(-1)?.type, "error");
+		assert.match(pi.notifications.at(-1)?.message ?? "", /Prompt "rules" not found/);
+		pi.notifications = [];
+		await pi.commands.get("dry-run-prompt")!.handler!("rules", ctx);
+		assert.equal(pi.notifications.at(-1)?.type, "error");
+		assert.match(pi.notifications.at(-1)?.message ?? "", /Prompt "rules" not found/);
+		assertNoExecutionSideEffects(pi);
+	});
+});
+
+test("same-name .pi/prompts and prompt-library registers exactly one effective slash command", async () => {
+	await setup(async (_root, cwd, pi, ctx) => {
+		writePrompt(cwd, "review", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nProject winner");
+		writeLibraryPrompt(cwd, "review", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nLibrary loser");
+		const before = pi.commandRegistrations.length;
+		await pi.emit("session_start", {}, ctx);
+
+		assert.equal(pi.commandRegistrations.slice(before).filter((name) => name === "review").length, 1);
+		const output = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("review", ctx));
+		assert.match(output, /Project winner/);
+		assert.doesNotMatch(output, /Library loser/);
+		assertNoExecutionSideEffects(pi);
+	});
+});
+
+test("prompt-library reserved names do not overwrite extension slash commands", async () => {
+	await setup(async (_root, cwd, pi, ctx) => {
+		writeLibraryPrompt(cwd, "print-prompt", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nShould not register");
+		await pi.emit("session_start", {}, ctx);
+
+		assert.equal(pi.commands.get("print-prompt")?.description, "Print the rendered prompt template without running it");
+		await pi.commands.get("print-prompt")!.handler!("print-prompt", ctx);
+		assert.equal(pi.notifications.at(-1)?.type, "error");
+		assert.match(pi.notifications.at(-1)?.message ?? "", /Prompt "print-prompt" not found/);
 		assertNoExecutionSideEffects(pi);
 	});
 });

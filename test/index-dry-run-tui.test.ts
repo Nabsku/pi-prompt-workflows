@@ -101,6 +101,11 @@ function writePrompt(cwd: string, name: string, body: string) {
 	writeFileSync(join(cwd, ".pi", "prompts", `${name}.md`), body);
 }
 
+function writeLibraryPrompt(cwd: string, name: string, body: string) {
+	mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
+	writeFileSync(join(cwd, ".pi", "prompt-library", `${name}.md`), body);
+}
+
 function assertNoExecutionSideEffects(pi: FakePi) {
 	assert.equal(pi.messages.length, 0);
 	assert.equal(pi.userMessages.length, 0);
@@ -366,6 +371,23 @@ test("TUI picker unsupported selection surfaces dry-run diagnostic without execu
 		assert.equal(pi.customCalls.length, 1);
 		assert.equal(pi.notifications.at(-1)?.type, "error");
 		assert.match(pi.notifications.at(-1)?.message ?? "", /deterministic prompts is not supported/i);
+		assertNoExecutionSideEffects(pi);
+	});
+});
+
+test("TUI picker includes command-capable prompt-library prompts and excludes plain fragments", async () => {
+	await setup("tui", async (cwd, pi, ctx) => {
+		writeLibraryPrompt(cwd, "review-lib", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nLibrary review");
+		writeLibraryPrompt(cwd, "rules", "Plain shared rules fragment");
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("dry-run-prompt")!.handler!("", ctx);
+
+		assert.equal(pi.customCalls.length, 1);
+		const picker = pi.customComponents.at(-1) as { render(width: number): string[] };
+		const rendered = picker.render(1000).join("\n");
+		assert.match(rendered, /review-lib\s+project/);
+		assert.doesNotMatch(rendered, /rules\s+project/);
 		assertNoExecutionSideEffects(pi);
 	});
 });
