@@ -194,7 +194,7 @@ test("inspector default pane is Prompt, shows prompt body, warning badge, and hi
 	const text = renderText(lines);
 
 	assert.match(text, /Prompt dry-run: review/);
-	assert.match(text, /\[Prompt\]|Prompt\s+Metadata\s+Skills/);
+	assert.match(text, /Prompt\s+Metadata\s+Skills\s+Includes\s+Warnings\s+Raw|\[Prompt\]/);
 	assert.match(text, /# Prompt body/);
 	assert.match(text, /Review src\/server\.ts/);
 	assert.match(text, /warning/i);
@@ -202,6 +202,109 @@ test("inspector default pane is Prompt, shows prompt body, warning badge, and hi
 	assert.match(text, /typescript/);
 	assert.doesNotMatch(text, /SECRET FULL TYPESCRIPT SKILL CONTENT/);
 	assert.match(text, /content hidden|--show-skills/i);
+	assertWidthSafe(lines, 72);
+});
+
+test("inspector always exposes an Includes pane and shows No includes when the graph is empty", () => {
+	const inspector = new PromptDryRunInspector(createPromptDryRunTuiViewModel(okResult, plainReport));
+
+	inspector.handleInput("4");
+	const text = renderText(inspector.render(80));
+
+	assert.match(text, /\[Includes\]/);
+	assert.match(text, /No includes\./);
+	assert.match(text, /pane 4\/6/);
+});
+
+test("inspector Includes pane renders root-only include diagnostics without edges", () => {
+	const diagnostic = {
+		code: "include-placeholder-without-includes",
+		message: "Prompt body uses <includes /> but frontmatter is missing includes metadata.",
+		filePath: "/repo/.pi/prompts/review.md",
+		source: "project" as const,
+		key: "root-diagnostic",
+	};
+	const result: PromptDryRunResult = okResult.status === "ok"
+		? {
+			...okResult,
+			includeGraph: {
+				root: {
+					promptName: "review",
+					filePath: "/repo/.pi/prompts/review.md",
+					promptRoot: "/repo/.pi/prompts",
+					cwd: "/repo",
+					source: "project",
+					rawBody: "<includes />",
+					hasInlineIncludes: false,
+					hasIncludesPlaceholder: true,
+					isChainWrapper: false,
+				},
+				nodes: [{ id: "root", kind: "prompt", status: "ok", filePath: "/repo/.pi/prompts/review.md", diagnostics: [diagnostic] }],
+				edges: [],
+				diagnostics: [diagnostic],
+			},
+		}
+		: okResult;
+	const inspector = new PromptDryRunInspector(createPromptDryRunTuiViewModel(result, plainReport));
+
+	inspector.handleInput("4");
+	const text = renderText(inspector.render(120));
+
+	assert.match(text, /- review \[ok\] \/repo\/\.pi\/prompts\/review\.md/);
+	assert.match(text, /! include-placeholder-without-includes: Prompt body uses <includes \/>/);
+	assert.doesNotMatch(text, /No includes\./);
+});
+
+test("inspector Includes pane renders include edges in graph order with diagnostics and stays width-safe", () => {
+	const edgeDiagnostic = {
+		code: "include-not-found\u001b[31m",
+		message: "Missing	partial",
+		filePath: "/repo/.pi/prompts/review.md",
+		source: "project" as const,
+		key: "edge-diagnostic",
+	};
+	const result: PromptDryRunResult = okResult.status === "ok"
+		? {
+			...okResult,
+			includeGraph: {
+				root: {
+					promptName: "review",
+					filePath: "/repo/.pi/prompts/review.md",
+					promptRoot: "/repo/.pi/prompts",
+					cwd: "/repo",
+					source: "project",
+					rawBody: "body",
+					includes: ["b.md", "a.md"],
+					hasInlineIncludes: true,
+					hasIncludesPlaceholder: false,
+					isChainWrapper: false,
+				},
+				nodes: [
+					{ id: "root", kind: "prompt", status: "ok", filePath: "/repo/.pi/prompts/review.md", diagnostics: [] },
+					{ id: "a", kind: "partial", status: "ok", filePath: "/repo/.pi/prompts/a.md", diagnostics: [] },
+					{ id: "b", kind: "partial", status: "ok", filePath: "/repo/.pi/prompts/b.md", diagnostics: [] },
+					{ id: "missing", kind: "unresolved", status: "failed", includePath: "missing\r.md", diagnostics: [edgeDiagnostic] },
+				],
+				edges: [
+					{ fromNodeId: "root", toNodeId: "b", kind: "frontmatter", includePath: "b.md", order: 1, status: "ok", diagnostics: [] },
+					{ fromNodeId: "root", toNodeId: "a", kind: "inline", includePath: "a.md", order: 0, status: "ok", diagnostics: [] },
+					{ fromNodeId: "a", toNodeId: "missing", kind: "inline", includePath: "missing\r.md", order: 2, status: "failed", diagnostics: [edgeDiagnostic] },
+				],
+				diagnostics: [edgeDiagnostic],
+			},
+		}
+		: okResult;
+	const inspector = new PromptDryRunInspector(createPromptDryRunTuiViewModel(result, plainReport));
+
+	inspector.handleInput("4");
+	const wideText = renderText(inspector.render(200));
+	const lines = inspector.render(72);
+	const text = renderText(lines);
+
+	assert.ok(wideText.indexOf("inline a.md") < wideText.indexOf("frontmatter b.md"), wideText);
+	assert.match(text, /unresolved:missing\\u000d\.md/);
+	assert.match(text, /include-not-found: Missing\\u0009partial/);
+	assert.doesNotMatch(wideText, /\u001b|\r|	/);
 	assertWidthSafe(lines, 72);
 });
 
@@ -299,7 +402,9 @@ test("inspector tab, numeric jump, back, scroll, and quit keybindings are render
 	assert.match(renderText(inspector.render(80)), /\[Metadata\]|Metadata/i);
 	inspector.handleInput("3");
 	assert.match(renderText(inspector.render(80)), /\[Skills\]|Skills/i);
-	inspector.handleInput("5");
+	inspector.handleInput("4");
+	assert.match(renderText(inspector.render(80)), /\[Includes\]|No includes\./i);
+	inspector.handleInput("6");
 	assert.match(renderText(inspector.render(80)), /# Prompt dry-run: review|Raw/i);
 	inspector.handleInput("j");
 	assert.match(renderText(inspector.render(80)), /scroll|↓|line/i);
@@ -319,7 +424,7 @@ test("inspector supports Kitty CSI-u close, back, tab, numeric panes, and scroll
 		inspector.handleInput("\x1b[9u");
 		assert.match(renderText(inspector.render(80)), /\[Metadata\]/);
 
-		inspector.handleInput("\x1b[53u");
+		inspector.handleInput("\x1b[54u");
 		let text = renderText(inspector.render(80));
 		assert.match(text, /\[Raw\]/);
 		assert.match(text, /line 1\/9/);
