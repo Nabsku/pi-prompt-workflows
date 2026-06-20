@@ -1,5 +1,7 @@
 import { decodeKittyPrintable, Key, matchesKey, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import type { PromptDryRunResult } from "./prompt-dry-run.js";
+import type { PromptIncludeGraph, PromptIncludeGraphEdge, PromptIncludeGraphNode } from "./prompt-includes.js";
+import type { PromptLoaderDiagnostic } from "./prompt-loader.js";
 
 export interface PromptTemplateCatalogItem {
 	name: string;
@@ -20,6 +22,7 @@ export interface PromptDryRunTuiViewModel {
 		prompt: string;
 		metadata: string;
 		skills: string;
+		includes: string;
 		warnings: string;
 		raw: string;
 	};
@@ -83,6 +86,69 @@ function formatSkills(result: PromptDryRunResult): string {
 	return lines.join("\n");
 }
 
+function lexicalCompare(a: string, b: string): number {
+	if (a < b) return -1;
+	if (a > b) return 1;
+	return 0;
+}
+
+function diagnosticKey(diagnostic: PromptLoaderDiagnostic): string {
+	return diagnostic.key || `${diagnostic.code}:${diagnostic.source}:${diagnostic.filePath}:${diagnostic.message}`;
+}
+
+function sortDiagnostics(diagnostics: PromptLoaderDiagnostic[]): PromptLoaderDiagnostic[] {
+	return [...diagnostics].sort((a, b) => lexicalCompare(a.filePath, b.filePath) || lexicalCompare(a.code, b.code) || lexicalCompare(a.message, b.message));
+}
+
+function sortIncludeGraphEdges(edges: PromptIncludeGraphEdge[]): PromptIncludeGraphEdge[] {
+	return [...edges].sort((a, b) => a.order - b.order || lexicalCompare(a.fromNodeId, b.fromNodeId) || lexicalCompare(a.toNodeId, b.toNodeId) || lexicalCompare(a.includePath, b.includePath));
+}
+
+function includeGraphNodeLabel(nodes: Map<string, PromptIncludeGraphNode>, nodeId: string): string {
+	const node = nodes.get(nodeId);
+	if (!node) return nodeId;
+	if (node.filePath) return node.filePath;
+	if (node.includePath) return `unresolved:${node.includePath}`;
+	return node.id;
+}
+
+function formatIncludeDiagnostic(prefix: string, diagnostic: PromptLoaderDiagnostic): string {
+	return `${prefix}${diagnostic.code}: ${diagnostic.message}`;
+}
+
+function rootOnlyIncludeDiagnostics(graph: PromptIncludeGraph): PromptLoaderDiagnostic[] {
+	const edgeDiagnosticKeys = new Set(graph.edges.flatMap((edge) => edge.diagnostics.map(diagnosticKey)));
+	return graph.diagnostics.filter((diagnostic) => !edgeDiagnosticKeys.has(diagnosticKey(diagnostic)));
+}
+
+function formatIncludes(result: PromptDryRunResult): string {
+	const graph = result.status === "ok" ? result.includeGraph : undefined;
+	if (!graph) return "No includes.";
+
+	const rootDiagnostics = sortDiagnostics(rootOnlyIncludeDiagnostics(graph));
+	if (graph.edges.length === 0 && rootDiagnostics.length === 0) return "No includes.";
+
+	const nodes = new Map(graph.nodes.map((node) => [node.id, node]));
+	const rootNode = graph.nodes.find((node) => node.kind === "prompt" && node.filePath === graph.root.filePath);
+	const rootStatus = rootNode?.status ?? (rootDiagnostics.length ? "failed" : "ok");
+	const lines = [`- ${graph.root.promptName} [${rootStatus}] ${graph.root.filePath}`];
+
+	for (const diagnostic of rootDiagnostics) {
+		lines.push(formatIncludeDiagnostic("  ! ", diagnostic));
+	}
+
+	for (const edge of sortIncludeGraphEdges(graph.edges)) {
+		const from = includeGraphNodeLabel(nodes, edge.fromNodeId);
+		const to = includeGraphNodeLabel(nodes, edge.toNodeId);
+		lines.push(`  - ${from} -> ${to} (${edge.kind} ${edge.includePath}) [${edge.status}]`);
+		for (const diagnostic of sortDiagnostics(edge.diagnostics)) {
+			lines.push(formatIncludeDiagnostic("    ! ", diagnostic));
+		}
+	}
+
+	return lines.join("\n");
+}
+
 export function createPromptDryRunTuiViewModel(result: PromptDryRunResult, plainReport: string): PromptDryRunTuiViewModel {
 	const warnings = result.warnings.length ? result.warnings.map((warning) => `- ${warning}`).join("\n") : "No warnings.";
 	const prompt = result.status === "ok" ? `# Prompt body\n${result.content}` : `# Error\n${result.error}`;
@@ -100,6 +166,7 @@ export function createPromptDryRunTuiViewModel(result: PromptDryRunResult, plain
 			prompt,
 			metadata,
 			skills: formatSkills(result),
+			includes: formatIncludes(result),
 			warnings,
 			raw: plainReport,
 		},
@@ -191,7 +258,7 @@ export class PromptDryRunPicker implements Component {
 	invalidate(): void {}
 }
 
-const PANE_NAMES = ["Prompt", "Metadata", "Skills", "Warnings", "Raw"] as const;
+const PANE_NAMES = ["Prompt", "Metadata", "Skills", "Includes", "Warnings", "Raw"] as const;
 type PaneName = typeof PANE_NAMES[number];
 
 export class PromptDryRunInspector implements Component {
@@ -229,7 +296,7 @@ export class PromptDryRunInspector implements Component {
 			"",
 			...body,
 			"",
-			`pane ${this.paneIndex + 1}/5 · line ${Math.min(this.scroll + 1, paneLines.length)}/${paneLines.length} · j/down scroll · tab next · b back · q quit`,
+			`pane ${this.paneIndex + 1}/${PANE_NAMES.length} · line ${Math.min(this.scroll + 1, paneLines.length)}/${paneLines.length} · j/down scroll · tab next · b back · q quit`,
 		];
 		return linesSafe(lines, width);
 	}
@@ -248,7 +315,7 @@ export class PromptDryRunInspector implements Component {
 			this.scroll = 0;
 			return;
 		}
-		const paneKey = (["1", "2", "3", "4", "5"] as const).find((key) => matchesKey(data, key));
+		const paneKey = Array.from({ length: PANE_NAMES.length }, (_, index) => String(index + 1)).find((key) => matchesKey(data, key));
 		if (paneKey) {
 			this.paneIndex = Number(paneKey) - 1;
 			this.scroll = 0;
