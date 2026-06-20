@@ -320,6 +320,30 @@ Compare prompts (`bestOfN`) cannot combine with `skill` or `skills` in v1 becaus
 
 Prompt includes let you write the common parts of your prompts once and reuse them. Put shared Markdown in partials, then pull those partials into any prompt that needs them.
 
+### Prompt library
+
+`.pi/prompt-library/` is an extension-managed prompt library. Pi core does not load files from this directory. If you want a file managed only by this extension rather than Pi core, place it in `.pi/prompt-library/` instead of `.pi/prompts/`.
+
+Prompt-library files can be executable extension prompt templates, chain steps, or include targets. A prompt-library file becomes an extension command only when it is command-capable under the same rules as `.pi/prompts` templates: for example, it has extension frontmatter such as `model`, `chain`, `skill`, `skills`, `include`, `includes`, or other supported extension fields. Plain Markdown fragments under `partials/` are intended to be included and should not appear as slash commands, chain steps, or dry-run targets.
+
+For example, a project prompt can include a standards fragment from the project prompt library:
+
+```text
+.pi/prompts/review.md
+.pi/prompt-library/partials/repo-standards.md
+```
+
+```markdown
+---
+description: Review with shared repo standards
+model: claude-sonnet-4-20250514
+include: partials/repo-standards.md
+---
+Review this change: $@
+```
+
+With that layout, `.pi/prompts/review.md` resolves `partials/repo-standards.md` to `.pi/prompt-library/partials/repo-standards.md` when no closer match exists. Included prompt-library files insert only their Markdown body; frontmatter such as `description`, `model`, `skill`, or `skills` is not inherited by the including prompt.
+
 ### Syntax
 
 Use `includes:` for the shared block you want at the top of a prompt:
@@ -395,21 +419,25 @@ Include paths are local `.md` files. Resolution starts next to the file that ask
 
 If Pi does not find the file there, it checks these roots in order:
 
-1. The directory of the file containing the directive
-2. The owning prompt root: `~/.pi/agent/prompts` for user prompts, or `<cwd>/.pi/prompts` for project prompts
-3. `~/.pi/agent/prompt-partials`
-4. `<cwd>/.pi/prompt-partials`
+1. Current file directory
+2. Current owner root
+3. Original prompt root
+4. Project prompt-library
+5. User prompt-library
+6. Global prompt-partials
+7. Project prompt-partials
 
 Example layout:
 
 ```text
 ~/.pi/agent/prompts/review.md
 ~/.pi/agent/prompts/shared/repo-rules.md
+<cwd>/.pi/prompt-library/partials/repo-standards.md
 ~/.pi/agent/prompt-partials/shared/review-checklist.md
 <cwd>/.pi/prompt-partials/languages/typescript.md
 ```
 
-With that layout, `review.md` can include `shared/repo-rules.md`, `shared/review-checklist.md`, and `languages/typescript.md` without absolute paths.
+With that layout, `review.md` can include `shared/repo-rules.md`, `partials/repo-standards.md`, `shared/review-checklist.md`, and `languages/typescript.md` without absolute paths.
 
 ### Rules and guardrails
 
