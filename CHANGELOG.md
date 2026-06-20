@@ -39,7 +39,8 @@
 
 ### Added
 - Added `/print-prompt` and `/dry-run-prompt` to preview rendered prompt templates without execution.
-- Added a Pi-native dry-run TUI: no-name dry-run commands open a searchable template picker in Pi TUI mode, while named templates open a read-only inspector for prompt body, metadata, skills, warnings, and the raw report.
+- Added a Pi-native dry-run TUI: no-name dry-run commands open a searchable template picker in Pi TUI mode, while named templates open a read-only inspector for prompt body, metadata, skills, includes, warnings, and the raw report.
+- Added a static, permanent `Includes` pane to the dry-run TUI inspector. It shows the include graph captured during dry-run rendering, or `No includes.` for prompts without include metadata or inline include directives.
 
 ### Changed
 - Added `/validate-prompts` to validate prompt templates, includes, chain declarations, and skill references before runtime, including include graph reporting for prompt dependencies and include failures.

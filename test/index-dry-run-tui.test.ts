@@ -232,15 +232,56 @@ test("inspector back opens picker and selected template opens the next inspector
 });
 
 test("--plain forces stdout/plain path in TUI mode and does not call ctx.ui.custom", async () => {
+	for (const commandName of ["print-prompt", "dry-run-prompt"] as const) {
+		await setup("tui", async (cwd, pi, ctx) => {
+			writePrompt(cwd, "review", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nReview $@");
+			await pi.emit("session_start", {}, ctx);
+
+			const output = await captureStdout(() => pi.commands.get(commandName)!.handler!("review --plain src/server.ts", ctx));
+
+			assert.equal(pi.customCalls.length, 0);
+			assert.match(output, /# Prompt dry-run: review/);
+			assert.match(output, /Review src\/server\.ts/);
+			assertNoExecutionSideEffects(pi);
+		});
+	}
+});
+
+test("TUI /dry-run-prompt carries the real include graph into the inspector Includes pane", async () => {
+	await setup("tui", async (cwd, pi, ctx) => {
+		mkdirSync(join(cwd, ".pi", "prompts", "shared"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "shared", "rules.md"), "Shared rules for $1");
+		writePrompt(cwd, "review", "---\nmodel: anthropic/claude-sonnet-4-20250514\nincludes: [shared/rules.md]\n---\nReview $@");
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("dry-run-prompt")!.handler!("review src/server.ts", ctx);
+
+		assert.equal(pi.customCalls.length, 1);
+		const inspector = pi.customComponents.at(-1) as { handleInput(data: string): void; render(width: number): string[] };
+		inspector.handleInput("4");
+		const rendered = inspector.render(1000).join("\n");
+		assert.match(rendered, /\[Includes\]/);
+		assert.match(rendered, /- review \[ok\] .*\.pi\/prompts\/review\.md/);
+		assert.match(rendered, /review\.md -> .*shared\/rules\.md \(frontmatter shared\/rules\.md\) \[ok\]/);
+		assert.doesNotMatch(rendered, /No includes\./);
+		assertNoExecutionSideEffects(pi);
+	});
+});
+
+test("TUI /dry-run-prompt keeps a permanent Includes pane with No includes for prompts without includes", async () => {
 	await setup("tui", async (cwd, pi, ctx) => {
 		writePrompt(cwd, "review", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nReview $@");
 		await pi.emit("session_start", {}, ctx);
 
-		const output = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("review --plain src/server.ts", ctx));
+		await pi.commands.get("dry-run-prompt")!.handler!("review src/server.ts", ctx);
 
-		assert.equal(pi.customCalls.length, 0);
-		assert.match(output, /# Prompt dry-run: review/);
-		assert.match(output, /Review src\/server\.ts/);
+		assert.equal(pi.customCalls.length, 1);
+		const inspector = pi.customComponents.at(-1) as { handleInput(data: string): void; render(width: number): string[] };
+		inspector.handleInput("4");
+		const rendered = inspector.render(100).join("\n");
+		assert.match(rendered, /\[Includes\]/);
+		assert.match(rendered, /No includes\./);
+		assert.match(rendered, /pane 4\/6/);
 		assertNoExecutionSideEffects(pi);
 	});
 });

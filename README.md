@@ -137,7 +137,8 @@ TUI behavior:
 - a template name opens the inspector directly;
 - `--plain` forces the stdout/plain report even in TUI mode;
 - unsupported templates, such as deterministic or chain templates, show the same diagnostic as the plain path;
-- full skill content remains hidden unless the dry-run result was created with `--show-skills`.
+- full skill content remains hidden unless the dry-run result was created with `--show-skills`;
+- the inspector always includes a static `Includes` pane. Prompts with include metadata or inline include directives show the include graph captured during dry-run rendering; prompts without includes show `No includes.`.
 
 The inspector is read-only. It has no execute button and does not mutate the session.
 
