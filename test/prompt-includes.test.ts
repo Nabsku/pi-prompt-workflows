@@ -13,6 +13,8 @@ interface IncludeFixture {
 	promptRoot: string;
 	promptDir: string;
 	promptFilePath: string;
+	projectLibrary: string;
+	userLibrary: string;
 	globalPartials: string;
 	projectPartials: string;
 }
@@ -24,16 +26,20 @@ function withFixture(run: (fixture: IncludeFixture) => void) {
 		const cwd = join(root, "project");
 		const promptRoot = join(cwd, ".pi", "prompts");
 		const promptDir = join(promptRoot, "nested");
+		const projectLibrary = join(cwd, ".pi", "prompt-library");
+		const userLibrary = join(home, ".pi", "agent", "prompt-library");
 		const globalPartials = join(home, ".pi", "agent", "prompt-partials");
 		const projectPartials = join(cwd, ".pi", "prompt-partials");
 		const promptFilePath = join(promptDir, "prompt.md");
 
 		mkdirSync(promptDir, { recursive: true });
+		mkdirSync(projectLibrary, { recursive: true });
+		mkdirSync(userLibrary, { recursive: true });
 		mkdirSync(globalPartials, { recursive: true });
 		mkdirSync(projectPartials, { recursive: true });
 		writeFileSync(promptFilePath, "---\nmodel: test\n---\nbody");
 
-		run({ home, cwd, promptRoot, promptDir, promptFilePath, globalPartials, projectPartials });
+		run({ home, cwd, promptRoot, promptDir, promptFilePath, projectLibrary, userLibrary, globalPartials, projectPartials });
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -43,16 +49,17 @@ function render(
 	fixture: IncludeFixture,
 	content: string,
 	includes?: string[],
-	options: { debugBoundaries?: boolean } = {},
+	options: { debugBoundaries?: boolean; promptFilePath?: string; promptRoot?: string; rootKind?: "prompts" | "prompt-library" } = {},
 ): RenderPromptIncludesResult {
 	return renderPromptIncludes({
 		promptName: "prompt",
 		content,
 		includes,
-		promptFilePath: fixture.promptFilePath,
-		promptRoot: fixture.promptRoot,
+		promptFilePath: options.promptFilePath ?? fixture.promptFilePath,
+		promptRoot: options.promptRoot ?? fixture.promptRoot,
 		cwd: fixture.cwd,
 		source: "project",
+		rootKind: options.rootKind,
 		homeDir: fixture.home,
 		debugBoundaries: options.debugBoundaries,
 	});
@@ -213,6 +220,20 @@ test("nested inline includes in subdirectory partials resolve relative to the cu
 
 		assertOk(result);
 		assert.equal(result.content, "outer-start\ninner\nouter-end\n\nbody");
+	});
+});
+
+test("nested legacy partial includes fall back to the original prompt root after the current owner root", () => {
+	withFixture((fixture) => {
+		const sharedPromptRoot = join(fixture.promptRoot, "shared");
+		mkdirSync(sharedPromptRoot, { recursive: true });
+		writeFileSync(join(fixture.projectPartials, "outer.md"), "outer-start\n<include file=\"shared/root.md\" />\nouter-end");
+		writeFileSync(join(sharedPromptRoot, "root.md"), "root-from-original-prompt-root");
+
+		const result = render(fixture, "body", ["outer.md"]);
+
+		assertOk(result);
+		assert.equal(result.content, "outer-start\nroot-from-original-prompt-root\nouter-end\n\nbody");
 	});
 });
 
@@ -634,11 +655,10 @@ test("include graph represents missing include as failed edge and node", () => {
 	});
 });
 
-test("include graph does not resolve prompt-library includes from the library root in Slice 1", () => {
+test("include graph resolves prompt-library includes from the library root", () => {
 	withFixture((fixture) => {
-		const promptLibrary = join(fixture.cwd, ".pi", "prompt-library");
-		const reviewPath = join(promptLibrary, "review.md");
-		const rulesPath = join(promptLibrary, "partials", "rules.md");
+		const reviewPath = join(fixture.projectLibrary, "review.md");
+		const rulesPath = join(fixture.projectLibrary, "partials", "rules.md");
 		mkdirSync(dirname(rulesPath), { recursive: true });
 		writeFileSync(reviewPath, "---\nmodel: claude-sonnet-4\ninclude: partials/rules.md\n---\nreview");
 		writeFileSync(rulesPath, "rules");
@@ -648,7 +668,7 @@ test("include graph does not resolve prompt-library includes from the library ro
 			sourceRecord(fixture, {
 				promptName: "review",
 				filePath: reviewPath,
-				promptRoot: promptLibrary,
+				promptRoot: fixture.projectLibrary,
 				rootKind: "prompt-library",
 				rawBody: "review",
 				includes: ["partials/rules.md"],
@@ -657,10 +677,8 @@ test("include graph does not resolve prompt-library includes from the library ro
 
 		assert.equal(graph.edges.length, 1);
 		assert.equal(graph.edges[0].includePath, "partials/rules.md");
-		assert.equal(graph.edges[0].status, "failed");
-		assert.equal(graph.edges[0].diagnostics.some((diagnostic) => diagnostic.code === "include-not-found"), true);
-		assert.equal(graph.nodes.some((node) => node.id === `file:${realpathSync(rulesPath)}` && node.status === "ok"), false);
-		assert.equal(graph.nodes.some((node) => node.kind === "unresolved" && node.status === "failed"), true);
+		assert.equal(graph.edges[0].status, "ok");
+		assert.equal(graph.nodes.some((node) => node.id === `file:${realpathSync(rulesPath)}` && node.status === "ok"), true);
 	});
 });
 
@@ -739,5 +757,211 @@ test("include graph ignores chain wrapper body include directives", () => {
 
 		assert.deepEqual(graph.edges, []);
 		assert.equal(graph.nodes.length, 1);
+	});
+});
+
+
+test("project prompts include project prompt-library partials by fallback", () => {
+	withFixture((fixture) => {
+		mkdirSync(join(fixture.projectLibrary, "partials"), { recursive: true });
+		writeFileSync(join(fixture.projectLibrary, "partials", "rules.md"), "library rules");
+
+		const result = render(fixture, "Review\n<includes />", ["partials/rules.md"]);
+
+		assertOk(result);
+		assert.equal(result.content, "Review\nlibrary rules");
+	});
+});
+
+test("prompt-library prompts include sibling relative partials", () => {
+	withFixture((fixture) => {
+		const reviewPath = join(fixture.projectLibrary, "review.md");
+		writeFileSync(reviewPath, "review");
+		writeFileSync(join(fixture.projectLibrary, "rules.md"), "sibling rules");
+
+		const result = render(fixture, "Review\n<includes />", ["rules.md"], {
+			promptFilePath: reviewPath,
+			promptRoot: fixture.projectLibrary,
+			rootKind: "prompt-library",
+		});
+
+		assertOk(result);
+		assert.equal(result.content, "Review\nsibling rules");
+	});
+});
+
+test("project prompts fall back to user prompt-library when project library has no match", () => {
+	withFixture((fixture) => {
+		mkdirSync(join(fixture.userLibrary, "partials"), { recursive: true });
+		writeFileSync(join(fixture.userLibrary, "partials", "rules.md"), "user library rules");
+
+		const result = render(fixture, "body", ["partials/rules.md"]);
+
+		assertOk(result);
+		assert.equal(result.content, "user library rules\n\nbody");
+	});
+});
+
+test("home include paths under user prompt-library are allowed", () => {
+	withFixture((fixture) => {
+		mkdirSync(join(fixture.userLibrary, "partials"), { recursive: true });
+		writeFileSync(join(fixture.userLibrary, "partials", "rules.md"), "home library rules");
+
+		const result = render(fixture, "body", ["~/.pi/agent/prompt-library/partials/rules.md"]);
+
+		assertOk(result);
+		assert.equal(result.content, "home library rules\n\nbody");
+	});
+});
+
+test("home include paths do not authorize through a symlinked user prompt-library current root", () => {
+	withFixture((fixture) => {
+		const outsideUserLibrary = join(fixture.home, "outside-user-library");
+		rmSync(fixture.userLibrary, { recursive: true, force: true });
+		mkdirSync(outsideUserLibrary, { recursive: true });
+		writeFileSync(join(outsideUserLibrary, "review.md"), "review");
+		writeFileSync(join(outsideUserLibrary, "leak.md"), "user leak");
+		symlinkSync(outsideUserLibrary, fixture.userLibrary, "dir");
+
+		const result = render(fixture, "body", ["~/.pi/agent/prompt-library/leak.md"], {
+			promptFilePath: join(fixture.userLibrary, "review.md"),
+			promptRoot: fixture.userLibrary,
+			rootKind: "prompt-library",
+		});
+
+		assertFail(result);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "include-absolute-disallowed" || diagnostic.code === "include-path-escaped"), true);
+	});
+});
+
+test("symlink escapes from prompt-library roots are rejected", () => {
+	withFixture((fixture) => {
+		const outsideProject = join(fixture.cwd, "project-leak.md");
+		const outsideUser = join(fixture.home, "user-leak.md");
+		writeFileSync(outsideProject, "project leak");
+		writeFileSync(outsideUser, "user leak");
+		symlinkSync(outsideProject, join(fixture.projectLibrary, "project-link.md"));
+		symlinkSync(outsideUser, join(fixture.userLibrary, "user-link.md"));
+
+		const projectResult = render(fixture, "body", ["project-link.md"]);
+		assertFail(projectResult);
+		assert.equal(projectResult.diagnostics.some((diagnostic) => diagnostic.code === "include-path-escaped"), true);
+
+		const userResult = render(fixture, "body", ["user-link.md"]);
+		assertFail(userResult);
+		assert.equal(userResult.diagnostics.some((diagnostic) => diagnostic.code === "include-path-escaped"), true);
+	});
+});
+
+test("prompt-library symlink roots do not authorize outside files", () => {
+	withFixture((fixture) => {
+		const outsideProjectLibrary = join(fixture.cwd, "outside-project-library");
+		rmSync(fixture.projectLibrary, { recursive: true, force: true });
+		mkdirSync(outsideProjectLibrary, { recursive: true });
+		writeFileSync(join(outsideProjectLibrary, "review.md"), "review");
+		writeFileSync(join(outsideProjectLibrary, "leak.md"), "project leak");
+		symlinkSync(outsideProjectLibrary, fixture.projectLibrary, "dir");
+
+		const projectResult = render(fixture, "body", ["leak.md"], {
+			promptFilePath: join(fixture.projectLibrary, "review.md"),
+			promptRoot: fixture.projectLibrary,
+			rootKind: "prompt-library",
+		});
+		assertFail(projectResult);
+		assert.equal(projectResult.diagnostics.some((diagnostic) => diagnostic.code === "include-not-found" || diagnostic.code === "include-path-escaped"), true);
+
+		const outsideUserLibrary = join(fixture.home, "outside-user-library");
+		rmSync(fixture.userLibrary, { recursive: true, force: true });
+		mkdirSync(outsideUserLibrary, { recursive: true });
+		writeFileSync(join(outsideUserLibrary, "review.md"), "review");
+		writeFileSync(join(outsideUserLibrary, "leak.md"), "user leak");
+		symlinkSync(outsideUserLibrary, fixture.userLibrary, "dir");
+
+		const userResult = render(fixture, "body", ["leak.md"], {
+			promptFilePath: join(fixture.userLibrary, "review.md"),
+			promptRoot: fixture.userLibrary,
+			rootKind: "prompt-library",
+		});
+		assertFail(userResult);
+		assert.equal(userResult.diagnostics.some((diagnostic) => diagnostic.code === "include-not-found" || diagnostic.code === "include-path-escaped"), true);
+	});
+});
+
+test("prompt-library include frontmatter is stripped and not inherited", () => {
+	withFixture((fixture) => {
+		writeFileSync(join(fixture.projectLibrary, "rules.md"), "---\ndescription: hidden\ninclude: ignored.md\nmodel: nope\n---\nLibrary body");
+
+		const result = render(fixture, "body", ["rules.md"]);
+
+		assertOk(result);
+		assert.equal(result.content, "Library body\n\nbody");
+	});
+});
+
+test("nested includes work and cycles are detected across prompt-library files", () => {
+	withFixture((fixture) => {
+		writeFileSync(join(fixture.projectLibrary, "outer.md"), 'outer <include file="inner.md" />');
+		writeFileSync(join(fixture.projectLibrary, "inner.md"), "inner");
+		const nested = render(fixture, "body", ["outer.md"]);
+		assertOk(nested);
+		assert.equal(nested.content, "outer inner\n\nbody");
+
+		writeFileSync(join(fixture.projectLibrary, "a.md"), 'a <include file="b.md" />');
+		writeFileSync(join(fixture.projectLibrary, "b.md"), 'b <include file="a.md" />');
+		const cycle = render(fixture, "body", ["a.md"]);
+		assertFail(cycle);
+		assert.equal(cycle.diagnostics.some((diagnostic) => diagnostic.code === "include-cycle"), true);
+	});
+});
+
+test("prompt-library include precedence shadowing is pinned", () => {
+	withFixture((fixture) => {
+		writeFileSync(join(fixture.promptDir, "shadow.md"), "current-dir");
+		writeFileSync(join(fixture.promptRoot, "shadow.md"), "owner-root");
+		writeFileSync(join(fixture.projectLibrary, "shadow.md"), "project-library");
+		writeFileSync(join(fixture.userLibrary, "shadow.md"), "user-library");
+		writeFileSync(join(fixture.globalPartials, "shadow.md"), "global-partials");
+		writeFileSync(join(fixture.projectPartials, "shadow.md"), "project-partials");
+		writeFileSync(join(fixture.promptRoot, "owner.md"), "owner-root");
+		writeFileSync(join(fixture.projectLibrary, "owner.md"), "project-library");
+		writeFileSync(join(fixture.projectLibrary, "library.md"), "project-library");
+		writeFileSync(join(fixture.userLibrary, "library.md"), "user-library");
+		writeFileSync(join(fixture.projectLibrary, "legacy.md"), "project-library");
+		writeFileSync(join(fixture.globalPartials, "legacy.md"), "global-partials");
+		writeFileSync(join(fixture.globalPartials, "partials.md"), "global-partials");
+		writeFileSync(join(fixture.projectPartials, "partials.md"), "project-partials");
+
+		const result = render(fixture, "", ["shadow.md", "owner.md", "library.md", "legacy.md", "partials.md"]);
+
+		assertOk(result);
+		assert.equal(result.content, "current-dir\n\nowner-root\n\nproject-library\n\nproject-library\n\nglobal-partials");
+	});
+});
+
+test("nested owner-root precedence follows the current prompt-library file", () => {
+	withFixture((fixture) => {
+		writeFileSync(join(fixture.projectLibrary, "common.md"), "project common");
+		writeFileSync(join(fixture.userLibrary, "common.md"), "user common");
+		writeFileSync(join(fixture.userLibrary, "base.md"), 'user base <include file="common.md" />');
+		const userNested = render(fixture, "body", ["base.md"]);
+		assertOk(userNested);
+		assert.equal(userNested.content, "user base user common\n\nbody");
+
+		writeFileSync(join(fixture.projectLibrary, "base.md"), 'project base <include file="common.md" />');
+		const projectNested = render(fixture, "body", ["base.md"]);
+		assertOk(projectNested);
+		assert.equal(projectNested.content, "project base project common\n\nbody");
+	});
+});
+
+test("include-not-found diagnostics mention prompt-library roots", () => {
+	withFixture((fixture) => {
+		const result = render(fixture, "body", ["missing.md"]);
+
+		assertFail(result);
+		const message = result.diagnostics.find((diagnostic) => diagnostic.code === "include-not-found")?.message ?? "";
+		assert.match(message, /current owner root/);
+		assert.match(message, /project prompt-library/);
+		assert.match(message, /user prompt-library/);
 	});
 });

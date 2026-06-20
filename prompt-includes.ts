@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
-import type { PromptLoaderDiagnostic, PromptSource, PromptSourceRecord } from "./prompt-loader.js";
+import type { PromptLoaderDiagnostic, PromptRootKind, PromptSource, PromptSourceRecord } from "./prompt-loader.js";
 
 export interface RenderPromptIncludesInput {
 	promptName: string;
@@ -11,6 +11,7 @@ export interface RenderPromptIncludesInput {
 	promptRoot: string;
 	cwd: string;
 	source: PromptSource;
+	rootKind?: PromptRootKind;
 	debugBoundaries?: boolean;
 	homeDir?: string;
 }
@@ -25,6 +26,7 @@ export interface ResolvePromptIncludePathInput {
 	promptRoot: string;
 	cwd: string;
 	source: PromptSource;
+	rootKind?: PromptRootKind;
 	homeDir?: string;
 }
 
@@ -85,7 +87,8 @@ interface IncludeRenderContext {
 	debugBoundaries: boolean;
 	homeDir: string;
 	diagnostics: PromptLoaderDiagnostic[];
-	roots: IncludeRoot[];
+	knownRoots: IncludeRoot[];
+	fallbackRoots: IncludeRoot[];
 	allowedRoots: IncludeRoot[];
 	graph: IncludeRenderGraph;
 }
@@ -185,6 +188,7 @@ function collectPromptIncludeGraph(record: PromptSourceRecord, homeDir?: string)
 		promptRoot: record.promptRoot,
 		cwd: record.cwd,
 		source: record.source,
+		rootKind: record.rootKind,
 		homeDir,
 		diagnostics,
 	});
@@ -220,38 +224,6 @@ function collectPromptIncludeGraph(record: PromptSourceRecord, homeDir?: string)
 	}
 
 	if (!record.isChainWrapper && record.includeMetadataInvalid !== true) {
-		if (record.rootKind === "prompt-library") {
-			for (const includePath of record.includes ?? []) {
-				collectPromptLibraryBlockedIncludeEdge({
-					includePath,
-					kind: "frontmatter",
-					fromNodeId: rootNodeId,
-					currentFilePath: context.promptFilePath,
-					context,
-					nodes,
-					edges,
-					nextOrder: () => nextOrder++,
-					nextUnresolvedNodeId: () => nextUnresolvedNodeId++,
-				});
-			}
-
-			for (const includePath of extractPromptInlineIncludes(record.rawBody)) {
-				collectPromptLibraryBlockedIncludeEdge({
-					includePath,
-					kind: "inline",
-					fromNodeId: rootNodeId,
-					currentFilePath: context.promptFilePath,
-					context,
-					nodes,
-					edges,
-					nextOrder: () => nextOrder++,
-					nextUnresolvedNodeId: () => nextUnresolvedNodeId++,
-				});
-			}
-
-			return { root: record, nodes: [...nodes.values()], edges, diagnostics };
-		}
-
 		for (const includePath of record.includes ?? []) {
 			collectIncludeEdge({
 				includePath,
@@ -288,65 +260,40 @@ function collectPromptIncludeGraph(record: PromptSourceRecord, homeDir?: string)
 	return { root: record, nodes: [...nodes.values()], edges, diagnostics };
 }
 
-interface CollectPromptLibraryBlockedIncludeEdgeInput {
-	includePath: string;
-	kind: PromptIncludeGraphEdgeKind;
-	fromNodeId: string;
-	currentFilePath: string;
-	context: IncludeRenderContext;
-	nodes: Map<string, PromptIncludeGraphNode>;
-	edges: PromptIncludeGraphEdge[];
-	nextOrder: () => number;
-	nextUnresolvedNodeId: () => number;
-}
-
-function collectPromptLibraryBlockedIncludeEdge(input: CollectPromptLibraryBlockedIncludeEdgeInput): void {
-	const diagnostic = createDiagnostic(
-		input.context,
-		input.currentFilePath,
-		"include-not-found",
-		`Prompt include ${JSON.stringify(input.includePath.trim())} was not found in current file directory, prompt root, global prompt partials, or project prompt partials.`,
-	);
-	input.context.diagnostics.push(diagnostic);
-	const toNodeId = `unresolved:${input.nextUnresolvedNodeId()}`;
-	input.nodes.set(toNodeId, {
-		id: toNodeId,
-		kind: "unresolved",
-		status: "failed",
-		includePath: input.includePath,
-		diagnostics: [diagnostic],
-	});
-	input.edges.push({
-		fromNodeId: input.fromNodeId,
-		toNodeId,
-		kind: input.kind,
-		includePath: input.includePath,
-		order: input.nextOrder(),
-		status: "failed",
-		diagnostics: [diagnostic],
-	});
-}
-
 function createIncludeRenderContext(input: RenderPromptIncludesInput & { diagnostics?: PromptLoaderDiagnostic[] }): IncludeRenderContext {
 	const homeDir = input.homeDir ?? homedir();
 	const canonicalHomeDir = canonicalDirectory(homeDir);
 	const canonicalCwd = canonicalDirectory(input.cwd);
-	const fallbackRoots: IncludeRoot[] = [
-		{ label: "prompt root", path: resolve(input.promptRoot) },
-		{
-			label: "global prompt partials",
-			path: resolve(join(homeDir, ".pi", "agent", "prompt-partials")),
-			expectedCanonicalPath: canonicalHomeDir ? resolve(canonicalHomeDir, ".pi", "agent", "prompt-partials") : null,
-		},
-		{
-			label: "project prompt partials",
-			path: resolve(join(input.cwd, ".pi", "prompt-partials")),
-			expectedCanonicalPath: canonicalCwd ? resolve(canonicalCwd, ".pi", "prompt-partials") : null,
-		},
-	];
+	const projectPromptLibrary: IncludeRoot = {
+		label: "project prompt-library",
+		path: resolve(join(input.cwd, ".pi", "prompt-library")),
+		expectedCanonicalPath: canonicalCwd ? resolve(canonicalCwd, ".pi", "prompt-library") : null,
+	};
+	const userPromptLibrary: IncludeRoot = {
+		label: "user prompt-library",
+		path: resolve(join(homeDir, ".pi", "agent", "prompt-library")),
+		expectedCanonicalPath: canonicalHomeDir ? resolve(canonicalHomeDir, ".pi", "agent", "prompt-library") : null,
+	};
+	const globalPromptPartials: IncludeRoot = {
+		label: "global prompt partials",
+		path: resolve(join(homeDir, ".pi", "agent", "prompt-partials")),
+		expectedCanonicalPath: canonicalHomeDir ? resolve(canonicalHomeDir, ".pi", "agent", "prompt-partials") : null,
+	};
+	const projectPromptPartials: IncludeRoot = {
+		label: "project prompt partials",
+		path: resolve(join(input.cwd, ".pi", "prompt-partials")),
+		expectedCanonicalPath: canonicalCwd ? resolve(canonicalCwd, ".pi", "prompt-partials") : null,
+	};
+	const promptRoot: IncludeRoot = {
+		label: "original prompt root",
+		path: resolve(input.promptRoot),
+		...(resolve(input.promptRoot) === projectPromptLibrary.path ? { expectedCanonicalPath: projectPromptLibrary.expectedCanonicalPath } : {}),
+		...(resolve(input.promptRoot) === userPromptLibrary.path ? { expectedCanonicalPath: userPromptLibrary.expectedCanonicalPath } : {}),
+	};
+	const fallbackRoots = canonicalizeRoots([promptRoot, projectPromptLibrary, userPromptLibrary, globalPromptPartials, projectPromptPartials]);
+	const knownRoots = canonicalizeRoots([promptRoot, projectPromptLibrary, userPromptLibrary, globalPromptPartials, projectPromptPartials]);
 	const promptDirectoryRoot: IncludeRoot = { label: "prompt directory", path: dirname(resolve(input.promptFilePath)) };
-	const roots = canonicalizeRoots(fallbackRoots);
-	const allowedRoots = canonicalizeRoots([promptDirectoryRoot, ...fallbackRoots]);
+	const allowedRoots = canonicalizeRoots([promptDirectoryRoot, ...knownRoots]);
 
 	const promptFilePath = resolve(input.promptFilePath);
 	const diagnostics = input.diagnostics ?? [];
@@ -356,7 +303,8 @@ function createIncludeRenderContext(input: RenderPromptIncludesInput & { diagnos
 		debugBoundaries: input.debugBoundaries ?? false,
 		homeDir,
 		diagnostics,
-		roots,
+		knownRoots,
+		fallbackRoots,
 		allowedRoots,
 		graph: createRenderGraph(input, promptFilePath, diagnostics),
 	};
@@ -373,7 +321,7 @@ function createRenderGraph(
 		promptRoot: input.promptRoot,
 		cwd: input.cwd,
 		source: input.source,
-		rootKind: "prompts",
+		rootKind: input.rootKind ?? "prompts",
 		promptCapable: true,
 		rawBody: input.content,
 		includes: input.includes,
@@ -412,8 +360,26 @@ function canonicalizeRoots(roots: IncludeRoot[]): IncludeRoot[] {
 
 function includeRootsForCurrentFile(currentFilePath: string, context: IncludeRenderContext): IncludeRoot[] {
 	const currentDirectory = dirname(resolve(currentFilePath));
-	const currentRoot: IncludeRoot = { label: "current file directory", path: currentDirectory, canonicalPath: canonicalDirectory(currentDirectory) };
-	return dedupeRoots([currentRoot, ...context.roots]);
+	const currentDirectoryRoot: IncludeRoot = { label: "current file directory", path: currentDirectory, canonicalPath: canonicalDirectory(currentDirectory) };
+	const ownerRoot = ownerRootForCurrentFile(currentFilePath, context);
+	return dedupeRoots([...(ownerRoot ? [currentDirectoryRoot, ownerRoot] : []), ...context.fallbackRoots]);
+}
+
+function ownerRootForCurrentFile(currentFilePath: string, context: IncludeRenderContext): IncludeRoot | undefined {
+	let canonicalFilePath: string;
+	try {
+		canonicalFilePath = realpathSync(currentFilePath);
+	} catch {
+		canonicalFilePath = resolve(currentFilePath);
+	}
+	let owner: IncludeRoot | undefined;
+	for (const root of context.knownRoots) {
+		if (!root.canonicalPath || !isPathInside(root.canonicalPath, canonicalFilePath)) continue;
+		if (!owner || root.canonicalPath.length > (owner.canonicalPath?.length ?? 0)) {
+			owner = { ...root, label: "current owner root" };
+		}
+	}
+	return owner;
 }
 
 function canonicalDirectory(path: string, options: { expectedCanonicalPath?: string | null } = {}): string | undefined {
@@ -845,7 +811,7 @@ function resolveIncludePath(includePath: string, context: IncludeRenderContext, 
 			continue;
 		}
 		if (!existsSync(candidate)) continue;
-		return validateExistingIncludeCandidate(candidate, normalizedPath, context, currentFilePath);
+		return validateExistingIncludeCandidate(candidate, normalizedPath, context, currentFilePath, root);
 	}
 
 	if (sawEscapedCandidate) {
@@ -861,20 +827,20 @@ function resolveIncludePath(includePath: string, context: IncludeRenderContext, 
 	}
 
 	context.diagnostics.push(
-		createDiagnostic(
-			context,
-			currentFilePath,
-			"include-not-found",
-			`Prompt include ${JSON.stringify(normalizedPath)} was not found in current file directory, prompt root, global prompt partials, or project prompt partials.`,
-		),
+		createDiagnostic(context, currentFilePath, "include-not-found", includeNotFoundMessage(normalizedPath)),
 	);
 	return undefined;
 }
 
+function includeNotFoundMessage(includePath: string): string {
+	return `Prompt include ${JSON.stringify(includePath)} was not found in current file directory, current owner root, original prompt root, project prompt-library, user prompt-library, global prompt partials, or project prompt partials.`;
+}
+
 function resolveHomeIncludePath(includePath: string, context: IncludeRenderContext, currentFilePath: string): ResolvedPromptIncludePath | undefined {
 	const expandedPath = resolve(join(context.homeDir, includePath.slice(2)));
+	const containingRoot = context.knownRoots.find((root) => isPathInside(root.path, expandedPath));
 
-	if (!isPathInsideAny(context.allowedRoots.map((root) => root.path), expandedPath)) {
+	if (!containingRoot) {
 		context.diagnostics.push(
 			createDiagnostic(
 				context,
@@ -891,10 +857,16 @@ function resolveHomeIncludePath(includePath: string, context: IncludeRenderConte
 		return undefined;
 	}
 
-	return validateExistingIncludeCandidate(expandedPath, includePath, context, currentFilePath);
+	return validateExistingIncludeCandidate(expandedPath, includePath, context, currentFilePath, containingRoot);
 }
 
-function validateExistingIncludeCandidate(candidate: string, includePath: string, context: IncludeRenderContext, currentFilePath: string): ResolvedPromptIncludePath | undefined {
+function validateExistingIncludeCandidate(
+	candidate: string,
+	includePath: string,
+	context: IncludeRenderContext,
+	currentFilePath: string,
+	containingRoot?: IncludeRoot,
+): ResolvedPromptIncludePath | undefined {
 	let canonicalPath: string;
 	try {
 		canonicalPath = realpathSync(candidate);
@@ -910,7 +882,9 @@ function validateExistingIncludeCandidate(candidate: string, includePath: string
 		return undefined;
 	}
 
-	if (!isPathInsideAny(canonicalAllowedRootPaths(context), canonicalPath)) {
+	const canonicalContainingRoot = containingRoot?.canonicalPath;
+	const canonicalAllowedPaths = containingRoot ? (canonicalContainingRoot ? [canonicalContainingRoot] : []) : canonicalAllowedRootPaths(context);
+	if (!isPathInsideAny(canonicalAllowedPaths, canonicalPath)) {
 		context.diagnostics.push(
 			createDiagnostic(
 				context,

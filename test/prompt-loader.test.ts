@@ -609,7 +609,7 @@ test("reserved names in prompt-library are skipped and reported", () => {
 	});
 });
 
-test("prompt-library prompt includes do not resolve from prompt-library roots in slice 1", () => {
+test("prompt-library prompt includes resolve from prompt-library roots", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
 		const projectLibrary = join(cwd, ".pi", "prompt-library");
@@ -618,9 +618,12 @@ test("prompt-library prompt includes do not resolve from prompt-library roots in
 		writeFileSync(join(projectLibrary, "partials", "rules.md"), "library rules");
 
 		const runtime = loadPromptsWithModel(cwd, true);
-		assert.equal(runtime.prompts.has("review"), false);
-		assert.equal(runtime.diagnostics.some((diagnostic) => diagnostic.code === "include-not-found"), true);
-		assert.doesNotMatch(runtime.diagnostics.map((diagnostic) => diagnostic.message).join("\n"), /library rules/);
+		const prompt = runtime.prompts.get("review");
+		assert.ok(prompt);
+		assert.equal(prompt.content, "library rules\n\nreview body");
+		assert.equal(prompt.rootKind, "prompt-library");
+		assert.equal(prompt.includeGraph?.root.rootKind, "prompt-library");
+		assert.equal(runtime.diagnostics.some((diagnostic) => diagnostic.code === "include-not-found"), false);
 	});
 });
 
@@ -2260,4 +2263,41 @@ test("reserved built-in command mirror is explicit", () => {
 		"tree",
 		"validate-prompts",
 	].sort());
+});
+
+
+test("prompt-library includes render plain fragments and preserve prompt-library graph root kind", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const projectLibrary = join(cwd, ".pi", "prompt-library");
+		mkdirSync(join(projectLibrary, "partials"), { recursive: true });
+		writeFileSync(join(projectLibrary, "review.md"), "---\nmodel: claude-sonnet-4-20250514\nincludes:\n  - partials/rules.md\n---\nReview\n<includes />");
+		writeFileSync(join(projectLibrary, "partials", "rules.md"), "Plain library rules");
+
+		const result = loadPromptsWithModel(cwd, true);
+		const prompt = result.prompts.get("review");
+
+		assert.ok(prompt);
+		assert.equal(prompt.content, "Review\nPlain library rules");
+		assert.equal(prompt.rootKind, "prompt-library");
+		assert.equal(prompt.includeGraph?.root.rootKind, "prompt-library");
+		assert.equal(result.prompts.has("rules"), false);
+	});
+});
+
+test("project prompt includes plain prompt-library fragment absent from runtime catalog", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const prompts = join(cwd, ".pi", "prompts");
+		const projectLibrary = join(cwd, ".pi", "prompt-library");
+		mkdirSync(prompts, { recursive: true });
+		mkdirSync(join(projectLibrary, "partials"), { recursive: true });
+		writeFileSync(join(prompts, "review.md"), "---\nmodel: claude-sonnet-4-20250514\nincludes:\n  - partials/rules.md\n---\nReview\n<includes />");
+		writeFileSync(join(projectLibrary, "partials", "rules.md"), "Plain library rules");
+
+		const result = loadPromptsWithModel(cwd, true);
+
+		assert.equal(result.prompts.get("review")?.content, "Review\nPlain library rules");
+		assert.equal(result.prompts.has("rules"), false);
+	});
 });

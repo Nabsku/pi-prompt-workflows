@@ -2003,18 +2003,6 @@ function loadPromptsWithModelFromDir(
 				}
 				let content = body;
 				let includeGraph: PromptIncludeGraph | undefined;
-				if (shouldRenderIncludes && rootKind === "prompt-library") {
-					const unresolvedInclude = includes?.[0] ?? extractPromptInlineIncludes(body)[0] ?? "<includes />";
-					diagnostics.push(
-						createDiagnostic(
-							"include-not-found",
-							fullPath,
-							source,
-							`Prompt-library prompt include ${JSON.stringify(unresolvedInclude)} is not resolved from prompt-library roots yet.`,
-						),
-					);
-					continue;
-				}
 				if (shouldRenderIncludes) {
 					const renderedIncludes = renderPromptIncludes({
 						promptName: name,
@@ -2024,6 +2012,7 @@ function loadPromptsWithModelFromDir(
 						promptRoot,
 						cwd: loadCwd,
 						source,
+						rootKind,
 					});
 					if (!renderedIncludes.ok) {
 						diagnostics.push(...renderedIncludes.diagnostics);
