@@ -143,3 +143,23 @@ test("validate-prompts command success notification includes valid include graph
 		assert.match(pi.notifications[0]!.message, /review -> .*shared\/rules\.md \(frontmatter shared\/rules\.md\) \[ok\]/);
 	});
 });
+
+test("validate-prompts command includes prompt-library validation coverage", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "skills", "tmux"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "skills", "tmux", "SKILL.md"), "# tmux\n");
+		writeFileSync(join(cwd, ".pi", "prompt-library", "skilled-lib.md"), "---\nskill: tmux\n---\nUse tmux");
+
+		const pi = new FakePi();
+		const ctx = createContext(cwd, pi);
+		promptModelExtension(pi as never);
+
+		await pi.commands.get("validate-prompts")!.handler("", ctx);
+
+		assert.equal(pi.notifications.length, 1);
+		assert.equal(pi.notifications[0]!.type, "info");
+		assert.match(pi.notifications[0]!.message, /Prompt validation passed: 1 prompt template/);
+	});
+});
