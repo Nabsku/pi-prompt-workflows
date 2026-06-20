@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.12.0](https://github.com/Nabsku/pi-prompt-template-model-enhanced/compare/v0.11.2...v0.12.0) (2026-06-20)
+
+
+### Features
+
+* add includes pane to dry-run TUI ([50624a4](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/50624a46a5722d2ca74ebcb0423e5e99f75dbad1))
+* attach include graphs to dry runs ([a1d7eba](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/a1d7eba676158faed0c4e9cf889e5525cf5e5923))
+* attach include graphs to validation ([d694724](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/d69472452a6af1b7f94f75df3002b65d5bdc62c8))
+* collect prompt include graphs ([be7c726](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/be7c726fb17a43524068ef8da819306304e79091))
+* collect prompt source records ([0d0df7a](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/0d0df7a38a460fb1d890596e8f334a9be5772892))
+* expose prompt include parsing helpers ([3e784a6](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/3e784a672304100e70ae3a6603a05be6c2744e5e))
+* report prompt include graphs ([5332c8e](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/5332c8e8c49925aec20ebe2ba913e6b6a13f814f))
+
+
+### Bug Fixes
+
+* avoid duplicate include graph diagnostics ([adb6c97](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/adb6c971fa3e1faea902aead4493fd47cf4121a6))
+* preserve skipped include graphs for overrides ([2b0e69f](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/2b0e69f3f158c8e5e8ef3bae45053cdd267a19e7))
+
 ## [0.11.2](https://github.com/Nabsku/pi-prompt-template-model-enhanced/compare/v0.11.1...v0.11.2) (2026-06-19)
 
 
