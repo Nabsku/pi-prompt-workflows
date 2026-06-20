@@ -218,6 +218,7 @@ test("validation report includes skipped direct missing include and diagnostic",
 		assert.match(report, /- review \[skipped\] /);
 		assert.match(report, /review -> unresolved:shared\/missing\.md \(frontmatter shared\/missing\.md\) \[failed\]/);
 		assert.match(report, /! include-not-found: Prompt include/);
+		assert.equal([...report.matchAll(/include-not-found/g)].length, 2);
 	});
 });
 

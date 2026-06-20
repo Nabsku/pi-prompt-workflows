@@ -444,6 +444,15 @@ function formatIncludeGraphDiagnostic(prefix: string, diagnostic: PromptLoaderDi
 	return `${prefix}${sanitizeReportValue(diagnostic.code)}: ${sanitizeReportValue(diagnostic.message)}`;
 }
 
+function diagnosticKey(diagnostic: PromptLoaderDiagnostic): string {
+	return diagnostic.key || `${diagnostic.code}:${diagnostic.source}:${diagnostic.filePath}:${diagnostic.message}`;
+}
+
+function rootOnlyGraphDiagnostics(graph: PromptValidationIncludeGraph): PromptLoaderDiagnostic[] {
+	const edgeDiagnosticKeys = new Set(graph.edges.flatMap((edge) => edge.diagnostics.map(diagnosticKey)));
+	return graph.diagnostics.filter((diagnostic) => !edgeDiagnosticKeys.has(diagnosticKey(diagnostic)));
+}
+
 function formatIncludeGraphSection(graphs: PromptValidationIncludeGraph[]): string[] {
 	const relevantGraphs = graphs
 		.filter(includeGraphIsRelevant)
@@ -454,7 +463,7 @@ function formatIncludeGraphSection(graphs: PromptValidationIncludeGraph[]): stri
 	for (const graph of relevantGraphs) {
 		const nodes = nodeById(graph);
 		lines.push(`- ${sanitizeReportValue(graph.root.promptName)} [${includeGraphRootStatus(graph)}] ${sanitizeReportValue(graph.root.filePath)}`);
-		for (const diagnostic of sortDiagnostics(graph.diagnostics)) {
+		for (const diagnostic of sortDiagnostics(rootOnlyGraphDiagnostics(graph))) {
 			lines.push(formatIncludeGraphDiagnostic("  ! ", diagnostic));
 		}
 		for (const edge of sortIncludeGraphEdges(graph.edges)) {
