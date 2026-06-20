@@ -238,6 +238,161 @@ test("loadPromptsWithModel can include plain prompts for chain resolution withou
 	});
 });
 
+test("prompt-library roots are inventoried with root metadata without promoting plain library files", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const projectPrompts = join(cwd, ".pi", "prompts");
+		const projectLibrary = join(cwd, ".pi", "prompt-library");
+		const userLibrary = join(root, ".pi", "agent", "prompt-library");
+		mkdirSync(projectPrompts, { recursive: true });
+		mkdirSync(join(projectLibrary, "partials"), { recursive: true });
+		mkdirSync(userLibrary, { recursive: true });
+		writeFileSync(join(projectPrompts, "core.md"), "---\nmodel: claude-sonnet-4-20250514\n---\ncore");
+		writeFileSync(join(projectLibrary, "review.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nreview");
+		writeFileSync(join(projectLibrary, "partials", "rules.md"), "Follow repo standards.");
+		writeFileSync(join(userLibrary, "global-rules.md"), "User library fragment.");
+
+		const runtime = loadPromptsWithModel(cwd, true);
+		assert.equal(runtime.prompts.get("core")?.rootKind, "prompts");
+		assert.equal(runtime.prompts.get("review")?.source, "project");
+		assert.equal(runtime.prompts.get("review")?.rootKind, "prompt-library");
+		assert.equal(runtime.prompts.get("review")?.filePath, join(projectLibrary, "review.md"));
+		assert.equal(runtime.prompts.has("rules"), false);
+		assert.equal(runtime.prompts.has("global-rules"), false);
+
+		const records = collectPromptSourceRecords(cwd, true);
+		const core = records.records.find((record) => record.promptName === "core");
+		assert.ok(core);
+		assert.equal(core.rootKind, "prompts");
+		assert.equal(core.promptCapable, true);
+
+		const review = records.records.find((record) => record.promptName === "review");
+		assert.ok(review);
+		assert.equal(review.source, "project");
+		assert.equal(review.rootKind, "prompt-library");
+		assert.equal(review.filePath, join(projectLibrary, "review.md"));
+		assert.equal(review.promptRoot, projectLibrary);
+		assert.equal(review.promptCapable, true);
+
+		const rules = records.records.find((record) => record.promptName === "rules");
+		assert.ok(rules);
+		assert.equal(rules.source, "project");
+		assert.equal(rules.rootKind, "prompt-library");
+		assert.equal(rules.promptRoot, projectLibrary);
+		assert.equal(rules.promptCapable, false);
+		assert.equal(rules.rawBody, "Follow repo standards.");
+
+		const globalRules = records.records.find((record) => record.promptName === "global-rules");
+		assert.ok(globalRules);
+		assert.equal(globalRules.source, "user");
+		assert.equal(globalRules.rootKind, "prompt-library");
+		assert.equal(globalRules.promptRoot, userLibrary);
+		assert.equal(globalRules.promptCapable, false);
+	});
+});
+
+test("skipped prompt-library source records retain root kind and prompt capability", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const projectLibrary = join(cwd, ".pi", "prompt-library");
+		mkdirSync(projectLibrary, { recursive: true });
+		writeFileSync(join(projectLibrary, "settings.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nreserved");
+		writeFileSync(join(projectLibrary, "bad-includes.md"), '---\nmodel: claude-sonnet-4-20250514\ninclude: one.md\nincludes: ["two.md"]\n---\nbody');
+
+		const runtime = loadPromptsWithModel(cwd, true);
+		assert.equal(runtime.prompts.has("settings"), false);
+		assert.equal(runtime.prompts.has("bad-includes"), false);
+
+		const records = collectPromptSourceRecords(cwd, true);
+		const reserved = records.records.find((record) => record.promptName === "settings");
+		assert.ok(reserved);
+		assert.equal(reserved.rootKind, "prompt-library");
+		assert.equal(reserved.promptCapable, true);
+		assert.equal(reserved.skippedReason, "reserved-command-name");
+
+		const badIncludes = records.records.find((record) => record.promptName === "bad-includes");
+		assert.ok(badIncludes);
+		assert.equal(badIncludes.rootKind, "prompt-library");
+		assert.equal(badIncludes.promptCapable, true);
+		assert.equal(badIncludes.includeMetadataInvalid, true);
+		assert.equal(badIncludes.skippedReason, "invalid-includes-conflict");
+	});
+});
+
+test("prompt-library invalid include metadata without model remains prompt-capable source inventory", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const projectLibrary = join(cwd, ".pi", "prompt-library");
+		mkdirSync(projectLibrary, { recursive: true });
+		writeFileSync(join(projectLibrary, "bad-includes.md"), '---\ninclude: one.md\nincludes: ["two.md"]\n---\nbody');
+
+		const records = collectPromptSourceRecords(cwd, false);
+		const badIncludes = records.records.find((record) => record.promptName === "bad-includes");
+		assert.ok(badIncludes);
+		assert.equal(badIncludes.rootKind, "prompt-library");
+		assert.equal(badIncludes.promptCapable, true);
+		assert.equal(badIncludes.includeMetadataInvalid, true);
+		assert.equal(badIncludes.skippedReason, "invalid-includes-conflict");
+	});
+});
+
+test("reserved prompt-library include-only source records remain prompt-capable", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const projectLibrary = join(cwd, ".pi", "prompt-library");
+		mkdirSync(projectLibrary, { recursive: true });
+		writeFileSync(join(projectLibrary, "settings.md"), '---\ndescription: "reserved"\n---\n<include file="partials/rules.md" />');
+		writeFileSync(join(projectLibrary, "model.md"), '---\ninclude: partials/rules.md\n---\n<includes />');
+
+		const records = collectPromptSourceRecords(cwd, false);
+		const inlineReserved = records.records.find((record) => record.promptName === "settings");
+		assert.ok(inlineReserved);
+		assert.equal(inlineReserved.rootKind, "prompt-library");
+		assert.equal(inlineReserved.promptCapable, true);
+		assert.equal(inlineReserved.hasInlineIncludes, true);
+		assert.equal(inlineReserved.skippedReason, "reserved-command-name");
+
+		const placeholderReserved = records.records.find((record) => record.promptName === "model");
+		assert.ok(placeholderReserved);
+		assert.equal(placeholderReserved.rootKind, "prompt-library");
+		assert.equal(placeholderReserved.promptCapable, true);
+		assert.equal(placeholderReserved.hasIncludesPlaceholder, true);
+		assert.equal(placeholderReserved.skippedReason, "reserved-command-name");
+	});
+});
+
+test("source records exclude plain prompt-library fragments unless requested", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const projectLibrary = join(cwd, ".pi", "prompt-library");
+		mkdirSync(join(projectLibrary, "partials"), { recursive: true });
+		writeFileSync(join(projectLibrary, "command.md"), "---\nmodel: claude-sonnet-4-20250514\n---\ncommand");
+		writeFileSync(join(projectLibrary, "partials", "rules.md"), "plain fragment");
+
+		const defaultRecords = collectPromptSourceRecords(cwd, false);
+		assert.ok(defaultRecords.records.find((record) => record.promptName === "command"));
+		assert.equal(defaultRecords.records.some((record) => record.promptName === "rules"), false);
+
+		const plainRecords = collectPromptSourceRecords(cwd, true);
+		assert.ok(plainRecords.records.find((record) => record.promptName === "rules"));
+	});
+});
+
+test("prompt-library prompt includes do not resolve from prompt-library roots in slice 1", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const projectLibrary = join(cwd, ".pi", "prompt-library");
+		mkdirSync(join(projectLibrary, "partials"), { recursive: true });
+		writeFileSync(join(projectLibrary, "review.md"), "---\nmodel: claude-sonnet-4-20250514\ninclude: partials/rules.md\n---\nreview body");
+		writeFileSync(join(projectLibrary, "partials", "rules.md"), "library rules");
+
+		const runtime = loadPromptsWithModel(cwd, true);
+		assert.equal(runtime.prompts.has("review"), false);
+		assert.equal(runtime.diagnostics.some((diagnostic) => diagnostic.code === "include-not-found"), true);
+		assert.doesNotMatch(runtime.diagnostics.map((diagnostic) => diagnostic.message).join("\n"), /library rules/);
+	});
+});
+
 test("source record exists for a prompt with missing include that runtime loader skips", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");

@@ -220,6 +220,38 @@ function collectPromptIncludeGraph(record: PromptSourceRecord, homeDir?: string)
 	}
 
 	if (!record.isChainWrapper && record.includeMetadataInvalid !== true) {
+		if (record.rootKind === "prompt-library") {
+			for (const includePath of record.includes ?? []) {
+				collectPromptLibraryBlockedIncludeEdge({
+					includePath,
+					kind: "frontmatter",
+					fromNodeId: rootNodeId,
+					currentFilePath: context.promptFilePath,
+					context,
+					nodes,
+					edges,
+					nextOrder: () => nextOrder++,
+					nextUnresolvedNodeId: () => nextUnresolvedNodeId++,
+				});
+			}
+
+			for (const includePath of extractPromptInlineIncludes(record.rawBody)) {
+				collectPromptLibraryBlockedIncludeEdge({
+					includePath,
+					kind: "inline",
+					fromNodeId: rootNodeId,
+					currentFilePath: context.promptFilePath,
+					context,
+					nodes,
+					edges,
+					nextOrder: () => nextOrder++,
+					nextUnresolvedNodeId: () => nextUnresolvedNodeId++,
+				});
+			}
+
+			return { root: record, nodes: [...nodes.values()], edges, diagnostics };
+		}
+
 		for (const includePath of record.includes ?? []) {
 			collectIncludeEdge({
 				includePath,
@@ -254,6 +286,45 @@ function collectPromptIncludeGraph(record: PromptSourceRecord, homeDir?: string)
 	}
 
 	return { root: record, nodes: [...nodes.values()], edges, diagnostics };
+}
+
+interface CollectPromptLibraryBlockedIncludeEdgeInput {
+	includePath: string;
+	kind: PromptIncludeGraphEdgeKind;
+	fromNodeId: string;
+	currentFilePath: string;
+	context: IncludeRenderContext;
+	nodes: Map<string, PromptIncludeGraphNode>;
+	edges: PromptIncludeGraphEdge[];
+	nextOrder: () => number;
+	nextUnresolvedNodeId: () => number;
+}
+
+function collectPromptLibraryBlockedIncludeEdge(input: CollectPromptLibraryBlockedIncludeEdgeInput): void {
+	const diagnostic = createDiagnostic(
+		input.context,
+		input.currentFilePath,
+		"include-not-found",
+		`Prompt include ${JSON.stringify(input.includePath.trim())} was not found in current file directory, prompt root, global prompt partials, or project prompt partials.`,
+	);
+	input.context.diagnostics.push(diagnostic);
+	const toNodeId = `unresolved:${input.nextUnresolvedNodeId()}`;
+	input.nodes.set(toNodeId, {
+		id: toNodeId,
+		kind: "unresolved",
+		status: "failed",
+		includePath: input.includePath,
+		diagnostics: [diagnostic],
+	});
+	input.edges.push({
+		fromNodeId: input.fromNodeId,
+		toNodeId,
+		kind: input.kind,
+		includePath: input.includePath,
+		order: input.nextOrder(),
+		status: "failed",
+		diagnostics: [diagnostic],
+	});
 }
 
 function createIncludeRenderContext(input: RenderPromptIncludesInput & { diagnostics?: PromptLoaderDiagnostic[] }): IncludeRenderContext {
@@ -302,6 +373,8 @@ function createRenderGraph(
 		promptRoot: input.promptRoot,
 		cwd: input.cwd,
 		source: input.source,
+		rootKind: "prompts",
+		promptCapable: true,
 		rawBody: input.content,
 		includes: input.includes,
 		hasInlineIncludes: HAS_INLINE_INCLUDE_PATTERN.test(input.content),

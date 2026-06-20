@@ -77,6 +77,8 @@ function sourceRecord(fixture: IncludeFixture, overrides: Partial<PromptSourceRe
 		promptRoot: fixture.promptRoot,
 		cwd: fixture.cwd,
 		source: "project",
+		rootKind: "prompts",
+		promptCapable: true,
 		rawBody: "body",
 		hasInlineIncludes: false,
 		hasIncludesPlaceholder: false,
@@ -628,6 +630,36 @@ test("include graph represents missing include as failed edge and node", () => {
 		assert.equal(graph.edges.length, 1);
 		assert.equal(graph.edges[0].status, "failed");
 		assert.equal(graph.edges[0].diagnostics.some((diagnostic) => diagnostic.code === "include-not-found"), true);
+		assert.equal(graph.nodes.some((node) => node.kind === "unresolved" && node.status === "failed"), true);
+	});
+});
+
+test("include graph does not resolve prompt-library includes from the library root in Slice 1", () => {
+	withFixture((fixture) => {
+		const promptLibrary = join(fixture.cwd, ".pi", "prompt-library");
+		const reviewPath = join(promptLibrary, "review.md");
+		const rulesPath = join(promptLibrary, "partials", "rules.md");
+		mkdirSync(dirname(rulesPath), { recursive: true });
+		writeFileSync(reviewPath, "---\nmodel: claude-sonnet-4\ninclude: partials/rules.md\n---\nreview");
+		writeFileSync(rulesPath, "rules");
+
+		const graph = collectSingleGraph(
+			fixture,
+			sourceRecord(fixture, {
+				promptName: "review",
+				filePath: reviewPath,
+				promptRoot: promptLibrary,
+				rootKind: "prompt-library",
+				rawBody: "review",
+				includes: ["partials/rules.md"],
+			}),
+		);
+
+		assert.equal(graph.edges.length, 1);
+		assert.equal(graph.edges[0].includePath, "partials/rules.md");
+		assert.equal(graph.edges[0].status, "failed");
+		assert.equal(graph.edges[0].diagnostics.some((diagnostic) => diagnostic.code === "include-not-found"), true);
+		assert.equal(graph.nodes.some((node) => node.id === `file:${realpathSync(rulesPath)}` && node.status === "ok"), false);
 		assert.equal(graph.nodes.some((node) => node.kind === "unresolved" && node.status === "failed"), true);
 	});
 });

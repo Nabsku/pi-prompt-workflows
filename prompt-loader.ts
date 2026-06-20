@@ -41,6 +41,13 @@ export const RESERVED_COMMAND_NAMES = new Set([
 ]);
 
 export type PromptSource = "user" | "project";
+export type PromptRootKind = "prompts" | "prompt-library";
+
+interface PromptRoot {
+	source: PromptSource;
+	kind: PromptRootKind;
+	dir: string;
+}
 
 export interface DelegationLineupSlot {
 	agent: string;
@@ -97,6 +104,7 @@ export interface PromptWithModel {
 	reviewers?: DelegationLineupSlot[];
 	finalApplier?: DelegationLineupSlot;
 	source: PromptSource;
+	rootKind: PromptRootKind;
 	subdir?: string;
 	filePath: string;
 	includeGraph?: PromptIncludeGraph;
@@ -121,6 +129,8 @@ export interface PromptSourceRecord {
 	promptRoot: string;
 	cwd: string;
 	source: PromptSource;
+	rootKind: PromptRootKind;
+	promptCapable: boolean;
 	rawBody: string;
 	includes?: string[];
 	hasInlineIncludes: boolean;
@@ -1528,9 +1538,54 @@ function normalizeThinkingLevels(
 	return levels.map((level) => level.toLowerCase() as ThinkingLevel);
 }
 
+function getPromptRoots(cwd: string): PromptRoot[] {
+	return [
+		{ source: "user", kind: "prompts", dir: join(homedir(), ".pi", "agent", "prompts") },
+		{ source: "user", kind: "prompt-library", dir: join(homedir(), ".pi", "agent", "prompt-library") },
+		{ source: "project", kind: "prompts", dir: resolve(cwd, ".pi", "prompts") },
+		{ source: "project", kind: "prompt-library", dir: resolve(cwd, ".pi", "prompt-library") },
+	];
+}
+
+const MODEL_CONDITIONAL_DIRECTIVE_PATTERN = /<if-model(?:\s|>)|<else(?:\s|>)|<\/if-model\s*>|<\/else(?:\s|>)/;
+
+function isPromptCapable(input: {
+	chain?: string;
+	hasModelField: boolean;
+	hasExtensionSpecificConfig: boolean;
+}): boolean {
+	return input.chain !== undefined || input.hasModelField || input.hasExtensionSpecificConfig;
+}
+
+function calculatePromptCapable(input: {
+	frontmatter: Record<string, unknown>;
+	body: string;
+	chain?: string;
+	hasExtensionSpecificConfig?: boolean;
+	ignoreBodyIncludes?: boolean;
+}): boolean {
+	const hasIncludeMetadata = Object.hasOwn(input.frontmatter, "include") || Object.hasOwn(input.frontmatter, "includes");
+	const hasBodyIncludes = input.ignoreBodyIncludes ? false : hasPromptIncludeDirectives(input.body);
+	const hasSkillConfig = Object.hasOwn(input.frontmatter, "skill") || Object.hasOwn(input.frontmatter, "skills");
+	const hasThinkingConfig = Object.hasOwn(input.frontmatter, "thinking");
+	const hasModelConditionalDirectives = MODEL_CONDITIONAL_DIRECTIVE_PATTERN.test(input.body);
+	return isPromptCapable({
+		chain: input.chain,
+		hasModelField: Object.hasOwn(input.frontmatter, "model"),
+		hasExtensionSpecificConfig:
+			input.hasExtensionSpecificConfig === true ||
+			hasIncludeMetadata ||
+			hasBodyIncludes ||
+			hasSkillConfig ||
+			hasThinkingConfig ||
+			hasModelConditionalDirectives,
+	});
+}
+
 function loadPromptsWithModelFromDir(
 	dir: string,
 	source: PromptSource,
+	rootKind: PromptRootKind,
 	includePlainPrompts: boolean,
 	loadCwd: string,
 	promptRoot = dir,
@@ -1601,7 +1656,7 @@ function loadPromptsWithModelFromDir(
 
 			if (isDirectory) {
 				const nextSubdir = subdir ? `${subdir}:${entry.name}` : entry.name;
-				const nested = loadPromptsWithModelFromDir(fullPath, source, includePlainPrompts, loadCwd, promptRoot, nextSubdir, visitedDirectories);
+				const nested = loadPromptsWithModelFromDir(fullPath, source, rootKind, includePlainPrompts, loadCwd, promptRoot, nextSubdir, visitedDirectories);
 				prompts.push(...nested.prompts);
 				diagnostics.push(...nested.diagnostics);
 				continue;
@@ -1948,6 +2003,18 @@ function loadPromptsWithModelFromDir(
 				}
 				let content = body;
 				let includeGraph: PromptIncludeGraph | undefined;
+				if (shouldRenderIncludes && rootKind === "prompt-library") {
+					const unresolvedInclude = includes?.[0] ?? extractPromptInlineIncludes(body)[0] ?? "<includes />";
+					diagnostics.push(
+						createDiagnostic(
+							"include-not-found",
+							fullPath,
+							source,
+							`Prompt-library prompt include ${JSON.stringify(unresolvedInclude)} is not resolved from prompt-library roots yet.`,
+						),
+					);
+					continue;
+				}
 				if (shouldRenderIncludes) {
 					const renderedIncludes = renderPromptIncludes({
 						promptName: name,
@@ -1965,7 +2032,6 @@ function loadPromptsWithModelFromDir(
 					content = renderedIncludes.content;
 					includeGraph = renderedIncludes.includeGraph;
 				}
-				const hasModelConditionalDirectives = /<if-model(?:\s|>)|<else(?:\s|>)|<\/if-model\s*>|<\/else(?:\s|>)/.test(content);
 				const hasExtensionSpecificConfig =
 					skills !== undefined ||
 					thinking !== undefined ||
@@ -1979,9 +2045,9 @@ function loadPromptsWithModelFromDir(
 					hasLineup ||
 					safeWorktree === true ||
 					subagent !== undefined ||
-					safeInheritContext ||
-					hasModelConditionalDirectives;
-				if (!chain && !hasModelField && !hasExtensionSpecificConfig && !includePlainPrompts) {
+					safeInheritContext;
+				const promptCapable = calculatePromptCapable({ frontmatter, body: content, chain, hasExtensionSpecificConfig });
+				if (!promptCapable && (rootKind === "prompt-library" || !includePlainPrompts)) {
 					continue;
 				}
 
@@ -2013,6 +2079,7 @@ function loadPromptsWithModelFromDir(
 					reviewers: safeReviewers,
 					finalApplier: safeFinalApplier,
 					source,
+					rootKind,
 					subdir: subdir || undefined,
 					filePath: fullPath,
 					includeGraph,
@@ -2045,6 +2112,7 @@ function loadPromptsWithModelFromDir(
 function collectPromptSourceRecordsFromDir(
 	dir: string,
 	source: PromptSource,
+	rootKind: PromptRootKind,
 	includePlainPrompts: boolean,
 	loadCwd: string,
 	promptRoot = dir,
@@ -2115,7 +2183,7 @@ function collectPromptSourceRecordsFromDir(
 
 			if (isDirectory) {
 				const nextSubdir = subdir ? `${subdir}:${entry.name}` : entry.name;
-				const nested = collectPromptSourceRecordsFromDir(fullPath, source, includePlainPrompts, loadCwd, promptRoot, nextSubdir, visitedDirectories);
+				const nested = collectPromptSourceRecordsFromDir(fullPath, source, rootKind, includePlainPrompts, loadCwd, promptRoot, nextSubdir, visitedDirectories);
 				records.push(...nested.records);
 				diagnostics.push(...nested.diagnostics);
 				continue;
@@ -2131,16 +2199,20 @@ function collectPromptSourceRecordsFromDir(
 
 				const promptName = entry.name.slice(0, -3);
 				if (RESERVED_COMMAND_NAMES.has(promptName)) {
+					const rawChain = typeof frontmatter.chain === "string" && frontmatter.chain.trim() ? frontmatter.chain.trim() : undefined;
+					const promptCapable = calculatePromptCapable({ frontmatter, body: parsed.body, chain: rawChain, ignoreBodyIncludes: rawChain !== undefined });
 					records.push({
 						promptName,
 						filePath: fullPath,
 						promptRoot,
 						cwd: loadCwd,
 						source,
+						rootKind,
+						promptCapable,
 						rawBody: parsed.body,
-						hasInlineIncludes: false,
-						hasIncludesPlaceholder: false,
-						isChainWrapper: false,
+						hasInlineIncludes: rawChain === undefined && extractPromptInlineIncludes(parsed.body).length > 0,
+						hasIncludesPlaceholder: rawChain === undefined && hasPromptIncludesPlaceholder(parsed.body),
+						isChainWrapper: rawChain !== undefined,
 						skippedReason: "reserved-command-name",
 					});
 					continue;
@@ -2161,15 +2233,11 @@ function collectPromptSourceRecordsFromDir(
 				const converge = normalizeConverge(frontmatter.converge, fullPath, source, diagnostics);
 				const boomerang = normalizeBoomerang(frontmatter.boomerang, fullPath, source, diagnostics);
 
-				if (!includePlainPrompts) {
-					const hasModelField = Object.hasOwn(frontmatter, "model");
-					const hasSourceGraphFeature =
+				const hasSourceGraphFeature =
 						isChainWrapper ||
 						includes !== undefined ||
 						hasInlineIncludes ||
 						hasIncludesPlaceholder ||
-						Object.hasOwn(frontmatter, "skill") ||
-						Object.hasOwn(frontmatter, "skills") ||
 						fresh === true ||
 						loop !== undefined ||
 						converge === false ||
@@ -2180,10 +2248,15 @@ function collectPromptSourceRecordsFromDir(
 						Object.hasOwn(frontmatter, "run") ||
 						Object.hasOwn(frontmatter, "script") ||
 						Object.hasOwn(frontmatter, "bestOfN") ||
-						Object.hasOwn(frontmatter, "worktree") ||
-						/<if-model(?:\s|>)|<else(?:\s|>)|<\/if-model\s*>|<\/else(?:\s|>)/.test(parsed.body);
-					if (!hasModelField && !hasSourceGraphFeature) continue;
-				}
+						Object.hasOwn(frontmatter, "worktree");
+				const promptCapable = calculatePromptCapable({
+					frontmatter,
+					body: parsed.body,
+					chain,
+					hasExtensionSpecificConfig: hasSourceGraphFeature,
+					ignoreBodyIncludes: isChainWrapper,
+				});
+				if (!promptCapable && !includePlainPrompts) continue;
 
 				records.push({
 					promptName,
@@ -2191,6 +2264,8 @@ function collectPromptSourceRecordsFromDir(
 					promptRoot,
 					cwd: loadCwd,
 					source,
+					rootKind,
+					promptCapable,
 					rawBody: parsed.body,
 					...(includes !== undefined ? { includes } : {}),
 					hasInlineIncludes,
@@ -2239,8 +2314,6 @@ function isIncludeGraphRelevantSkippedRecord(record: PromptSourceRecord): boolea
 }
 
 export function collectPromptSourceRecords(cwd: string, includePlainPrompts = true): CollectPromptSourceRecordsResult {
-	const globalDir = join(homedir(), ".pi", "agent", "prompts");
-	const projectDir = resolve(cwd, ".pi", "prompts");
 	const recordMap = new Map<string, PromptSourceRecord[]>();
 	const diagnostics: PromptLoaderDiagnostic[] = [];
 	const loaderResult = loadPromptsWithModel(cwd, includePlainPrompts);
@@ -2252,7 +2325,7 @@ export function collectPromptSourceRecords(cwd: string, includePlainPrompts = tr
 
 	function addRecord(record: PromptSourceRecord) {
 		const recordIsEffective = effectivePromptPaths.has(record.filePath);
-		if (!recordIsEffective && !isIncludeGraphRelevantSkippedRecord(record)) {
+		if (!recordIsEffective && !isIncludeGraphRelevantSkippedRecord(record) && record.rootKind !== "prompt-library") {
 			return;
 		}
 
@@ -2297,18 +2370,16 @@ export function collectPromptSourceRecords(cwd: string, includePlainPrompts = tr
 		);
 	}
 
-	const globalResult = collectPromptSourceRecordsFromDir(globalDir, "user", true, cwd, globalDir);
-	const projectResult = collectPromptSourceRecordsFromDir(projectDir, "project", true, cwd, projectDir);
-	diagnostics.push(...globalResult.diagnostics, ...projectResult.diagnostics);
-	for (const record of globalResult.records) addRecord(record);
-	for (const record of projectResult.records) addRecord(record);
+	for (const root of getPromptRoots(cwd)) {
+		const rootResult = collectPromptSourceRecordsFromDir(root.dir, root.source, root.kind, includePlainPrompts, cwd, root.dir);
+		diagnostics.push(...rootResult.diagnostics);
+		for (const record of rootResult.records) addRecord(record);
+	}
 
 	return { records: [...recordMap.values()].flat(), diagnostics: dedupeDiagnostics([...diagnostics, ...loaderResult.diagnostics]) };
 }
 
 export function loadPromptsWithModel(cwd: string, includePlainPrompts = false): LoadPromptsWithModelResult {
-	const globalDir = join(homedir(), ".pi", "agent", "prompts");
-	const projectDir = resolve(cwd, ".pi", "prompts");
 	const promptMap = new Map<string, PromptWithModel>();
 	const diagnostics: PromptLoaderDiagnostic[] = [];
 
@@ -2334,16 +2405,12 @@ export function loadPromptsWithModel(cwd: string, includePlainPrompts = false): 
 		promptMap.set(prompt.name, prompt);
 	}
 
-	const globalResult = loadPromptsWithModelFromDir(globalDir, "user", includePlainPrompts, cwd, globalDir);
-	diagnostics.push(...globalResult.diagnostics);
-	for (const prompt of globalResult.prompts) {
-		addPrompt(prompt);
-	}
-
-	const projectResult = loadPromptsWithModelFromDir(projectDir, "project", includePlainPrompts, cwd, projectDir);
-	diagnostics.push(...projectResult.diagnostics);
-	for (const prompt of projectResult.prompts) {
-		addPrompt(prompt);
+	for (const root of getPromptRoots(cwd)) {
+		const rootResult = loadPromptsWithModelFromDir(root.dir, root.source, root.kind, includePlainPrompts, cwd, root.dir);
+		diagnostics.push(...rootResult.diagnostics);
+		for (const prompt of rootResult.prompts) {
+			addPrompt(prompt);
+		}
 	}
 
 	return { prompts: promptMap, diagnostics };
