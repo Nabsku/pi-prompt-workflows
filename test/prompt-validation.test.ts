@@ -672,6 +672,162 @@ test("validatePromptTemplates ignores unsafe registered wildcard matches", () =>
 	});
 });
 
+test("validatePromptTemplates counts and validates command-capable prompt-library prompts", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-library", "review.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nReview $@");
+
+		const result = validatePromptTemplates(cwd);
+
+		assert.equal(result.ok, true);
+		assert.equal(result.promptCount, 1);
+		assert.deepEqual(result.diagnostics, []);
+		assert.equal(result.includeGraphs.find((entry) => entry.root.promptName === "review")?.root.rootKind, "prompt-library");
+	});
+});
+
+test("validatePromptTemplates counts scalar skill-only prompt-library prompts and resolves skills", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "skills", "tmux"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "skills", "tmux", "SKILL.md"), "# tmux\n");
+		writeFileSync(join(cwd, ".pi", "prompt-library", "uses-tmux.md"), "---\nskill: tmux\n---\nUse tmux");
+
+		const result = validatePromptTemplates(cwd);
+
+		assert.equal(result.ok, true);
+		assert.equal(result.promptCount, 1);
+		assert.deepEqual(result.diagnostics, []);
+	});
+});
+
+test("validatePromptTemplates counts plural skills-only prompt-library prompts and resolves skills", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "skills", "tmux"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "skills", "review-typescript"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "skills", "tmux", "SKILL.md"), "# tmux\n");
+		writeFileSync(join(cwd, ".pi", "skills", "review-typescript", "SKILL.md"), "# review\n");
+		writeFileSync(join(cwd, ".pi", "prompt-library", "skilled.md"), "---\nskills: [tmux, review-*]\n---\nUse skills");
+
+		const result = validatePromptTemplates(cwd);
+
+		assert.equal(result.ok, true);
+		assert.equal(result.promptCount, 1);
+		assert.deepEqual(result.diagnostics, []);
+	});
+});
+
+test("unreferenced plain prompt-library include fragments do not count or validate prompt-like metadata", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-library", "fragment.md"), "---\ndescription: shared fragment\n---\nShared rules only");
+
+		const result = validatePromptTemplates(cwd);
+
+		assert.equal(result.ok, true);
+		assert.equal(result.promptCount, 0);
+		assert.deepEqual(result.diagnostics, []);
+		assert.equal(result.includeGraphs.find((entry) => entry.root.promptName === "fragment")?.effective, false);
+	});
+});
+
+test("plain prompt-library fragment appears in include graph when included", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompt-library", "partials"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-library", "partials", "rules.md"), "Shared rules");
+		writeFileSync(join(cwd, ".pi", "prompt-library", "review.md"), "---\nmodel: claude-sonnet-4-20250514\ninclude: partials/rules.md\n---\nReview");
+
+		const result = validatePromptTemplates(cwd);
+		const graph = result.includeGraphs.find((entry) => entry.root.promptName === "review");
+
+		assert.equal(result.ok, true);
+		assert.equal(result.promptCount, 1);
+		assert.ok(graph);
+		assert.equal(graph.root.rootKind, "prompt-library");
+		assert.equal(graph.edges.length, 1);
+		assert.equal(graph.edges[0]?.status, "ok");
+		assert.match(graph.edges[0]?.includePath ?? "", /partials\/rules\.md/);
+	});
+});
+
+test("prompt-library prompt with missing include fails validation and keeps prompt-library graph root", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
+		const promptPath = join(cwd, ".pi", "prompt-library", "review.md");
+		writeFileSync(promptPath, "---\nmodel: claude-sonnet-4-20250514\ninclude: missing.md\n---\nReview");
+
+		const result = validatePromptTemplates(cwd);
+		const graph = result.includeGraphs.find((entry) => entry.root.promptName === "review");
+
+		assert.equal(result.ok, false);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "include-not-found"), true);
+		assert.ok(graph);
+		assert.equal(graph.skipped, true);
+		assert.equal(graph.root.filePath, promptPath);
+		assert.equal(graph.root.rootKind, "prompt-library");
+		assert.equal(graph.edges[0]?.status, "failed");
+	});
+});
+
+test("prompt-library prompt with invalid skill frontmatter reports diagnostics", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-library", "bad-skill.md"), "---\nmodel: claude-sonnet-4-20250514\nskill: []\n---\nBad");
+
+		const result = validatePromptTemplates(cwd);
+
+		assert.equal(result.ok, false);
+		assert.equal(result.promptCount, 0);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "invalid-skills"), true);
+	});
+});
+
+test("chain wrappers can target command-capable prompt-library steps but not include-only fragments", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-library", "analyze.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nAnalyze");
+		writeFileSync(join(cwd, ".pi", "prompt-library", "rules.md"), "Shared rules");
+		writeFileSync(join(cwd, ".pi", "prompts", "ok-pipeline.md"), "---\nchain: analyze\n---\nignored");
+		writeFileSync(join(cwd, ".pi", "prompts", "bad-pipeline.md"), "---\nchain: rules\n---\nignored");
+
+		const result = validatePromptTemplates(cwd);
+		const missingStep = result.diagnostics.find((diagnostic) => diagnostic.code === "chain-step-not-found");
+
+		assert.equal(result.ok, false);
+		assert.ok(missingStep);
+		assert.match(missingStep.message, /rules/);
+		assert.doesNotMatch(missingStep.message, /analyze/);
+	});
+});
+
+test("duplicate prompt-library names and reserved command names surface diagnostics", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompt-library", "nested"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-library", "dup.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nfirst");
+		writeFileSync(join(cwd, ".pi", "prompt-library", "nested", "dup.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nsecond");
+		writeFileSync(join(cwd, ".pi", "prompt-library", "settings.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nreserved");
+
+		const result = validatePromptTemplates(cwd);
+		const codes = result.diagnostics.map((diagnostic) => diagnostic.code);
+
+		assert.equal(result.ok, false);
+		assert.equal(codes.includes("duplicate-command-name"), true);
+		assert.equal(codes.includes("reserved-command-name"), true);
+	});
+});
+
+
 test("formatPromptValidationReport escapes control characters in diagnostics", () => {
 	const report = formatPromptValidationReport({
 		ok: false,
@@ -690,6 +846,8 @@ test("formatPromptValidationReport escapes control characters in diagnostics", (
 				promptRoot: "/tmp/prompts",
 				cwd: "/tmp",
 				source: "project",
+				rootKind: "prompts",
+				promptCapable: true,
 				rawBody: "",
 				hasInlineIncludes: true,
 				hasIncludesPlaceholder: false,
