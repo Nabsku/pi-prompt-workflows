@@ -378,6 +378,237 @@ test("source records exclude plain prompt-library fragments unless requested", (
 	});
 });
 
+test("prompt-library model prompts load in default and plain-including runtime catalogs", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const projectLibrary = join(cwd, ".pi", "prompt-library");
+		mkdirSync(projectLibrary, { recursive: true });
+		writeFileSync(join(projectLibrary, "review.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nReview $@");
+
+		const defaultResult = loadPromptsWithModel(cwd);
+		const plainResult = loadPromptsWithModel(cwd, true);
+
+		assert.equal(defaultResult.prompts.get("review")?.content, "Review $@");
+		assert.equal(defaultResult.prompts.get("review")?.rootKind, "prompt-library");
+		assert.equal(plainResult.prompts.get("review")?.content, "Review $@");
+		assert.equal(plainResult.prompts.get("review")?.rootKind, "prompt-library");
+	});
+});
+
+test("prompt-library scalar skill alone is prompt-capable in both runtime catalogs", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const projectLibrary = join(cwd, ".pi", "prompt-library");
+		mkdirSync(projectLibrary, { recursive: true });
+		writeFileSync(join(projectLibrary, "skill-only.md"), "---\nskill: tmux\n---\nUse tmux.");
+
+		for (const result of [loadPromptsWithModel(cwd), loadPromptsWithModel(cwd, true)]) {
+			const prompt = result.prompts.get("skill-only");
+			assert.ok(prompt);
+			assert.equal(prompt.rootKind, "prompt-library");
+			assert.deepEqual(prompt.models, []);
+			assert.equal(prompt.skill, "tmux");
+			assert.deepEqual(prompt.skills, ["tmux"]);
+			assert.equal(prompt.content, "Use tmux.");
+		}
+
+		const records = collectPromptSourceRecords(cwd, true);
+		assert.equal(records.records.find((record) => record.promptName === "skill-only")?.promptCapable, true);
+	});
+});
+
+test("prompt-library plural skills alone are prompt-capable in both runtime catalogs", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const projectLibrary = join(cwd, ".pi", "prompt-library");
+		mkdirSync(projectLibrary, { recursive: true });
+		writeFileSync(join(projectLibrary, "skills-only.md"), "---\nskills:\n  - tmux\n---\nUse tmux.");
+
+		for (const result of [loadPromptsWithModel(cwd), loadPromptsWithModel(cwd, true)]) {
+			const prompt = result.prompts.get("skills-only");
+			assert.ok(prompt);
+			assert.equal(prompt.rootKind, "prompt-library");
+			assert.deepEqual(prompt.models, []);
+			assert.equal(prompt.skill, undefined);
+			assert.deepEqual(prompt.skills, ["tmux"]);
+			assert.equal(prompt.content, "Use tmux.");
+		}
+	});
+});
+
+test("plain prompt-library files stay include-only even when plain prompts are requested", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const projectLibrary = join(cwd, ".pi", "prompt-library");
+		mkdirSync(projectLibrary, { recursive: true });
+		writeFileSync(join(projectLibrary, "plain.md"), "Follow repo standards.");
+
+		assert.equal(loadPromptsWithModel(cwd).prompts.has("plain"), false);
+		assert.equal(loadPromptsWithModel(cwd, true).prompts.has("plain"), false);
+
+		const defaultRecords = collectPromptSourceRecords(cwd, false);
+		assert.equal(defaultRecords.records.some((record) => record.promptName === "plain"), false);
+		const plainRecords = collectPromptSourceRecords(cwd, true);
+		const record = plainRecords.records.find((item) => item.promptName === "plain");
+		assert.ok(record);
+		assert.equal(record.rootKind, "prompt-library");
+		assert.equal(record.promptCapable, false);
+		assert.equal(record.rawBody, "Follow repo standards.");
+	});
+});
+
+test("plain .pi/prompts files still load only when plain prompts are requested", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "plain.md"), "Plain project prompt.");
+
+		assert.equal(loadPromptsWithModel(cwd).prompts.has("plain"), false);
+		const prompt = loadPromptsWithModel(cwd, true).prompts.get("plain");
+		assert.ok(prompt);
+		assert.equal(prompt.rootKind, "prompts");
+		assert.equal(prompt.content, "Plain project prompt.");
+	});
+});
+
+test("project prompt-library overrides user prompt-library for command-capable files", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const userLibrary = join(root, ".pi", "agent", "prompt-library");
+		const projectLibrary = join(cwd, ".pi", "prompt-library");
+		mkdirSync(userLibrary, { recursive: true });
+		mkdirSync(projectLibrary, { recursive: true });
+		writeFileSync(join(userLibrary, "same.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nuser library");
+		writeFileSync(join(projectLibrary, "same.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nproject library");
+
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.get("same")?.source, "project");
+		assert.equal(result.prompts.get("same")?.rootKind, "prompt-library");
+		assert.equal(result.prompts.get("same")?.content, "project library");
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "duplicate-command-name"), false);
+	});
+});
+
+test("same-source duplicate inside prompt-library keeps first lexical winner and reports diagnostic", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const projectLibrary = join(cwd, ".pi", "prompt-library");
+		mkdirSync(join(projectLibrary, "a"), { recursive: true });
+		mkdirSync(join(projectLibrary, "z"), { recursive: true });
+		writeFileSync(join(projectLibrary, "a", "dup.md"), "---\nmodel: claude-sonnet-4-20250514\n---\na");
+		writeFileSync(join(projectLibrary, "z", "dup.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nz");
+
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.get("dup")?.content, "a");
+		assert.equal(result.prompts.get("dup")?.rootKind, "prompt-library");
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "duplicate-command-name"), true);
+	});
+});
+
+test("same-source basename across project prompts and prompt-library prefers prompts and reports duplicate", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "same.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nproject prompts");
+		writeFileSync(join(cwd, ".pi", "prompt-library", "same.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nproject library");
+
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.get("same")?.rootKind, "prompts");
+		assert.equal(result.prompts.get("same")?.content, "project prompts");
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "duplicate-command-name"), true);
+	});
+});
+
+test("prompt root precedence matrix across prompts and prompt-library is deterministic", () => {
+	withTempHome((root) => {
+		const cases = [
+			{
+				name: "user-prompts-vs-user-library",
+				left: ["user", "prompts", "user prompts"] as const,
+				right: ["user", "prompt-library", "user library"] as const,
+				expectedSource: "user",
+				expectedRootKind: "prompts",
+				expectedContent: "user prompts",
+				expectDuplicate: true,
+			},
+			{
+				name: "project-prompts-vs-project-library",
+				left: ["project", "prompts", "project prompts"] as const,
+				right: ["project", "prompt-library", "project library"] as const,
+				expectedSource: "project",
+				expectedRootKind: "prompts",
+				expectedContent: "project prompts",
+				expectDuplicate: true,
+			},
+			{
+				name: "user-prompts-vs-project-library",
+				left: ["user", "prompts", "user prompts"] as const,
+				right: ["project", "prompt-library", "project library"] as const,
+				expectedSource: "project",
+				expectedRootKind: "prompt-library",
+				expectedContent: "project library",
+				expectDuplicate: false,
+			},
+			{
+				name: "user-library-vs-project-prompts",
+				left: ["user", "prompt-library", "user library"] as const,
+				right: ["project", "prompts", "project prompts"] as const,
+				expectedSource: "project",
+				expectedRootKind: "prompts",
+				expectedContent: "project prompts",
+				expectDuplicate: false,
+			},
+		] as const;
+
+		function dirFor(cwd: string, source: "user" | "project", kind: "prompts" | "prompt-library") {
+			return source === "user" ? join(root, ".pi", "agent", kind) : join(cwd, ".pi", kind);
+		}
+
+		for (const testCase of cases) {
+			rmSync(join(root, ".pi"), { recursive: true, force: true });
+			const cwd = join(root, testCase.name);
+			for (const [source, kind, content] of [testCase.left, testCase.right]) {
+				const dir = dirFor(cwd, source, kind);
+				mkdirSync(dir, { recursive: true });
+				writeFileSync(join(dir, "same.md"), `---\nmodel: claude-sonnet-4-20250514\n---\n${content}`);
+			}
+
+			const result = loadPromptsWithModel(cwd);
+			const prompt = result.prompts.get("same");
+			assert.ok(prompt, testCase.name);
+			assert.equal(prompt.source, testCase.expectedSource, testCase.name);
+			assert.equal(prompt.rootKind, testCase.expectedRootKind, testCase.name);
+			assert.equal(prompt.content, testCase.expectedContent, testCase.name);
+			assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "duplicate-command-name"), testCase.expectDuplicate, testCase.name);
+		}
+	});
+});
+
+test("reserved names in prompt-library are skipped and reported", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const projectLibrary = join(cwd, ".pi", "prompt-library");
+		mkdirSync(projectLibrary, { recursive: true });
+		writeFileSync(join(projectLibrary, "settings.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nsettings");
+		writeFileSync(join(projectLibrary, "print-prompt.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nprint");
+
+		const result = loadPromptsWithModel(cwd, true);
+		assert.equal(result.prompts.has("settings"), false);
+		assert.equal(result.prompts.has("print-prompt"), false);
+		assert.equal(result.diagnostics.filter((diagnostic) => diagnostic.code === "reserved-command-name").length, 2);
+
+		const records = collectPromptSourceRecords(cwd, true);
+		for (const name of ["settings", "print-prompt"]) {
+			const record = records.records.find((item) => item.promptName === name);
+			assert.ok(record);
+			assert.equal(record.rootKind, "prompt-library");
+			assert.equal(record.promptCapable, true);
+			assert.equal(record.skippedReason, "reserved-command-name");
+		}
+	});
+});
+
 test("prompt-library prompt includes do not resolve from prompt-library roots in slice 1", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
