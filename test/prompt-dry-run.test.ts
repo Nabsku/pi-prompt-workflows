@@ -154,6 +154,8 @@ test("renders includes + $@ args through existing loader/preparation path", asyn
 		const result = assertOk(await createPromptDryRun(loaded.prompts.get("args-demo")!, options(cwd, { rawArgs: "one two" })));
 		assert.equal(result.content, "Args: one two\n\nTail");
 		assert.deepEqual(result.args, ["one", "two"]);
+		assert.deepEqual(result.includeGraph?.edges.map((edge) => edge.includePath), ["args.md"]);
+		assert.equal(result.details.includeGraph, result.includeGraph);
 	});
 });
 

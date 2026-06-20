@@ -4,6 +4,7 @@ import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import type { PromptLoaderDiagnostic, PromptSource, PromptSourceRecord } from "./prompt-loader.js";
 
 export interface RenderPromptIncludesInput {
+	promptName: string;
 	content: string;
 	includes?: string[];
 	promptFilePath: string;
@@ -15,7 +16,7 @@ export interface RenderPromptIncludesInput {
 }
 
 export type RenderPromptIncludesResult =
-	| { ok: true; content: string }
+	| { ok: true; content: string; includeGraph: PromptIncludeGraph }
 	| { ok: false; diagnostics: PromptLoaderDiagnostic[] };
 
 export interface ResolvePromptIncludePathInput {
@@ -86,6 +87,15 @@ interface IncludeRenderContext {
 	diagnostics: PromptLoaderDiagnostic[];
 	roots: IncludeRoot[];
 	allowedRoots: IncludeRoot[];
+	graph: IncludeRenderGraph;
+}
+
+interface IncludeRenderGraph {
+	root: PromptSourceRecord;
+	nodes: Map<string, PromptIncludeGraphNode>;
+	edges: PromptIncludeGraphEdge[];
+	nextOrder: number;
+	nextUnresolvedNodeId: number;
 }
 
 interface ResolvedPromptIncludePath {
@@ -134,26 +144,26 @@ export function renderPromptIncludes(input: RenderPromptIncludesInput): RenderPr
 	const initialStack = canonicalPromptStackEntry(input.promptFilePath);
 	const stack = initialStack ? [initialStack] : [];
 
-	const includeGroup = renderIncludeGroup(input.includes ?? [], context, stack, context.promptFilePath);
-	let content = input.content;
+	let content: string;
 
 	if (hasIncludesPlaceholder) {
-		content = content.replace(INCLUDES_PLACEHOLDER_PATTERN, () => includeGroup);
-	} else if (includeGroup) {
-		content = content ? `${includeGroup}\n\n${content}` : includeGroup;
+		content = renderContentDirectives(input.content, context, stack, context.promptFilePath, input.includes ?? []);
+	} else {
+		const includeGroup = renderIncludeGroup(input.includes ?? [], context, stack, context.promptFilePath);
+		const contentWithPrependedIncludes = includeGroup ? (input.content ? `${includeGroup}\n\n${input.content}` : includeGroup) : input.content;
+		content = renderInlineIncludes(contentWithPrependedIncludes, context, stack, context.promptFilePath);
 	}
 
-	const renderedContent = renderInlineIncludes(content, context, stack, context.promptFilePath);
 	if (context.diagnostics.length > 0) {
-		return { ok: false, diagnostics: context.diagnostics };
+		return { ok: false, diagnostics: dedupeDiagnostics(context.diagnostics) };
 	}
 
-	return { ok: true, content: renderedContent };
+	return { ok: true, content, includeGraph: finishRenderGraph(context) };
 }
 
 export function resolvePromptIncludePath(input: ResolvePromptIncludePathInput): ResolvePromptIncludePathResult {
 	const diagnostics: PromptLoaderDiagnostic[] = [];
-	const context = createIncludeRenderContext({ ...input, content: "", diagnostics });
+	const context = createIncludeRenderContext({ ...input, promptName: "", content: "", diagnostics });
 	const resolved = resolveIncludePath(input.includePath, context, context.promptFilePath);
 	if (!resolved) return { ok: false, diagnostics };
 	return { ok: true, filePath: resolved.filePath };
@@ -168,6 +178,7 @@ export function collectPromptIncludeGraphs(input: CollectPromptIncludeGraphsInpu
 function collectPromptIncludeGraph(record: PromptSourceRecord, homeDir?: string): PromptIncludeGraph {
 	const diagnostics: PromptLoaderDiagnostic[] = [];
 	const context = createIncludeRenderContext({
+		promptName: record.promptName,
 		content: record.rawBody,
 		includes: record.includes,
 		promptFilePath: record.filePath,
@@ -266,14 +277,59 @@ function createIncludeRenderContext(input: RenderPromptIncludesInput & { diagnos
 	const roots = canonicalizeRoots(fallbackRoots);
 	const allowedRoots = canonicalizeRoots([promptDirectoryRoot, ...fallbackRoots]);
 
+	const promptFilePath = resolve(input.promptFilePath);
+	const diagnostics = input.diagnostics ?? [];
 	return {
-		promptFilePath: resolve(input.promptFilePath),
+		promptFilePath,
 		source: input.source,
 		debugBoundaries: input.debugBoundaries ?? false,
 		homeDir,
-		diagnostics: input.diagnostics ?? [],
+		diagnostics,
 		roots,
 		allowedRoots,
+		graph: createRenderGraph(input, promptFilePath, diagnostics),
+	};
+}
+
+function createRenderGraph(
+	input: RenderPromptIncludesInput,
+	promptFilePath: string,
+	diagnostics: PromptLoaderDiagnostic[],
+): IncludeRenderGraph {
+	const root: PromptSourceRecord = {
+		promptName: input.promptName,
+		filePath: promptFilePath,
+		promptRoot: input.promptRoot,
+		cwd: input.cwd,
+		source: input.source,
+		rawBody: input.content,
+		includes: input.includes,
+		hasInlineIncludes: HAS_INLINE_INCLUDE_PATTERN.test(input.content),
+		hasIncludesPlaceholder: HAS_INCLUDES_PLACEHOLDER_PATTERN.test(input.content),
+		isChainWrapper: false,
+	};
+	const rootNode: PromptIncludeGraphNode = {
+		id: nodeIdForFile(promptFilePath),
+		kind: "prompt",
+		status: "ok",
+		filePath: promptFilePath,
+		diagnostics: [],
+	};
+	return {
+		root,
+		nodes: new Map([[rootNode.id, rootNode]]),
+		edges: [],
+		nextOrder: 0,
+		nextUnresolvedNodeId: 0,
+	};
+}
+
+function finishRenderGraph(context: IncludeRenderContext): PromptIncludeGraph {
+	return {
+		root: context.graph.root,
+		nodes: [...context.graph.nodes.values()],
+		edges: context.graph.edges,
+		diagnostics: context.diagnostics,
 	};
 }
 
@@ -322,44 +378,67 @@ function canonicalPromptStackEntry(promptFilePath: string): string | undefined {
 	}
 }
 
+function renderContentDirectives(content: string, context: IncludeRenderContext, stack: string[], currentFilePath: string, includePaths: string[]): string {
+	const directivePattern = /<includes\s*\/\s*>|<include\s+file\s*=\s*(["'])([^"']+)\1\s*\/\s*>/g;
+	let rendered = "";
+	let lastIndex = 0;
+	for (const match of content.matchAll(directivePattern)) {
+		const index = match.index ?? 0;
+		rendered += content.slice(lastIndex, index);
+		if (match[0].startsWith("<includes")) {
+			rendered += renderIncludeGroup(includePaths, context, stack, currentFilePath);
+		} else {
+			rendered += renderIncludeFile(match[2] ?? "", "inline", context, stack, currentFilePath) ?? "";
+		}
+		lastIndex = index + match[0].length;
+	}
+	rendered += content.slice(lastIndex);
+	return rendered;
+}
+
 function renderIncludeGroup(includePaths: string[], context: IncludeRenderContext, stack: string[], currentFilePath: string): string {
 	return includePaths
-		.map((includePath) => renderIncludeFile(includePath, context, stack, currentFilePath))
+		.map((includePath) => renderIncludeFile(includePath, "frontmatter", context, stack, currentFilePath))
 		.filter((content): content is string => content !== undefined)
 		.join("\n\n");
 }
 
 function renderInlineIncludes(content: string, context: IncludeRenderContext, stack: string[], currentFilePath: string): string {
 	return content.replace(INLINE_INCLUDE_PATTERN, (_tag, _quote: string, includePath: string) => {
-		return renderIncludeFile(includePath, context, stack, currentFilePath) ?? "";
+		return renderIncludeFile(includePath, "inline", context, stack, currentFilePath) ?? "";
 	});
 }
 
-function renderIncludeFile(includePath: string, context: IncludeRenderContext, stack: string[], currentFilePath: string): string | undefined {
+function renderIncludeFile(includePath: string, kind: PromptIncludeGraphEdgeKind, context: IncludeRenderContext, stack: string[], currentFilePath: string): string | undefined {
+	const diagnosticStart = context.diagnostics.length;
 	const resolved = resolveIncludePath(includePath, context, currentFilePath);
-	if (!resolved) return undefined;
+	const resolveDiagnostics = context.diagnostics.slice(diagnosticStart);
+	if (!resolved) {
+		recordRenderIncludeEdge(context, currentFilePath, includePath, kind, undefined, "failed", resolveDiagnostics);
+		return undefined;
+	}
 
 	if (stack.includes(resolved.filePath)) {
-		context.diagnostics.push(
-			createDiagnostic(
-				context,
-				currentFilePath,
-				"include-cycle",
-				`Cyclic prompt include detected for ${JSON.stringify(includePath)}: ${[...stack, resolved.filePath].join(" -> ")}.`,
-			),
+		const diagnostic = createDiagnostic(
+			context,
+			currentFilePath,
+			"include-cycle",
+			`Cyclic prompt include detected for ${JSON.stringify(includePath)}: ${[...stack, resolved.filePath].join(" -> ")}.`,
 		);
+		context.diagnostics.push(diagnostic);
+		recordRenderIncludeEdge(context, currentFilePath, includePath, kind, resolved, "failed", [diagnostic]);
 		return undefined;
 	}
 
 	if (stack.length > MAX_INCLUDE_DEPTH) {
-		context.diagnostics.push(
-			createDiagnostic(
-				context,
-				currentFilePath,
-				"include-depth-exceeded",
-				`Prompt include ${JSON.stringify(includePath)} exceeds the maximum nested include depth of ${MAX_INCLUDE_DEPTH}.`,
-			),
+		const diagnostic = createDiagnostic(
+			context,
+			currentFilePath,
+			"include-depth-exceeded",
+			`Prompt include ${JSON.stringify(includePath)} exceeds the maximum nested include depth of ${MAX_INCLUDE_DEPTH}.`,
 		);
+		context.diagnostics.push(diagnostic);
+		recordRenderIncludeEdge(context, currentFilePath, includePath, kind, resolved, "failed", [diagnostic]);
 		return undefined;
 	}
 
@@ -367,22 +446,67 @@ function renderIncludeFile(includePath: string, context: IncludeRenderContext, s
 	try {
 		rawContent = readFileSync(resolved.filePath, "utf8");
 	} catch (error) {
-		context.diagnostics.push(
-			createDiagnostic(
-				context,
-				currentFilePath,
-				"include-read-error",
-				`Unable to read prompt include ${JSON.stringify(includePath)} at ${resolved.filePath}: ${error instanceof Error ? error.message : String(error)}.`,
-			),
+		const diagnostic = createDiagnostic(
+			context,
+			currentFilePath,
+			"include-read-error",
+			`Unable to read prompt include ${JSON.stringify(includePath)} at ${resolved.filePath}: ${error instanceof Error ? error.message : String(error)}.`,
 		);
+		context.diagnostics.push(diagnostic);
+		recordRenderIncludeEdge(context, currentFilePath, includePath, kind, resolved, "failed", [diagnostic]);
 		return undefined;
 	}
 
+	recordRenderIncludeEdge(context, currentFilePath, includePath, kind, resolved, "ok", []);
 	const body = stripMarkdownFrontmatter(rawContent);
 	const renderedBody = renderInlineIncludes(body, context, [...stack, resolved.filePath], resolved.filePath);
 	if (!context.debugBoundaries) return renderedBody;
 
 	return [`<!-- BEGIN include: ${includePath.trim()} -->`, renderedBody, `<!-- END include: ${includePath.trim()} -->`].join("\n");
+}
+
+function recordRenderIncludeEdge(
+	context: IncludeRenderContext,
+	currentFilePath: string,
+	includePath: string,
+	kind: PromptIncludeGraphEdgeKind,
+	resolved: ResolvedPromptIncludePath | undefined,
+	status: PromptIncludeGraphNodeStatus,
+	diagnostics: PromptLoaderDiagnostic[],
+): void {
+	const fromNodeId = nodeIdForFile(resolve(currentFilePath));
+	const toNodeId = resolved ? nodeIdForFile(resolved.filePath) : `unresolved:${context.graph.nextUnresolvedNodeId++}`;
+	if (resolved) {
+		const existingNode = context.graph.nodes.get(toNodeId);
+		const nextStatus: PromptIncludeGraphNodeStatus = existingNode?.status === "failed" ? "failed" : status;
+		context.graph.nodes.set(toNodeId, {
+			...(existingNode ?? {
+				id: toNodeId,
+				kind: "partial" as const,
+				filePath: resolved.filePath,
+				diagnostics: [],
+			}),
+			status: nextStatus,
+			diagnostics: [...(existingNode?.diagnostics ?? []), ...diagnostics],
+		});
+	} else {
+		context.graph.nodes.set(toNodeId, {
+			id: toNodeId,
+			kind: "unresolved",
+			status: "failed",
+			includePath,
+			diagnostics,
+		});
+	}
+	context.graph.edges.push({
+		fromNodeId,
+		toNodeId,
+		kind,
+		includePath,
+		order: context.graph.nextOrder++,
+		status,
+		diagnostics,
+	});
 }
 
 interface CollectIncludeEdgeInput {
@@ -559,6 +683,18 @@ function nodeIdForFile(filePath: string): string {
 
 function pushNode(nodes: Map<string, PromptIncludeGraphNode>, node: PromptIncludeGraphNode): void {
 	if (!nodes.has(node.id)) nodes.set(node.id, node);
+}
+
+function dedupeDiagnostics(diagnostics: PromptLoaderDiagnostic[]): PromptLoaderDiagnostic[] {
+	const seen = new Set<string>();
+	const deduped: PromptLoaderDiagnostic[] = [];
+	for (const diagnostic of diagnostics) {
+		const key = diagnostic.key ?? `${diagnostic.code}:${diagnostic.filePath}:${diagnostic.message}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		deduped.push(diagnostic);
+	}
+	return deduped;
 }
 
 function addRootDiagnostic(context: IncludeRenderContext, nodes: Map<string, PromptIncludeGraphNode>, rootNodeId: string, diagnostic: PromptLoaderDiagnostic): void {

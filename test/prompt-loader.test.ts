@@ -449,6 +449,38 @@ test("loadPromptsWithModel honors <includes /> placement after include rendering
 	});
 });
 
+test("loadPromptsWithModel attaches render-traversal include graph in rendered output order", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompt-partials", "shared"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-partials", "shared", "a.md"), "A");
+		writeFileSync(join(cwd, ".pi", "prompt-partials", "shared", "front.md"), "F");
+		writeFileSync(join(cwd, ".pi", "prompt-partials", "shared", "b.md"), "B");
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "ordered.md"),
+			[
+				"---",
+				"model: claude-sonnet-4-20250514",
+				"include: shared/front.md",
+				"---",
+				'<include file="shared/a.md" />',
+				"<includes />",
+				'<include file="shared/b.md" />',
+			].join("\n"),
+		);
+
+		const result = loadPromptsWithModel(cwd);
+		const prompt = result.prompts.get("ordered");
+		assert.ok(prompt);
+		assert.equal(prompt.content, "A\nF\nB");
+		assert.equal(prompt.includeGraph?.root.promptName, "ordered");
+		assert.equal(prompt.includeGraph?.root.source, "project");
+		assert.deepEqual(prompt.includeGraph?.edges.map((edge) => edge.includePath), ["shared/a.md", "shared/front.md", "shared/b.md"]);
+		assert.deepEqual(prompt.includeGraph?.edges.map((edge) => edge.kind), ["inline", "frontmatter", "inline"]);
+	});
+});
+
 test("loadPromptsWithModel rejects model-less <includes /> without include metadata", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
