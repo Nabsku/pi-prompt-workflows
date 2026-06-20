@@ -9,6 +9,7 @@ import {
 	hasPromptIncludeDirectives,
 	hasPromptIncludesPlaceholder,
 	renderPromptIncludes,
+	type PromptIncludeGraph,
 } from "./prompt-includes.js";
 
 const VALID_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
@@ -98,6 +99,7 @@ export interface PromptWithModel {
 	source: PromptSource;
 	subdir?: string;
 	filePath: string;
+	includeGraph?: PromptIncludeGraph;
 }
 
 export interface PromptLoaderDiagnostic {
@@ -1945,8 +1947,10 @@ function loadPromptsWithModelFromDir(
 					}
 				}
 				let content = body;
+				let includeGraph: PromptIncludeGraph | undefined;
 				if (shouldRenderIncludes) {
 					const renderedIncludes = renderPromptIncludes({
+						promptName: name,
 						content: body,
 						includes,
 						promptFilePath: fullPath,
@@ -1959,6 +1963,7 @@ function loadPromptsWithModelFromDir(
 						continue;
 					}
 					content = renderedIncludes.content;
+					includeGraph = renderedIncludes.includeGraph;
 				}
 				const hasModelConditionalDirectives = /<if-model(?:\s|>)|<else(?:\s|>)|<\/if-model\s*>|<\/else(?:\s|>)/.test(content);
 				const hasExtensionSpecificConfig =
@@ -2010,6 +2015,7 @@ function loadPromptsWithModelFromDir(
 					source,
 					subdir: subdir || undefined,
 					filePath: fullPath,
+					includeGraph,
 				});
 			} catch (error) {
 				diagnostics.push(

@@ -11,6 +11,7 @@ import {
 import type { RegistryLike } from "./model-selection.js";
 import { preparePromptExecution } from "./prompt-execution.js";
 import { expandCwdPath, type PromptWithModel } from "./prompt-loader.js";
+import type { PromptIncludeGraph } from "./prompt-includes.js";
 import { getRequestedSkills, resolvePromptSkills, type RuntimeSkillCommand } from "./prompt-skills.js";
 import { DEFAULT_SUBAGENT_NAME } from "./subagent-runtime.js";
 
@@ -53,6 +54,7 @@ export interface PromptDryRunRuntimeMetadata {
 
 export interface PromptDryRunDetails {
 	skills: PromptDryRunSkillPreview[];
+	includeGraph?: PromptIncludeGraph;
 }
 
 export interface PromptDryRunSuccess {
@@ -65,6 +67,7 @@ export interface PromptDryRunSuccess {
 	warnings: string[];
 	skills: PromptDryRunSkillPreview[];
 	details: PromptDryRunDetails;
+	includeGraph?: PromptIncludeGraph;
 	runtime: PromptDryRunRuntimeMetadata;
 }
 
@@ -379,7 +382,8 @@ export async function createPromptDryRun(
 		modelAlreadyActive: prepared.selectedModel.alreadyActive,
 		warnings,
 		skills: skillPreviews,
-		details: { skills: skillPreviews },
+		includeGraph: effectivePrompt.includeGraph,
+		details: { skills: skillPreviews, includeGraph: effectivePrompt.includeGraph },
 		runtime,
 	};
 }
