@@ -46,6 +46,7 @@ function render(
 	options: { debugBoundaries?: boolean } = {},
 ): RenderPromptIncludesResult {
 	return renderPromptIncludes({
+		promptName: "prompt",
 		content,
 		includes,
 		promptFilePath: fixture.promptFilePath,
@@ -57,7 +58,7 @@ function render(
 	});
 }
 
-function assertOk(result: RenderPromptIncludesResult): asserts result is { ok: true; content: string } {
+function assertOk(result: RenderPromptIncludesResult): asserts result is Extract<RenderPromptIncludesResult, { ok: true }> {
 	if (!result.ok) {
 		assert.fail(`expected render to succeed, diagnostics:\n${result.diagnostics.map((diagnostic) => diagnostic.message).join("\n")}`);
 	}
@@ -123,6 +124,33 @@ test("<includes /> inserts frontmatter includes verbatim", () => {
 
 		assertOk(result);
 		assert.equal(result.content, "before\necho $$ && printf '$& $` $1'\nafter");
+	});
+});
+
+test("repeated <includes /> placeholders do not duplicate identical include diagnostics", () => {
+	withFixture((fixture) => {
+		const result = render(fixture, "<includes />\n<includes />", ["missing.md"]);
+
+		assertFail(result);
+		const notFoundDiagnostics = result.diagnostics.filter((diagnostic) => diagnostic.code === "include-not-found");
+		assert.equal(notFoundDiagnostics.length, 1);
+		assert.equal(new Set(result.diagnostics.map((diagnostic) => diagnostic.key)).size, result.diagnostics.length);
+	});
+});
+
+test("render include graph follows rendered output order around <includes />", () => {
+	withFixture((fixture) => {
+		writeFileSync(join(fixture.projectPartials, "a.md"), "A");
+		writeFileSync(join(fixture.projectPartials, "front.md"), "F");
+		writeFileSync(join(fixture.projectPartials, "b.md"), "B");
+
+		const result = render(fixture, '<include file="a.md" />\n<includes />\n<include file="b.md" />', ["front.md"]);
+
+		assertOk(result);
+		assert.equal(result.content, "A\nF\nB");
+		assert.deepEqual(result.includeGraph.edges.map((edge) => edge.includePath), ["a.md", "front.md", "b.md"]);
+		assert.deepEqual(result.includeGraph.edges.map((edge) => edge.kind), ["inline", "frontmatter", "inline"]);
+		assert.equal(result.includeGraph.root.promptName, "prompt");
 	});
 });
 
