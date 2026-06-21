@@ -368,15 +368,41 @@ test("prompt-library body-only inline includes stay include-only while include m
 		mkdirSync(join(projectLibrary, "partials"), { recursive: true });
 		writeFileSync(join(projectLibrary, "inline-only.md"), '<include file="partials/rules.md" />');
 		writeFileSync(join(projectLibrary, "metadata-include.md"), '---\ninclude: partials/rules.md\n---\n<includes />');
+		writeFileSync(join(projectLibrary, "model-inline.md"), '---\nmodel: claude-sonnet-4-20250514\n---\nBefore <include file="partials/rules.md" /> After');
 		writeFileSync(join(projectLibrary, "partials", "rules.md"), "rules");
 
 		const defaultResult = loadPromptsWithModel(cwd);
 		assert.equal(defaultResult.prompts.has("inline-only"), false);
 		assert.equal(defaultResult.prompts.has("metadata-include"), true);
+		assert.equal(defaultResult.prompts.has("model-inline"), true);
+		assert.equal(defaultResult.prompts.get("model-inline")?.content, "Before rules After");
+		assert.ok(defaultResult.prompts.get("model-inline")?.includeGraph);
 
 		const records = collectPromptSourceRecords(cwd, true);
 		assert.equal(records.records.find((record) => record.promptName === "inline-only")?.promptCapable, false);
 		assert.equal(records.records.find((record) => record.promptName === "metadata-include")?.promptCapable, true);
+		assert.equal(records.records.find((record) => record.promptName === "model-inline")?.promptCapable, true);
+	});
+});
+
+test("include-only prompt-library fragments do not render missing inline includes before being skipped", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const projectLibrary = join(cwd, ".pi", "prompt-library");
+		mkdirSync(projectLibrary, { recursive: true });
+		writeFileSync(join(projectLibrary, "fragment.md"), '<include file="missing.md" />');
+
+		for (const result of [loadPromptsWithModel(cwd), loadPromptsWithModel(cwd, true)]) {
+			assert.equal(result.prompts.has("fragment"), false);
+			assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "include-not-found"), false);
+		}
+
+		const records = collectPromptSourceRecords(cwd, true);
+		const record = records.records.find((item) => item.promptName === "fragment");
+		assert.ok(record);
+		assert.equal(record.rootKind, "prompt-library");
+		assert.equal(record.promptCapable, false);
+		assert.equal(record.hasInlineIncludes, true);
 	});
 });
 
