@@ -223,6 +223,31 @@ test("loadPromptsWithModel ignores generic prompts without model or extension fe
 	});
 });
 
+test("loadPromptsWithModel does not treat visibility metadata alone as command-capable", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "plain-hidden.md"), "---\nhidden: true\ndescription: helper\n---\nPlain helper");
+		writeFileSync(join(cwd, ".pi", "prompt-library", "library-hidden.md"), "---\nhidden: true\ndescription: helper\n---\nLibrary helper");
+
+		const runtime = loadPromptsWithModel(cwd);
+		const chainRuntime = loadPromptsWithModel(cwd, true);
+		assert.equal(runtime.prompts.has("plain-hidden"), false);
+		assert.equal(runtime.prompts.has("library-hidden"), false);
+		assert.equal(chainRuntime.prompts.get("plain-hidden")?.content, "Plain helper");
+		assert.equal(chainRuntime.prompts.has("library-hidden"), false);
+
+		const records = collectPromptSourceRecords(cwd, true);
+		const libraryHidden = records.records.find((record) => record.promptName === "library-hidden");
+		assert.ok(libraryHidden);
+		assert.equal(libraryHidden.rootKind, "prompt-library");
+		assert.equal(libraryHidden.promptCapable, false);
+		assert.equal(libraryHidden.rawBody, "Library helper");
+		assert.equal(records.diagnostics.length, 0);
+	});
+});
+
 test("loadPromptsWithModel can include plain prompts for chain resolution without changing default loading", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");

@@ -3088,6 +3088,31 @@ test("prompt-library scalar-skill command execution resolves and injects request
 	});
 });
 
+test("direct project prompt-library command execution requires session approval", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-library", "review-lib.md"), `---\nmodel: ${MODEL_ID}\n---\nREVIEW $@`);
+
+		const pi = new FakePi();
+		let confirmCalls = 0;
+		const { ctx, getNotifications } = createContext(cwd, pi);
+		(ctx.ui as { confirm: () => Promise<boolean> }).confirm = async () => {
+			confirmCalls++;
+			return false;
+		};
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+
+		assert.ok(pi.commands.has("review-lib"));
+		await pi.commands.get("review-lib")!.handler("src/server.ts", ctx);
+
+		assert.equal(confirmCalls, 1);
+		assert.equal(pi.userMessages.length, 0);
+		assert.ok(getNotifications().some((message) => /was not approved/.test(message)));
+	});
+});
+
 test("chain-prompts can reference command-capable prompt-library steps", async () => {
 	await withTempHome(async (root) => {
 		const cwd = join(root, "project");

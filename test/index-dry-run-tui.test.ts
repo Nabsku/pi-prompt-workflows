@@ -391,3 +391,25 @@ test("TUI picker includes command-capable prompt-library prompts and excludes pl
 		assertNoExecutionSideEffects(pi);
 	});
 });
+
+test("exact dry-run names can open prompt-library commands while fragments stay unavailable", async () => {
+	await setup("tui", async (cwd, pi, ctx) => {
+		writeLibraryPrompt(cwd, "review-lib", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nLibrary review $@");
+		writeLibraryPrompt(cwd, "rules", "Plain shared rules fragment");
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("print-prompt")!.handler!("review-lib src/server.ts", ctx);
+
+		assert.equal(pi.customCalls.length, 1);
+		const inspector = pi.customComponents.at(-1) as { render(width: number): string[] };
+		const rendered = inspector.render(1000).join("\n");
+		assert.match(rendered, /Prompt dry-run: review-lib/);
+		assert.match(rendered, /Library review src\/server\.ts/);
+
+		await pi.commands.get("print-prompt")!.handler!("rules", ctx);
+		assert.equal(pi.customCalls.length, 1);
+		assert.equal(pi.notifications.at(-1)?.type, "error");
+		assert.match(pi.notifications.at(-1)?.message ?? "", /Prompt "rules" not found/);
+		assertNoExecutionSideEffects(pi);
+	});
+});
