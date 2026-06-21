@@ -142,6 +142,7 @@ export interface PromptSourceRecord {
 
 export interface CollectPromptSourceRecordsResult {
 	records: PromptSourceRecord[];
+	inventoryRecords: PromptSourceRecord[];
 	diagnostics: PromptLoaderDiagnostic[];
 }
 
@@ -2317,6 +2318,7 @@ function collectPromptSourceRecordsFromDir(
 						hasInlineIncludes: false,
 						hasIncludesPlaceholder: false,
 						isChainWrapper: false,
+						skippedReason: "invalid-frontmatter",
 					});
 					continue;
 				}
@@ -2466,6 +2468,7 @@ function isIncludeGraphRelevantSkippedRecord(record: PromptSourceRecord): boolea
 
 export function collectPromptSourceRecords(cwd: string, includePlainPrompts = true): CollectPromptSourceRecordsResult {
 	const recordMap = new Map<string, PromptSourceRecord[]>();
+	const inventoryRecords: PromptSourceRecord[] = [];
 	const diagnostics: PromptLoaderDiagnostic[] = [];
 	const loaderResult = loadPromptsWithModel(cwd, includePlainPrompts);
 	const effectivePromptPaths = new Set([...loaderResult.prompts.values()].map((prompt) => prompt.filePath));
@@ -2523,11 +2526,12 @@ export function collectPromptSourceRecords(cwd: string, includePlainPrompts = tr
 
 	for (const root of getPromptRoots(cwd)) {
 		const rootResult = collectPromptSourceRecordsFromDir(root.dir, root.source, root.kind, includePlainPrompts, cwd, root.dir);
+		inventoryRecords.push(...rootResult.records);
 		diagnostics.push(...rootResult.diagnostics);
 		for (const record of rootResult.records) addRecord(record);
 	}
 
-	return { records: [...recordMap.values()].flat(), diagnostics: dedupeDiagnostics([...diagnostics, ...loaderResult.diagnostics]) };
+	return { records: [...recordMap.values()].flat(), inventoryRecords, diagnostics: dedupeDiagnostics([...diagnostics, ...loaderResult.diagnostics]) };
 }
 
 export function loadPromptsWithModel(cwd: string, includePlainPrompts = false): LoadPromptsWithModelResult {
