@@ -3201,6 +3201,35 @@ test("chain-prompts preflight project prompt-library approval before earlier ste
 	});
 });
 
+test("chain-prompts preflight hidden project prompt-library approval before earlier steps", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "first.md"), `---\nmodel: ${MODEL_ID}\n---\nFIRST $@`);
+		writeFileSync(join(cwd, ".pi", "prompt-library", "hidden-second.md"), `---\nmodel: ${MODEL_ID}\nhidden: true\n---\nHIDDEN SECOND $@`);
+
+		const pi = new FakePi();
+		let confirmCalls = 0;
+		const { ctx, getNotifications } = createContext(cwd, pi);
+		(ctx.ui as { confirm: () => Promise<boolean> }).confirm = async () => {
+			confirmCalls++;
+			return false;
+		};
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+
+		assert.equal(pi.commands.has("hidden-second"), false);
+		const chainPrompts = pi.commands.get("chain-prompts");
+		assert.ok(chainPrompts);
+		await chainPrompts.handler("first -> hidden-second task", ctx);
+
+		assert.equal(confirmCalls, 1);
+		assert.equal(pi.userMessages.length, 0);
+		assert.ok(getNotifications().some((message) => /was not approved/.test(message)));
+	});
+});
+
 test("chain-prompts cannot reference plain prompt-library fragments", async () => {
 	await withTempHome(async (root) => {
 		const cwd = join(root, "project");

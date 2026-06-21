@@ -260,6 +260,31 @@ test("loadPromptsWithModel does not treat visibility metadata alone as command-c
 	});
 });
 
+test("invalid hidden warns on command-capable prompt-library commands but stays quiet on fragments", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-library", "bad-command.md"), "---\nmodel: claude-sonnet-4-20250514\nhidden: maybe\n---\nCommand $@");
+		writeFileSync(join(cwd, ".pi", "prompt-library", "bad-fragment.md"), "---\nhidden: maybe\ndescription: helper\n---\nFragment helper");
+
+		const result = loadPromptsWithModel(cwd);
+		const command = result.prompts.get("bad-command");
+		assert.ok(command);
+		assert.equal(command.hidden, undefined);
+		const invalidHiddenDiagnostics = result.diagnostics.filter((diagnostic) => diagnostic.code === "invalid-hidden");
+		assert.equal(invalidHiddenDiagnostics.length, 1);
+		assert.match(invalidHiddenDiagnostics[0]!.message, /bad-command\.md/);
+		assert.doesNotMatch(invalidHiddenDiagnostics[0]!.message, /bad-fragment\.md/);
+
+		const records = collectPromptSourceRecords(cwd, true);
+		const fragment = records.records.find((record) => record.promptName === "bad-fragment");
+		assert.ok(fragment);
+		assert.equal(fragment.promptCapable, false);
+		assert.equal(fragment.hidden, undefined);
+		assert.equal(records.diagnostics.some((diagnostic) => diagnostic.code === "invalid-hidden" && /bad-fragment\.md/.test(diagnostic.message)), false);
+	});
+});
+
 test("loadPromptsWithModel can include plain prompts for chain resolution without changing default loading", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
