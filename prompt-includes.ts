@@ -269,6 +269,8 @@ function createIncludeRenderContext(input: RenderPromptIncludesInput & { diagnos
 	const homeDir = input.homeDir ?? homedir();
 	const canonicalHomeDir = canonicalDirectory(homeDir);
 	const canonicalCwd = canonicalDirectory(input.cwd);
+	const expectedUserAgentPromptLibrary = expectedCanonicalChildPath(join(homeDir, ".pi", "agent"), "prompt-library");
+
 	const projectPromptLibrary: IncludeRoot = {
 		label: "project prompt-library",
 		path: resolve(join(input.cwd, ".pi", "prompt-library")),
@@ -278,7 +280,7 @@ function createIncludeRenderContext(input: RenderPromptIncludesInput & { diagnos
 	const userPromptLibrary: IncludeRoot = {
 		label: "user prompt-library",
 		path: resolve(join(homeDir, ".pi", "agent", "prompt-library")),
-		expectedCanonicalPath: canonicalHomeDir ? resolve(canonicalHomeDir, ".pi", "agent", "prompt-library") : null,
+		expectedCanonicalPath: expectedUserAgentPromptLibrary ?? (canonicalHomeDir ? resolve(canonicalHomeDir, ".pi", "agent", "prompt-library") : null),
 		rejectDotPrefixedSegments: true,
 	};
 	const globalPromptPartials: IncludeRoot = {
@@ -370,6 +372,11 @@ function finishRenderGraph(context: IncludeRenderContext): PromptIncludeGraph {
 
 function canonicalizeRoots(roots: IncludeRoot[]): IncludeRoot[] {
 	return dedupeRoots(roots.map((root) => ({ ...root, canonicalPath: canonicalDirectory(root.path, { expectedCanonicalPath: root.expectedCanonicalPath }) })));
+}
+
+function expectedCanonicalChildPath(parentPath: string, childName: string): string | undefined {
+	const canonicalParent = canonicalDirectory(parentPath);
+	return canonicalParent ? resolve(canonicalParent, childName) : undefined;
 }
 
 function includeRootsForCurrentFile(currentFilePath: string, context: IncludeRenderContext): IncludeRoot[] {
@@ -827,6 +834,7 @@ function resolveIncludePath(includePath: string, context: IncludeRenderContext, 
 	}
 
 	let sawEscapedCandidate = false;
+	let dotPrefixedPromptLibraryDiagnostic: PromptLoaderDiagnostic | undefined;
 	for (const root of includeRootsForCurrentFile(currentFilePath, context)) {
 		if (!root.canonicalPath) continue;
 		const candidate = resolve(root.path, normalizedPath);
@@ -835,7 +843,26 @@ function resolveIncludePath(includePath: string, context: IncludeRenderContext, 
 			continue;
 		}
 		if (!existsSync(candidate)) continue;
+		let canonicalCandidate: string | undefined;
+		try {
+			canonicalCandidate = realpathSync(candidate);
+		} catch {
+			canonicalCandidate = undefined;
+		}
+		if (canonicalCandidate && hasDotPrefixedSegmentUnderPromptLibrary(candidate, canonicalCandidate, context)) {
+			dotPrefixedPromptLibraryDiagnostic ??= createDiagnostic(
+				context,
+				currentFilePath,
+				"include-dotfile-disallowed",
+				`Prompt include ${JSON.stringify(normalizedPath)} is not allowed: dot-prefixed files and directories under prompt-library roots are ignored.`,
+			);
+			continue;
+		}
 		return validateExistingIncludeCandidate(candidate, normalizedPath, context, currentFilePath, root);
+	}
+	if (dotPrefixedPromptLibraryDiagnostic) {
+		context.diagnostics.push(dotPrefixedPromptLibraryDiagnostic);
+		return undefined;
 	}
 
 	if (sawEscapedCandidate) {

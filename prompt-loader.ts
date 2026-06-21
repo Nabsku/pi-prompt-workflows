@@ -1677,6 +1677,25 @@ function calculatePromptCapable(input: {
 	});
 }
 
+function hasPromptLibraryCommandMarker(frontmatter: Record<string, unknown>): boolean {
+	return [
+		"model",
+		"skill",
+		"skills",
+		"subagent",
+		"parallel",
+		"deterministic",
+		"run",
+		"script",
+		"bestOfN",
+		"worktree",
+		"fresh",
+		"loop",
+		"converge",
+		"boomerang",
+	].some((key) => Object.hasOwn(frontmatter, key));
+}
+
 function loadPromptsWithModelFromDir(
 	dir: string,
 	source: PromptSource,
@@ -1763,6 +1782,9 @@ function loadPromptsWithModelFromDir(
 				const includes = includesResult.includes;
 				const chain = normalizeChain(frontmatter.chain, fullPath, source, diagnostics);
 				const hasBodyIncludeDirectives = chain ? false : hasPromptIncludeDirectives(body);
+				if (rootKind === "prompt-library" && !chain && includes === undefined && !hasPromptIncludeDirectives(body) && !hasPromptLibraryCommandMarker(frontmatter)) {
+					continue;
+				}
 				if (chain && includesResult.declaredKey) {
 					diagnostics.push(
 						createDiagnostic(
@@ -2306,6 +2328,23 @@ function collectPromptSourceRecordsFromDir(
 				const includes = includesResult.ok ? includesResult.includes : undefined;
 				const chain = normalizeChain(frontmatter.chain, fullPath, source, diagnostics);
 				const isChainWrapper = chain !== undefined;
+				if (rootKind === "prompt-library" && !isChainWrapper && includesResult.ok && includes === undefined && !hasPromptIncludeDirectives(parsed.body) && !hasPromptLibraryCommandMarker(frontmatter)) {
+					if (!includePlainPrompts) continue;
+					records.push({
+						promptName,
+						filePath: fullPath,
+						promptRoot,
+						cwd: loadCwd,
+						source,
+						rootKind,
+						promptCapable: false,
+						rawBody: parsed.body,
+						hasInlineIncludes: false,
+						hasIncludesPlaceholder: false,
+						isChainWrapper: false,
+					});
+					continue;
+				}
 				const includeMetadataInvalid = !includesResult.ok || (isChainWrapper && includesResult.ok && includesResult.declaredKey !== undefined);
 				const skippedReason = !includesResult.ok ? diagnostics[includesDiagnosticStart]?.code : includeMetadataInvalid ? "invalid-includes-chain" : undefined;
 				const hasInlineIncludes = isChainWrapper ? false : extractPromptInlineIncludes(parsed.body).length > 0;

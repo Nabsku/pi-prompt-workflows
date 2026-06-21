@@ -528,7 +528,7 @@ test("prompt-library invalid-only thinking metadata does not promote plain files
 		assert.equal(loadPromptsWithModel(cwd).prompts.has("invalid-thinking"), false);
 		const plainRuntime = loadPromptsWithModel(cwd, true);
 		assert.equal(plainRuntime.prompts.has("invalid-thinking"), false);
-		assert.equal(plainRuntime.diagnostics.some((diagnostic) => diagnostic.code === "invalid-thinking"), true);
+		assert.equal(plainRuntime.diagnostics.some((diagnostic) => diagnostic.code === "invalid-thinking"), false);
 
 		const records = collectPromptSourceRecords(cwd, true);
 		const record = records.records.find((item) => item.promptName === "invalid-thinking");
@@ -536,6 +536,7 @@ test("prompt-library invalid-only thinking metadata does not promote plain files
 		assert.equal(record.rootKind, "prompt-library");
 		assert.equal(record.promptCapable, false);
 		assert.equal(record.rawBody, "Plain library fragment.");
+		assert.equal(records.diagnostics.some((diagnostic) => diagnostic.code === "invalid-thinking"), false);
 	});
 });
 

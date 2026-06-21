@@ -848,6 +848,20 @@ test("prompt-library includes reject dot-prefixed path segments while legacy pro
 	});
 });
 
+test("dot-prefixed prompt-library include candidates fall through to legacy prompt-partials", () => {
+	withFixture((fixture) => {
+		mkdirSync(join(fixture.projectLibrary, ".legacy"), { recursive: true });
+		mkdirSync(join(fixture.projectPartials, ".legacy"), { recursive: true });
+		writeFileSync(join(fixture.projectLibrary, ".legacy", "rules.md"), "ignored library hidden rules");
+		writeFileSync(join(fixture.projectPartials, ".legacy", "rules.md"), "legacy hidden partial rules");
+
+		const result = render(fixture, "body", [".legacy/rules.md"]);
+
+		assertOk(result);
+		assert.equal(result.content, "legacy hidden partial rules\n\nbody");
+	});
+});
+
 test("project prompts fall back to user prompt-library when project library has no match", () => {
 	withFixture((fixture) => {
 		mkdirSync(join(fixture.userLibrary, "partials"), { recursive: true });
@@ -889,6 +903,22 @@ test("home include paths do not authorize through a symlinked user prompt-librar
 
 		assertFail(result);
 		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "include-absolute-disallowed" || diagnostic.code === "include-path-escaped"), true);
+	});
+});
+
+test("user prompt-library resolves when the user .pi directory is symlinked", () => {
+	withFixture((fixture) => {
+		const linkedPi = join(fixture.home, "linked-pi");
+		rmSync(join(fixture.home, ".pi"), { recursive: true, force: true });
+		mkdirSync(join(linkedPi, "agent", "prompt-library", "partials"), { recursive: true });
+		mkdirSync(join(linkedPi, "agent", "prompt-partials"), { recursive: true });
+		writeFileSync(join(linkedPi, "agent", "prompt-library", "partials", "rules.md"), "symlinked user library rules");
+		symlinkSync(linkedPi, join(fixture.home, ".pi"), "dir");
+
+		const result = render(fixture, "body", ["partials/rules.md"]);
+
+		assertOk(result);
+		assert.equal(result.content, "symlinked user library rules\n\nbody");
 	});
 });
 

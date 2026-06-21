@@ -763,7 +763,7 @@ test("unreferenced plain prompt-library include fragments do not count or valida
 	withTempHome((root) => {
 		const cwd = join(root, "project");
 		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompt-library", "fragment.md"), "---\ndescription: shared fragment\n---\nShared rules only");
+		writeFileSync(join(cwd, ".pi", "prompt-library", "fragment.md"), "---\ndescription: shared fragment\nthinking: turbo\n---\nShared rules only");
 
 		const result = validatePromptTemplates(cwd);
 
