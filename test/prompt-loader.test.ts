@@ -230,6 +230,7 @@ test("loadPromptsWithModel does not treat visibility metadata alone as command-c
 		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
 		writeFileSync(join(cwd, ".pi", "prompts", "plain-hidden.md"), "---\nhidden: true\ndescription: helper\n---\nPlain helper");
 		writeFileSync(join(cwd, ".pi", "prompt-library", "library-hidden.md"), "---\nhidden: true\ndescription: helper\n---\nLibrary helper");
+		writeFileSync(join(cwd, ".pi", "prompt-library", "invalid-hidden-fragment.md"), "---\nhidden: maybe\ndescription: helper\n---\nInvalid hidden helper");
 		writeFileSync(join(cwd, ".pi", "prompt-library", "hidden-command.md"), "---\nmodel: claude-sonnet-4-20250514\nhidden: true\n---\nHidden command");
 
 		const runtime = loadPromptsWithModel(cwd);
@@ -247,6 +248,10 @@ test("loadPromptsWithModel does not treat visibility metadata alone as command-c
 		assert.equal(libraryHidden.promptCapable, false);
 		assert.equal(libraryHidden.hidden, true);
 		assert.equal(libraryHidden.rawBody, "Library helper");
+		const invalidHiddenFragment = records.records.find((record) => record.promptName === "invalid-hidden-fragment");
+		assert.ok(invalidHiddenFragment);
+		assert.equal(invalidHiddenFragment.promptCapable, false);
+		assert.equal(invalidHiddenFragment.hidden, undefined);
 		const hiddenCommand = records.records.find((record) => record.promptName === "hidden-command");
 		assert.ok(hiddenCommand);
 		assert.equal(hiddenCommand.promptCapable, true);
