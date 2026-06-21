@@ -442,6 +442,7 @@ const SOURCE_SUMMARY_COMMAND_INTENT_DIAGNOSTIC_CODES = new Set([
 	"invalid-lineup-parallel",
 	"invalid-lineup-subagent",
 	"invalid-loop",
+	"empty-model",
 	"invalid-model",
 	"invalid-model-spec",
 	"invalid-parallel",
