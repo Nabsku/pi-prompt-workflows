@@ -366,7 +366,17 @@ function includeRootsForCurrentFile(currentFilePath: string, context: IncludeRen
 	const currentDirectory = dirname(resolve(currentFilePath));
 	const currentDirectoryRoot: IncludeRoot = { label: "current file directory", path: currentDirectory, canonicalPath: canonicalDirectory(currentDirectory) };
 	const ownerRoot = ownerRootForCurrentFile(currentFilePath, context);
-	return dedupeRoots([...(ownerRoot ? [currentDirectoryRoot, ownerRoot] : []), ...context.fallbackRoots]);
+	const allowLegacyCurrentDirectory = context.graph.root.rootKind === "prompts" && currentDirectoryRoot.canonicalPath !== undefined;
+	return dedupeRoots([...(ownerRoot || allowLegacyCurrentDirectory ? [currentDirectoryRoot] : []), ...(ownerRoot ? [ownerRoot] : []), ...context.fallbackRoots]);
+}
+
+function canonicalAllowedPathsForCandidate(containingRoot: IncludeRoot | undefined, currentFilePath: string, context: IncludeRenderContext): string[] {
+	if (!containingRoot) return canonicalAllowedRootPaths(context);
+	const canonicalContainingRoot = containingRoot.canonicalPath;
+	if (!canonicalContainingRoot) return [];
+	if (containingRoot.label !== "current file directory") return [canonicalContainingRoot];
+	const ownerRoot = ownerRootForCurrentFile(currentFilePath, context);
+	return [canonicalContainingRoot, ...(ownerRoot?.canonicalPath ? [ownerRoot.canonicalPath] : [])];
 }
 
 function ownerRootForCurrentFile(currentFilePath: string, context: IncludeRenderContext): IncludeRoot | undefined {
@@ -886,8 +896,7 @@ function validateExistingIncludeCandidate(
 		return undefined;
 	}
 
-	const canonicalContainingRoot = containingRoot?.canonicalPath;
-	const canonicalAllowedPaths = containingRoot ? (canonicalContainingRoot ? [canonicalContainingRoot] : []) : canonicalAllowedRootPaths(context);
+	const canonicalAllowedPaths = canonicalAllowedPathsForCandidate(containingRoot, currentFilePath, context);
 	if (!isPathInsideAny(canonicalAllowedPaths, canonicalPath)) {
 		context.diagnostics.push(
 			createDiagnostic(

@@ -223,6 +223,26 @@ test("nested inline includes in subdirectory partials resolve relative to the cu
 	});
 });
 
+test("nested prompt-library symlink includes may target files inside the owner root", () => {
+	withFixture((fixture) => {
+		const partials = join(fixture.projectLibrary, "partials");
+		mkdirSync(partials, { recursive: true });
+		writeFileSync(join(fixture.projectLibrary, "prompt.md"), "---\nmodel: test\ninclude: partials/outer.md\n---\nbody");
+		writeFileSync(join(partials, "outer.md"), 'outer-start\n<include file="link.md" />\nouter-end');
+		writeFileSync(join(fixture.projectLibrary, "shared.md"), "shared");
+		symlinkSync("../shared.md", join(partials, "link.md"));
+
+		const result = render(fixture, "body", ["partials/outer.md"], {
+			promptFilePath: join(fixture.projectLibrary, "prompt.md"),
+			promptRoot: fixture.projectLibrary,
+			rootKind: "prompt-library",
+		});
+
+		assertOk(result);
+		assert.equal(result.content, "outer-start\nshared\nouter-end\n\nbody");
+	});
+});
+
 test("nested legacy partial includes fall back to the original prompt root after the current owner root", () => {
 	withFixture((fixture) => {
 		const sharedPromptRoot = join(fixture.promptRoot, "shared");

@@ -1599,7 +1599,7 @@ function resolvePromptSymlinkEntryKind(
 	diagnostics: PromptLoaderDiagnostic[],
 ): { isFile: boolean; isDirectory: boolean } {
 	try {
-		if (!isPathInsideOrEqual(fullPath, promptRoot)) {
+		if (rootKind === "prompt-library" && !isPathInsideOrEqual(fullPath, promptRoot)) {
 			diagnostics.push(
 				createDiagnostic(
 					"symlink-outside-prompt-root",
@@ -1657,7 +1657,6 @@ function calculatePromptCapable(input: {
 	const hasIncludeMetadata = Object.hasOwn(input.frontmatter, "include") || Object.hasOwn(input.frontmatter, "includes");
 	const hasBodyIncludes = input.ignoreBodyIncludes ? false : hasPromptIncludeDirectives(input.body);
 	const hasSkillConfig = Object.hasOwn(input.frontmatter, "skill") || Object.hasOwn(input.frontmatter, "skills");
-	const hasThinkingConfig = Object.hasOwn(input.frontmatter, "thinking");
 	const hasModelConditionalDirectives = MODEL_CONDITIONAL_DIRECTIVE_PATTERN.test(input.body);
 	return isPromptCapable({
 		chain: input.chain,
@@ -1667,7 +1666,6 @@ function calculatePromptCapable(input: {
 			hasIncludeMetadata ||
 			hasBodyIncludes ||
 			hasSkillConfig ||
-			hasThinkingConfig ||
 			hasModelConditionalDirectives,
 	});
 }
@@ -2297,6 +2295,7 @@ function collectPromptSourceRecordsFromDir(
 				const loop = normalizeLoop(frontmatter.loop, fullPath, source, diagnostics);
 				const converge = normalizeConverge(frontmatter.converge, fullPath, source, diagnostics);
 				const boomerang = normalizeBoomerang(frontmatter.boomerang, fullPath, source, diagnostics);
+				const thinking = isChainWrapper ? undefined : normalizeThinking(frontmatter.thinking, fullPath, source, diagnostics);
 
 				const hasSourceGraphFeature =
 						isChainWrapper ||
@@ -2307,6 +2306,7 @@ function collectPromptSourceRecordsFromDir(
 						loop !== undefined ||
 						converge === false ||
 						boomerang === true ||
+						thinking !== undefined ||
 						Object.hasOwn(frontmatter, "subagent") ||
 						Object.hasOwn(frontmatter, "parallel") ||
 						Object.hasOwn(frontmatter, "deterministic") ||

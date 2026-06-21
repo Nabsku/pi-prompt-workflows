@@ -457,6 +457,27 @@ test("plain prompt-library files stay include-only even when plain prompts are r
 	});
 });
 
+test("prompt-library invalid-only thinking metadata does not promote plain files", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const projectLibrary = join(cwd, ".pi", "prompt-library");
+		mkdirSync(projectLibrary, { recursive: true });
+		writeFileSync(join(projectLibrary, "invalid-thinking.md"), "---\nthinking: turbo\n---\nPlain library fragment.");
+
+		assert.equal(loadPromptsWithModel(cwd).prompts.has("invalid-thinking"), false);
+		const plainRuntime = loadPromptsWithModel(cwd, true);
+		assert.equal(plainRuntime.prompts.has("invalid-thinking"), false);
+		assert.equal(plainRuntime.diagnostics.some((diagnostic) => diagnostic.code === "invalid-thinking"), true);
+
+		const records = collectPromptSourceRecords(cwd, true);
+		const record = records.records.find((item) => item.promptName === "invalid-thinking");
+		assert.ok(record);
+		assert.equal(record.rootKind, "prompt-library");
+		assert.equal(record.promptCapable, false);
+		assert.equal(record.rawBody, "Plain library fragment.");
+	});
+});
+
 test("plain .pi/prompts files still load only when plain prompts are requested", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
@@ -1263,6 +1284,34 @@ test("loadPromptsWithModel avoids recursive symlink loops", () => {
 		const result = loadPromptsWithModel(cwd);
 		assert.equal(result.prompts.get("ok")?.content, "body");
 		assert.match(result.diagnostics.map((item) => item.message).join("\n"), /already visited prompt directory/i);
+	});
+});
+
+test("loadPromptsWithModel follows legacy prompts symlinks outside the prompt root", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const promptsDir = join(cwd, ".pi", "prompts");
+		const outsideDir = join(root, "outside-prompts");
+		mkdirSync(promptsDir, { recursive: true });
+		mkdirSync(outsideDir, { recursive: true });
+		writeFileSync(join(root, "external-file.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nexternal file");
+		writeFileSync(join(outsideDir, "external-dir.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nexternal dir");
+		writeFileSync(join(outsideDir, "with-include.md"), '---\nmodel: claude-sonnet-4-20250514\n---\n<include file="sibling.md" />');
+		writeFileSync(join(outsideDir, "sibling.md"), "external sibling");
+		symlinkSync(join(root, "external-file.md"), join(promptsDir, "external-file.md"));
+		symlinkSync(outsideDir, join(promptsDir, "external-dir"), "dir");
+
+		const runtime = loadPromptsWithModel(cwd);
+		assert.equal(runtime.prompts.get("external-file")?.content, "external file");
+		assert.equal(runtime.prompts.get("external-dir")?.content, "external dir");
+		assert.equal(runtime.prompts.get("with-include")?.content, "external sibling");
+		assert.equal(runtime.diagnostics.some((diagnostic) => diagnostic.code === "symlink-outside-prompt-root"), false);
+
+		const records = collectPromptSourceRecords(cwd, true);
+		assert.equal(records.records.find((record) => record.promptName === "external-file")?.rawBody, "external file");
+		assert.equal(records.records.find((record) => record.promptName === "external-dir")?.rawBody, "external dir");
+		assert.equal(records.records.find((record) => record.promptName === "with-include")?.rawBody, '<include file="sibling.md" />');
+		assert.equal(records.diagnostics.some((diagnostic) => diagnostic.code === "symlink-outside-prompt-root"), false);
 	});
 });
 
