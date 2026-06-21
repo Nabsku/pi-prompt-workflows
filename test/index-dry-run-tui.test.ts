@@ -378,6 +378,7 @@ test("TUI picker unsupported selection surfaces dry-run diagnostic without execu
 test("TUI picker includes command-capable prompt-library prompts and excludes plain fragments", async () => {
 	await setup("tui", async (cwd, pi, ctx) => {
 		writeLibraryPrompt(cwd, "review-lib", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nLibrary review");
+		writeLibraryPrompt(cwd, "hidden-lib", "---\nmodel: anthropic/claude-sonnet-4-20250514\nhidden: true\n---\nHidden review");
 		writeLibraryPrompt(cwd, "rules", "Plain shared rules fragment");
 		await pi.emit("session_start", {}, ctx);
 
@@ -387,6 +388,7 @@ test("TUI picker includes command-capable prompt-library prompts and excludes pl
 		const picker = pi.customComponents.at(-1) as { render(width: number): string[] };
 		const rendered = picker.render(1000).join("\n");
 		assert.match(rendered, /review-lib\s+project/);
+		assert.doesNotMatch(rendered, /hidden-lib\s+project/);
 		assert.doesNotMatch(rendered, /rules\s+project/);
 		assertNoExecutionSideEffects(pi);
 	});
@@ -394,7 +396,7 @@ test("TUI picker includes command-capable prompt-library prompts and excludes pl
 
 test("exact dry-run names can open prompt-library commands while fragments stay unavailable", async () => {
 	await setup("tui", async (cwd, pi, ctx) => {
-		writeLibraryPrompt(cwd, "review-lib", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nLibrary review $@");
+		writeLibraryPrompt(cwd, "review-lib", "---\nmodel: anthropic/claude-sonnet-4-20250514\nhidden: true\n---\nLibrary review $@");
 		writeLibraryPrompt(cwd, "rules", "Plain shared rules fragment");
 		await pi.emit("session_start", {}, ctx);
 

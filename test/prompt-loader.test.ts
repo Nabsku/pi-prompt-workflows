@@ -230,11 +230,13 @@ test("loadPromptsWithModel does not treat visibility metadata alone as command-c
 		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
 		writeFileSync(join(cwd, ".pi", "prompts", "plain-hidden.md"), "---\nhidden: true\ndescription: helper\n---\nPlain helper");
 		writeFileSync(join(cwd, ".pi", "prompt-library", "library-hidden.md"), "---\nhidden: true\ndescription: helper\n---\nLibrary helper");
+		writeFileSync(join(cwd, ".pi", "prompt-library", "hidden-command.md"), "---\nmodel: claude-sonnet-4-20250514\nhidden: true\n---\nHidden command");
 
 		const runtime = loadPromptsWithModel(cwd);
 		const chainRuntime = loadPromptsWithModel(cwd, true);
 		assert.equal(runtime.prompts.has("plain-hidden"), false);
 		assert.equal(runtime.prompts.has("library-hidden"), false);
+		assert.equal(runtime.prompts.get("hidden-command")?.hidden, true);
 		assert.equal(chainRuntime.prompts.get("plain-hidden")?.content, "Plain helper");
 		assert.equal(chainRuntime.prompts.has("library-hidden"), false);
 
@@ -243,7 +245,12 @@ test("loadPromptsWithModel does not treat visibility metadata alone as command-c
 		assert.ok(libraryHidden);
 		assert.equal(libraryHidden.rootKind, "prompt-library");
 		assert.equal(libraryHidden.promptCapable, false);
+		assert.equal(libraryHidden.hidden, true);
 		assert.equal(libraryHidden.rawBody, "Library helper");
+		const hiddenCommand = records.records.find((record) => record.promptName === "hidden-command");
+		assert.ok(hiddenCommand);
+		assert.equal(hiddenCommand.promptCapable, true);
+		assert.equal(hiddenCommand.hidden, true);
 		assert.equal(records.diagnostics.length, 0);
 	});
 });

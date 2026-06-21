@@ -135,6 +135,7 @@ TUI behavior:
 
 - no template name opens a searchable template picker;
 - picker rows label prompt-library commands as `project library` or `user library`, so reusable library commands are distinct from core `.pi/prompts` templates;
+- `hidden: true` command-capable prompts are omitted from the picker, but an exact `/print-prompt <name>` or `/dry-run-prompt <name>` still opens them;
 - a template name opens the inspector directly;
 - `--plain` forces the stdout/plain report even in TUI mode;
 - unsupported templates, such as deterministic or chain templates, show the same diagnostic as the plain path;
@@ -158,6 +159,7 @@ All fields are optional. Templates that don't use any extension features (no `mo
 | `includes` | — | List of shared `.md` partials to insert into the prompt. See [Prompt includes](#prompt-includes). |
 | `include` | — | Shortcut for a single partial, equivalent to `includes: [file.md]`. See [Prompt includes](#prompt-includes). |
 | `description` | — | Short text shown next to the command in autocomplete. |
+| `hidden` | `false` | Hide a command-capable prompt from slash-command registration and the TUI picker while keeping it addressable by exact `/print-prompt` / `/dry-run-prompt` name and usable as an internal chain step. Visibility metadata alone does not make a plain file command-capable. |
 | `chain` | — | Declares a reusable pipeline of templates (`step -> step`). When set, the body is ignored. See [Chain Templates](#chain-templates). |
 | `chainContext` | — | Chain templates only. Set to `summary` so delegated steps receive a compact summary of what previous steps did. Steps with `inheritContext: true` are excluded. See [Chain context for delegated steps](#chain-context-for-delegated-steps). |
 
@@ -328,6 +330,8 @@ Prompt includes let you write the common parts of your prompts once and reuse th
 User prompt-library files live at `~/.pi/agent/prompt-library/` (that is the current OS user's home directory as reported by the runtime, not the repository root).
 
 Prompt-library files can be executable extension prompt templates, chain steps, or include targets. A prompt-library file becomes an extension command only when it is command-capable under the same rules as `.pi/prompts` templates: for example, it has extension frontmatter such as `model`, `chain`, `skill`, `skills`, `include`, `includes`, or other supported extension fields. Plain Markdown fragments under `partials/` are intended to be included and should not appear as slash commands, chain steps, or dry-run targets. The `partials/` directory name is a convention, not an enforced policy: any plain, non-command-capable prompt-library Markdown file can be included, and command-capable files can live under any non-hidden directory.
+
+Set `hidden: true` on command-capable prompt-library files that should stay internal. Hidden commands are not registered as top-level slash commands and do not appear in the dry-run picker, but they can still be opened by exact `/print-prompt <name>` / `/dry-run-prompt <name>` and referenced by chains. Project prompt-library trust approval still applies when a hidden project-library step executes through a chain.
 
 Dot-prefixed files and directories under prompt-library roots are ignored. Symlinks are followed only when their resolved target remains inside the canonical prompt root; symlinks that escape the root are skipped.
 
