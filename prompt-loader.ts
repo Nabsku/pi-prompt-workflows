@@ -1572,17 +1572,23 @@ function rejectPromptLibrarySymlinkRoot(
 	promptRoot: string,
 	rootKind: PromptRootKind,
 	source: PromptSource,
+	loadCwd: string,
 	diagnostics: PromptLoaderDiagnostic[],
 ): boolean {
 	if (rootKind !== "prompt-library" || dir !== promptRoot) return false;
 	try {
-		if (!lstatSync(dir).isSymbolicLink()) return false;
+		const isSymlink = lstatSync(dir).isSymbolicLink();
+		const expectedCanonicalRoot = source === "project" ? resolve(realpathSync(loadCwd), ".pi", "prompt-library") : undefined;
+		const canonicalRoot = realpathSync(dir);
+		if (!isSymlink && (expectedCanonicalRoot === undefined || canonicalRoot === expectedCanonicalRoot)) return false;
 		diagnostics.push(
 			createDiagnostic(
 				"symlink-outside-prompt-root",
 				dir,
 				source,
-				`Skipping prompt-library root at ${dir}: prompt-library roots must not be symlinks.`,
+				expectedCanonicalRoot
+					? `Skipping prompt-library root at ${dir}: prompt-library roots must resolve to ${expectedCanonicalRoot} and must not be symlinks or symlinked through ancestors.`
+					: `Skipping prompt-library root at ${dir}: prompt-library roots must not be symlinks.`,
 			),
 		);
 		return true;
@@ -1664,7 +1670,7 @@ function calculatePromptCapable(input: {
 		hasExtensionSpecificConfig:
 			input.hasExtensionSpecificConfig === true ||
 			hasIncludeMetadata ||
-			hasBodyIncludes ||
+			(input.ignoreBodyIncludes ? false : hasBodyIncludes) ||
 			hasSkillConfig ||
 			hasModelConditionalDirectives,
 	});
@@ -1686,7 +1692,7 @@ function loadPromptsWithModelFromDir(
 	if (!existsSync(dir)) {
 		return { prompts, diagnostics };
 	}
-	if (rejectPromptLibrarySymlinkRoot(dir, promptRoot, rootKind, source, diagnostics)) {
+	if (rejectPromptLibrarySymlinkRoot(dir, promptRoot, rootKind, source, loadCwd, diagnostics)) {
 		return { prompts, diagnostics };
 	}
 
@@ -2102,6 +2108,7 @@ function loadPromptsWithModelFromDir(
 					content = renderedIncludes.content;
 					includeGraph = renderedIncludes.includeGraph;
 				}
+				const includeConfigIsCommandCapable = shouldRenderIncludes && !(rootKind === "prompt-library" && includes === undefined);
 				const hasExtensionSpecificConfig =
 					skills !== undefined ||
 					thinking !== undefined ||
@@ -2109,14 +2116,20 @@ function loadPromptsWithModelFromDir(
 					loop !== undefined ||
 					converge === false ||
 					boomerang === true ||
-					shouldRenderIncludes ||
+					includeConfigIsCommandCapable ||
 					safeParallel !== undefined ||
 					deterministic !== undefined ||
 					hasLineup ||
 					safeWorktree === true ||
 					subagent !== undefined ||
 					safeInheritContext;
-				const promptCapable = calculatePromptCapable({ frontmatter, body: content, chain, hasExtensionSpecificConfig });
+				const promptCapable = calculatePromptCapable({
+					frontmatter,
+					body: content,
+					chain,
+					hasExtensionSpecificConfig,
+					ignoreBodyIncludes: rootKind === "prompt-library" && includes === undefined,
+				});
 				if (!promptCapable && (rootKind === "prompt-library" || !includePlainPrompts)) {
 					continue;
 				}
@@ -2195,7 +2208,7 @@ function collectPromptSourceRecordsFromDir(
 	if (!existsSync(dir)) {
 		return { records, diagnostics };
 	}
-	if (rejectPromptLibrarySymlinkRoot(dir, promptRoot, rootKind, source, diagnostics)) {
+	if (rejectPromptLibrarySymlinkRoot(dir, promptRoot, rootKind, source, loadCwd, diagnostics)) {
 		return { records, diagnostics };
 	}
 
@@ -2263,7 +2276,13 @@ function collectPromptSourceRecordsFromDir(
 				const promptName = entry.name.slice(0, -3);
 				if (RESERVED_COMMAND_NAMES.has(promptName)) {
 					const rawChain = typeof frontmatter.chain === "string" && frontmatter.chain.trim() ? frontmatter.chain.trim() : undefined;
-					const promptCapable = calculatePromptCapable({ frontmatter, body: parsed.body, chain: rawChain, ignoreBodyIncludes: rawChain !== undefined });
+					const hasIncludeMetadata = Object.hasOwn(frontmatter, "include") || Object.hasOwn(frontmatter, "includes");
+					const promptCapable = calculatePromptCapable({
+						frontmatter,
+						body: parsed.body,
+						chain: rawChain,
+						ignoreBodyIncludes: rawChain !== undefined || (rootKind === "prompt-library" && !hasIncludeMetadata),
+					});
 					records.push({
 						promptName,
 						filePath: fullPath,
@@ -2297,11 +2316,11 @@ function collectPromptSourceRecordsFromDir(
 				const boomerang = normalizeBoomerang(frontmatter.boomerang, fullPath, source, diagnostics);
 				const thinking = isChainWrapper ? undefined : normalizeThinking(frontmatter.thinking, fullPath, source, diagnostics);
 
+				const bodyIncludesAreCommandCapable = !(rootKind === "prompt-library" && includes === undefined);
 				const hasSourceGraphFeature =
 						isChainWrapper ||
 						includes !== undefined ||
-						hasInlineIncludes ||
-						hasIncludesPlaceholder ||
+						(bodyIncludesAreCommandCapable && (hasInlineIncludes || hasIncludesPlaceholder)) ||
 						fresh === true ||
 						loop !== undefined ||
 						converge === false ||
@@ -2319,7 +2338,7 @@ function collectPromptSourceRecordsFromDir(
 					body: parsed.body,
 					chain,
 					hasExtensionSpecificConfig: hasSourceGraphFeature,
-					ignoreBodyIncludes: isChainWrapper,
+					ignoreBodyIncludes: isChainWrapper || !bodyIncludesAreCommandCapable,
 				});
 				if (!promptCapable && !includePlainPrompts) continue;
 

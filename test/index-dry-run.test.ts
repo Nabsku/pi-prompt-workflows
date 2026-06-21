@@ -420,3 +420,28 @@ test("project prompt-library execution asks when Pi trust is true only because c
 		assert.equal(pi.userMessages.length, 2);
 	});
 });
+
+test("project prompt-library execution asks even when core project prompts make Pi trust true", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "core.md"), "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nCore prompt");
+		writeLibraryPrompt(cwd, "review-lib", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nLibrary review $@");
+		const pi = new FakePi();
+		let confirmCalls = 0;
+		const ctx = createContext(cwd, pi, {
+			trusted: true,
+			confirm: () => {
+				confirmCalls++;
+				return true;
+			},
+		});
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("review-lib")!.handler!("one", ctx);
+
+		assert.equal(confirmCalls, 1);
+		assert.equal(pi.userMessages.length, 1);
+	});
+});

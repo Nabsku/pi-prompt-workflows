@@ -294,7 +294,13 @@ function createIncludeRenderContext(input: RenderPromptIncludesInput & { diagnos
 		...(resolve(input.promptRoot) === projectPromptLibrary.path ? { expectedCanonicalPath: projectPromptLibrary.expectedCanonicalPath } : {}),
 		...(resolve(input.promptRoot) === userPromptLibrary.path ? { expectedCanonicalPath: userPromptLibrary.expectedCanonicalPath } : {}),
 	};
-	const fallbackRoots = canonicalizeRoots([promptRoot, projectPromptLibrary, userPromptLibrary, globalPromptPartials, projectPromptPartials]);
+	const fallbackRoots = canonicalizeRoots([
+		promptRoot,
+		...(input.source === "project" ? [projectPromptLibrary] : []),
+		userPromptLibrary,
+		globalPromptPartials,
+		projectPromptPartials,
+	]);
 	const knownRoots = canonicalizeRoots([promptRoot, projectPromptLibrary, userPromptLibrary, globalPromptPartials, projectPromptPartials]);
 	const promptDirectoryRoot: IncludeRoot = { label: "prompt directory", path: dirname(resolve(input.promptFilePath)) };
 	const allowedRoots = canonicalizeRoots([promptDirectoryRoot, ...knownRoots]);
