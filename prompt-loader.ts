@@ -2353,9 +2353,9 @@ function collectPromptSourceRecordsFromDir(
 				}
 				const frontmatter = normalizeFrontmatterRecord(parsed.frontmatter, fullPath, source, diagnostics);
 				if (!frontmatter) continue;
-				const hidden = normalizeHidden(frontmatter.hidden, fullPath, source, diagnostics);
 
 				if (RESERVED_COMMAND_NAMES.has(promptName)) {
+					const hidden = normalizeHidden(frontmatter.hidden, fullPath, source, diagnostics);
 					const rawChain = typeof frontmatter.chain === "string" && frontmatter.chain.trim() ? frontmatter.chain.trim() : undefined;
 					const hasIncludeMetadata = Object.hasOwn(frontmatter, "include") || Object.hasOwn(frontmatter, "includes");
 					const promptCapable = calculatePromptCapable({
@@ -2390,6 +2390,7 @@ function collectPromptSourceRecordsFromDir(
 				const hasModelConditionalDirectives = !isChainWrapper && MODEL_CONDITIONAL_DIRECTIVE_PATTERN.test(parsed.body);
 				if (rootKind === "prompt-library" && !isChainWrapper && includesResult.ok && includes === undefined && !hasPromptIncludeDirectives(parsed.body) && !hasModelConditionalDirectives && !hasPromptLibraryCommandMarker(frontmatter)) {
 					if (!includePlainPrompts) continue;
+					const hidden = frontmatter.hidden === true || (typeof frontmatter.hidden === "string" && frontmatter.hidden.trim().toLowerCase() === "true");
 					records.push({
 						promptName,
 						filePath: fullPath,
@@ -2410,6 +2411,7 @@ function collectPromptSourceRecordsFromDir(
 				const skippedReason = !includesResult.ok ? diagnostics[includesDiagnosticStart]?.code : includeMetadataInvalid ? "invalid-includes-chain" : undefined;
 				const hasInlineIncludes = isChainWrapper ? false : extractPromptInlineIncludes(parsed.body).length > 0;
 				const hasIncludesPlaceholder = isChainWrapper ? false : hasPromptIncludesPlaceholder(parsed.body);
+				const hidden = normalizeHidden(frontmatter.hidden, fullPath, source, diagnostics);
 
 				const fresh = normalizeFresh(frontmatter.fresh, fullPath, source, diagnostics);
 				const loop = normalizeLoop(frontmatter.loop, fullPath, source, diagnostics);

@@ -3130,6 +3130,28 @@ test("hidden prompt-library commands are not registered as top-level slash comma
 	});
 });
 
+test("newly hidden prompt-library commands do not execute through stale registered handlers", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		const promptPath = join(cwd, ".pi", "prompt-library", "review-lib.md");
+		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
+		writeFileSync(promptPath, `---\nmodel: ${MODEL_ID}\n---\nVISIBLE $@`);
+
+		const pi = new FakePi();
+		const { ctx, getNotifications } = createContext(cwd, pi);
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+		const staleHandler = pi.commands.get("review-lib");
+		assert.ok(staleHandler);
+
+		writeFileSync(promptPath, `---\nmodel: ${MODEL_ID}\nhidden: true\n---\nHIDDEN $@`);
+		await staleHandler.handler("src/index.ts", ctx);
+
+		assert.equal(pi.userMessages.length, 0);
+		assert.ok(getNotifications().some((message) => /no longer available as a slash command/.test(message)));
+	});
+});
+
 test("chain-prompts can reference command-capable prompt-library steps", async () => {
 	await withTempHome(async (root) => {
 		const cwd = join(root, "project");

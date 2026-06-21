@@ -1635,8 +1635,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		storedCommandCtx = ctx;
 		refreshPrompts(ctx.cwd, ctx);
 		const prompt = prompts.get(name);
-		if (!prompt) {
-			notify(ctx, `Prompt "${name}" no longer exists`, "error");
+		if (!prompt || prompt.hidden) {
+			notify(ctx, `Prompt "${name}" is no longer available as a slash command`, "error");
 			return;
 		}
 		if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return;
