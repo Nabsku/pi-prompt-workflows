@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.1](https://github.com/Nabsku/pi-prompt-template-model-enhanced/compare/v0.13.0...v0.13.1) (2026-06-21)
+
+
+### Bug Fixes
+
+* harden prompt-library parity coverage ([1666691](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/16666916eff1757cefa4b743cdbb18ea704b95a5))
+
 ## [0.13.0](https://github.com/Nabsku/pi-prompt-template-model-enhanced/compare/v0.12.0...v0.13.0) (2026-06-21)
 
 ### Prompt library
