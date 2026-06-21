@@ -635,6 +635,57 @@ test("prompt-library model-conditional body promotes command-capable files", () 
 	});
 });
 
+
+test("prompt-library command marker matrix matches runtime and source inventory", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const projectLibrary = join(cwd, ".pi", "prompt-library");
+		mkdirSync(projectLibrary, { recursive: true });
+		const fixtures: Array<{ name: string; frontmatter: string; assertPrompt?: (prompt: any) => void }> = [
+			{ name: "model-marker", frontmatter: `model: claude-sonnet-4-20250514` },
+			{ name: "skill-marker", frontmatter: `skill: tmux` },
+			{ name: "skills-marker", frontmatter: `skills:\n  - tmux` },
+			{ name: "thinking-marker", frontmatter: `thinking: high`, assertPrompt: (prompt) => assert.equal(prompt.thinking, "high") },
+			{ name: "chain-marker", frontmatter: `chain: worker`, assertPrompt: (prompt) => assert.equal(prompt.chain, "worker") },
+			{ name: "fresh-marker", frontmatter: `fresh: true`, assertPrompt: (prompt) => assert.equal(prompt.fresh, true) },
+			{ name: "loop-marker", frontmatter: `loop: 2`, assertPrompt: (prompt) => assert.equal(prompt.loop, 2) },
+			{ name: "converge-marker", frontmatter: `converge: false`, assertPrompt: (prompt) => assert.equal(prompt.converge, false) },
+			{ name: "boomerang-marker", frontmatter: `boomerang: true`, assertPrompt: (prompt) => assert.equal(prompt.boomerang, true) },
+			{ name: "subagent-marker", frontmatter: `subagent: true`, assertPrompt: (prompt) => assert.equal(prompt.subagent, true) },
+			{ name: "parallel-marker", frontmatter: `subagent: true\nparallel: 2`, assertPrompt: (prompt) => assert.equal(prompt.parallel, 2) },
+			{ name: "deterministic-marker", frontmatter: `deterministic:\n  run: echo hi`, assertPrompt: (prompt) => assert.equal(prompt.deterministic?.execution.command, "echo hi") },
+			{ name: "run-marker", frontmatter: `run: echo hi`, assertPrompt: (prompt) => assert.equal(prompt.deterministic?.execution.command, "echo hi") },
+			{ name: "script-marker", frontmatter: `script: ./script.sh`, assertPrompt: (prompt) => assert.equal(prompt.deterministic?.execution.path, "./script.sh") },
+			{ name: "best-of-n-marker", frontmatter: `bestOfN:\n  workers:\n    - model: claude-sonnet-4-20250514`, assertPrompt: (prompt) => assert.equal(prompt.workers?.length, 1) },
+			{ name: "worktree-marker", frontmatter: `subagent: true\nparallel: 2\nworktree: true`, assertPrompt: (prompt) => assert.equal(prompt.worktree, true) },
+		];
+
+		for (const fixture of fixtures) {
+			writeFileSync(join(projectLibrary, `${fixture.name}.md`), `---\n${fixture.frontmatter}\n---\nBody for ${fixture.name}`);
+		}
+		writeFileSync(join(projectLibrary, "hidden-control.md"), "---\nhidden: true\ndescription: helper\n---\nHidden only");
+		writeFileSync(join(projectLibrary, "false-flags-control.md"), "---\nfresh: false\nconverge: true\nboomerang: false\n---\nInactive flags only");
+
+		const runtime = loadPromptsWithModel(cwd);
+		const chainRuntime = loadPromptsWithModel(cwd, true);
+		const sourceRecords = collectPromptSourceRecords(cwd, true);
+		for (const fixture of fixtures) {
+			const prompt = runtime.prompts.get(fixture.name);
+			assert.ok(prompt, `${fixture.name} should load in the runtime catalog`);
+			assert.equal(prompt.rootKind, "prompt-library");
+			assert.equal(chainRuntime.prompts.has(fixture.name), true, `${fixture.name} should also load for chain resolution`);
+			assert.equal(sourceRecords.records.find((record) => record.promptName === fixture.name)?.promptCapable, true, `${fixture.name} should be command-capable in source inventory`);
+			fixture.assertPrompt?.(prompt);
+		}
+
+		for (const inert of ["hidden-control", "false-flags-control"]) {
+			assert.equal(runtime.prompts.has(inert), false, `${inert} must not load as a command`);
+			assert.equal(chainRuntime.prompts.has(inert), false, `${inert} must not load for chain resolution`);
+			assert.equal(sourceRecords.records.find((record) => record.promptName === inert)?.promptCapable, false, `${inert} must stay include-only in source inventory`);
+		}
+	});
+});
+
 test("prompt-library fragments with non-object frontmatter stay ignored and quiet", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");

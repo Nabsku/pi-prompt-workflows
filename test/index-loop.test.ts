@@ -3249,3 +3249,113 @@ test("chain-prompts cannot reference plain prompt-library fragments", async () =
 		assert.ok(getNotifications().some((message) => /Templates not found: rules/.test(message)));
 	});
 });
+
+
+test("project prompt-library chain wrappers require approval before any step executes", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-library", "pipeline.md"), "---\nchain: first -> second\n---\nignored");
+		writeFileSync(join(cwd, ".pi", "prompts", "first.md"), `---\nmodel: ${MODEL_ID}\n---\nFIRST $@`);
+		writeFileSync(join(cwd, ".pi", "prompts", "second.md"), `---\nmodel: ${MODEL_ID}\n---\nSECOND $@`);
+
+		const pi = new FakePi();
+		let confirmCalls = 0;
+		const { ctx, getNotifications } = createContext(cwd, pi);
+		(ctx.ui as { confirm: () => Promise<boolean> }).confirm = async () => {
+			confirmCalls++;
+			return false;
+		};
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+
+		const pipeline = pi.commands.get("pipeline");
+		assert.ok(pipeline);
+		await pipeline.handler("task", ctx);
+
+		assert.equal(confirmCalls, 1);
+		assert.equal(pi.userMessages.length, 0);
+		assert.ok(getNotifications().some((message) => /was not approved/.test(message)));
+	});
+});
+
+test("queued run-prompt enforces project prompt-library approval before command execution", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-library", "review-lib.md"), `---\nmodel: ${MODEL_ID}\n---\nREVIEW $@`);
+
+		const pi = new FakePi();
+		let confirmCalls = 0;
+		const { ctx, getNotifications } = createContext(cwd, pi);
+		(ctx.ui as { confirm: () => Promise<boolean> }).confirm = async () => {
+			confirmCalls++;
+			return false;
+		};
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+		await pi.commands.get("prompt-tool")!.handler("on", ctx);
+		await pi.tools.get("run-prompt")!.execute("tool-call-library", { command: "review-lib src/server.ts" });
+
+		await pi.emit("agent_end", {}, ctx);
+
+		assert.equal(confirmCalls, 1);
+		assert.equal(pi.userMessages.length, 0);
+		assert.ok(getNotifications().some((message) => /was not approved/.test(message)));
+	});
+});
+
+test("queued run-prompt rejects hidden prompt-library commands without approval", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-library", "hidden-lib.md"), `---\nmodel: ${MODEL_ID}\nhidden: true\n---\nHIDDEN $@`);
+
+		const pi = new FakePi();
+		let confirmCalls = 0;
+		const { ctx, getNotifications } = createContext(cwd, pi);
+		(ctx.ui as { confirm: () => Promise<boolean> }).confirm = async () => {
+			confirmCalls++;
+			return true;
+		};
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+		await pi.commands.get("prompt-tool")!.handler("on", ctx);
+		await pi.tools.get("run-prompt")!.execute("tool-call-hidden", { command: "hidden-lib src/server.ts" });
+
+		await pi.emit("agent_end", {}, ctx);
+
+		assert.equal(confirmCalls, 0);
+		assert.equal(pi.userMessages.length, 0);
+		assert.ok(getNotifications().some((message) => /no longer available as a slash command/.test(message)));
+	});
+});
+
+test("queued chain-prompts preflights hidden project prompt-library steps before earlier steps", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "first.md"), `---\nmodel: ${MODEL_ID}\n---\nFIRST $@`);
+		writeFileSync(join(cwd, ".pi", "prompt-library", "hidden-second.md"), `---\nmodel: ${MODEL_ID}\nhidden: true\n---\nSECOND $@`);
+
+		const pi = new FakePi();
+		let confirmCalls = 0;
+		const { ctx, getNotifications } = createContext(cwd, pi);
+		(ctx.ui as { confirm: () => Promise<boolean> }).confirm = async () => {
+			confirmCalls++;
+			return false;
+		};
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+		await pi.commands.get("prompt-tool")!.handler("on", ctx);
+		await pi.tools.get("run-prompt")!.execute("tool-call-chain-hidden", { command: "chain-prompts first -> hidden-second task" });
+
+		await pi.emit("agent_end", {}, ctx);
+
+		assert.equal(confirmCalls, 1);
+		assert.equal(pi.userMessages.length, 0);
+		assert.ok(getNotifications().some((message) => /was not approved/.test(message)));
+	});
+});
