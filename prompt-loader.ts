@@ -1678,6 +1678,9 @@ function calculatePromptCapable(input: {
 }
 
 function hasPromptLibraryCommandMarker(frontmatter: Record<string, unknown>): boolean {
+	if (typeof frontmatter.thinking === "string" && (VALID_THINKING_LEVELS as readonly string[]).includes(frontmatter.thinking.trim().toLowerCase())) {
+		return true;
+	}
 	return [
 		"model",
 		"skill",

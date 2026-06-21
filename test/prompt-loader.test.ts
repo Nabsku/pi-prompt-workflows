@@ -540,6 +540,21 @@ test("prompt-library invalid-only thinking metadata does not promote plain files
 	});
 });
 
+test("prompt-library valid thinking-only metadata promotes command-capable files", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const projectLibrary = join(cwd, ".pi", "prompt-library");
+		mkdirSync(projectLibrary, { recursive: true });
+		writeFileSync(join(projectLibrary, "thinking-only.md"), "---\nthinking: high\n---\nThink hard about $@");
+
+		const prompt = loadPromptsWithModel(cwd).prompts.get("thinking-only");
+		assert.ok(prompt);
+		assert.equal(prompt.rootKind, "prompt-library");
+		assert.equal(prompt.thinking, "high");
+		assert.equal(prompt.content, "Think hard about $@");
+	});
+});
+
 test("plain .pi/prompts files still load only when plain prompts are requested", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
