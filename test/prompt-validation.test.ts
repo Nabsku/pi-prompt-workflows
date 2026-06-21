@@ -97,16 +97,18 @@ test("validatePromptTemplates source summary counts invalid command configs as c
 		const cwd = join(root, "project");
 		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
 		writeFileSync(join(cwd, ".pi", "prompt-library", "loop-command.md"), "---\nloop: 0\n---\nLoop $@");
+		writeFileSync(join(cwd, ".pi", "prompt-library", "subagent-command.md"), "---\nsubagent: []\n---\nDelegate $@");
 		writeFileSync(join(cwd, ".pi", "prompt-library", "thinking-fragment.md"), "---\nthinking: banana\n---\nPlain fragment");
 
 		const result = validatePromptTemplates(cwd);
 		const report = formatPromptValidationReport(result);
 
 		assert.equal(result.ok, false);
-		assert.equal(result.sourceSummary.projectLibraryCommands, 1);
+		assert.equal(result.sourceSummary.projectLibraryCommands, 2);
 		assert.equal(result.sourceSummary.projectLibraryFragments, 1);
-		assert.match(report, /Sources: 0 project prompts 1 project library command 0 user prompts 0 user library commands 1 include-only library fragment/);
+		assert.match(report, /Sources: 0 project prompts 2 project library commands 0 user prompts 0 user library commands 1 include-only library fragment/);
 		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "invalid-loop"), true);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "invalid-subagent"), true);
 	});
 });
 
