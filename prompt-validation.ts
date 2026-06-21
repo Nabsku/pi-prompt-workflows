@@ -442,6 +442,8 @@ const SOURCE_SUMMARY_COMMAND_INTENT_DIAGNOSTIC_CODES = new Set([
 	"invalid-lineup-parallel",
 	"invalid-lineup-subagent",
 	"invalid-loop",
+	"duplicate-command-name",
+	"empty-chain",
 	"empty-model",
 	"invalid-model",
 	"invalid-model-spec",
@@ -452,6 +454,7 @@ const SOURCE_SUMMARY_COMMAND_INTENT_DIAGNOSTIC_CODES = new Set([
 	"invalid-subagent",
 	"invalid-subagent-chain",
 	"invalid-worktree",
+	"reserved-command-name",
 ]);
 
 function hasSourceSummaryCommandIntentDiagnostic(record: PromptSourceRecord, diagnostics: PromptLoaderDiagnostic[]): boolean {
@@ -463,21 +466,15 @@ function collectValidationSourceSummary(sourceRecords: PromptSourceRecord[], inv
 	const loadedPromptPaths = new Set([...loaded.prompts.values()].map((prompt) => prompt.filePath));
 	const failedLibraryGraphRootPaths = new Set(includeGraphs.filter((graph) => graph.root.rootKind === "prompt-library" && graph.skipped).map((graph) => graph.root.filePath));
 	for (const record of sourceRecords) {
-		if (record.rootKind === "prompts") {
-			if (!loadedPromptPaths.has(record.filePath)) continue;
-			if (record.source === "project") summary.projectPrompts += 1;
-			else summary.userPrompts += 1;
-			continue;
-		}
-
-		if (record.promptCapable && (loadedPromptPaths.has(record.filePath) || failedLibraryGraphRootPaths.has(record.filePath) || hasSourceSummaryCommandIntentDiagnostic(record, loaded.diagnostics))) {
-			if (record.source === "project") summary.projectLibraryCommands += 1;
-			else summary.userLibraryCommands += 1;
-		}
+		if (record.rootKind !== "prompts") continue;
+		if (!loadedPromptPaths.has(record.filePath)) continue;
+		if (record.source === "project") summary.projectPrompts += 1;
+		else summary.userPrompts += 1;
 	}
 	for (const record of inventoryRecords) {
-		if (record.rootKind !== "prompt-library" || record.promptCapable || record.skippedReason === "invalid-frontmatter") continue;
-		if (hasSourceSummaryCommandIntentDiagnostic(record, loaded.diagnostics)) {
+		if (record.rootKind !== "prompt-library" || record.skippedReason === "invalid-frontmatter") continue;
+		const isLibraryCommand = record.promptCapable && (loadedPromptPaths.has(record.filePath) || failedLibraryGraphRootPaths.has(record.filePath) || hasSourceSummaryCommandIntentDiagnostic(record, loaded.diagnostics));
+		if (isLibraryCommand || hasSourceSummaryCommandIntentDiagnostic(record, loaded.diagnostics)) {
 			if (record.source === "project") summary.projectLibraryCommands += 1;
 			else summary.userLibraryCommands += 1;
 			continue;
