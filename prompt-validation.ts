@@ -21,6 +21,8 @@ export interface PromptValidationSourceSummary {
 	userPrompts: number;
 	projectLibraryCommands: number;
 	userLibraryCommands: number;
+	projectHiddenLibraryCommands: number;
+	userHiddenLibraryCommands: number;
 	projectLibraryFragments: number;
 	userLibraryFragments: number;
 }
@@ -407,6 +409,8 @@ function createEmptySourceSummary(): PromptValidationSourceSummary {
 		userPrompts: 0,
 		projectLibraryCommands: 0,
 		userLibraryCommands: 0,
+		projectHiddenLibraryCommands: 0,
+		userHiddenLibraryCommands: 0,
 		projectLibraryFragments: 0,
 		userLibraryFragments: 0,
 	};
@@ -473,8 +477,13 @@ function collectValidationSourceSummary(sourceRecords: PromptSourceRecord[], inv
 		if (record.rootKind !== "prompt-library" || record.skippedReason === "invalid-frontmatter") continue;
 		const isLibraryCommand = record.promptCapable || hasSourceSummaryCommandIntentDiagnostic(record, loaded.diagnostics);
 		if (isLibraryCommand) {
-			if (record.source === "project") summary.projectLibraryCommands += 1;
-			else summary.userLibraryCommands += 1;
+			if (record.source === "project") {
+				summary.projectLibraryCommands += 1;
+				if (record.hidden) summary.projectHiddenLibraryCommands += 1;
+			} else {
+				summary.userLibraryCommands += 1;
+				if (record.hidden) summary.userHiddenLibraryCommands += 1;
+			}
 			continue;
 		}
 		if (record.source === "project") summary.projectLibraryFragments += 1;
@@ -574,14 +583,19 @@ function formatIncludeGraphSection(graphs: PromptValidationIncludeGraph[]): stri
 }
 
 function formatSourceSummary(summary: PromptValidationSourceSummary): string {
-	return [
+	const hiddenLibraryCommands = summary.projectHiddenLibraryCommands + summary.userHiddenLibraryCommands;
+	const parts = [
 		"Sources:",
 		`${summary.projectPrompts} project prompt${summary.projectPrompts === 1 ? "" : "s"}`,
 		`${summary.projectLibraryCommands} project library command${summary.projectLibraryCommands === 1 ? "" : "s"}`,
 		`${summary.userPrompts} user prompt${summary.userPrompts === 1 ? "" : "s"}`,
 		`${summary.userLibraryCommands} user library command${summary.userLibraryCommands === 1 ? "" : "s"}`,
 		`${summary.projectLibraryFragments + summary.userLibraryFragments} include-only library fragment${summary.projectLibraryFragments + summary.userLibraryFragments === 1 ? "" : "s"}`,
-	].join(" ");
+	];
+	if (hiddenLibraryCommands > 0) {
+		parts.push(`${hiddenLibraryCommands} hidden library command${hiddenLibraryCommands === 1 ? "" : "s"}`);
+	}
+	return parts.join(" ");
 }
 
 export function formatPromptValidationReport(result: PromptValidationResult): string {

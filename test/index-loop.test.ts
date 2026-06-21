@@ -3113,11 +3113,28 @@ test("direct project prompt-library command execution requires session approval"
 	});
 });
 
+test("hidden prompt-library commands are not registered as top-level slash commands", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-library", "visible-lib.md"), `---\nmodel: ${MODEL_ID}\n---\nVISIBLE $@`);
+		writeFileSync(join(cwd, ".pi", "prompt-library", "hidden-lib.md"), `---\nmodel: ${MODEL_ID}\nhidden: true\n---\nHIDDEN $@`);
+
+		const pi = new FakePi();
+		const { ctx } = createContext(cwd, pi);
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+
+		assert.ok(pi.commands.has("visible-lib"));
+		assert.equal(pi.commands.has("hidden-lib"), false);
+	});
+});
+
 test("chain-prompts can reference command-capable prompt-library steps", async () => {
 	await withTempHome(async (root) => {
 		const cwd = join(root, "project");
 		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompt-library", "analyze.md"), `---\nmodel: ${MODEL_ID}\n---\nANALYZE $@`);
+		writeFileSync(join(cwd, ".pi", "prompt-library", "analyze.md"), `---\nmodel: ${MODEL_ID}\nhidden: true\n---\nANALYZE $@`);
 
 		const pi = new FakePi();
 		const { ctx, getNotifications } = createContext(cwd, pi);

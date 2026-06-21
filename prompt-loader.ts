@@ -85,6 +85,7 @@ export interface PromptWithModel {
 	chain?: string;
 	chainContext?: "summary";
 	restore: boolean;
+	hidden?: boolean;
 	skill?: string;
 	skills?: string[];
 	thinking?: ThinkingLevel;
@@ -136,6 +137,7 @@ export interface PromptSourceRecord {
 	hasInlineIncludes: boolean;
 	hasIncludesPlaceholder: boolean;
 	isChainWrapper: boolean;
+	hidden?: boolean;
 	includeMetadataInvalid?: boolean;
 	skippedReason?: string;
 }
@@ -325,6 +327,31 @@ function normalizeFresh(
 			filePath,
 			source,
 			`Using default fresh=false for ${filePath}: frontmatter field "fresh" must be true or false.`,
+		),
+	);
+	return false;
+}
+
+function normalizeHidden(
+	value: unknown,
+	filePath: string,
+	source: PromptSource,
+	diagnostics: PromptLoaderDiagnostic[],
+): boolean {
+	if (value === undefined) return false;
+	if (typeof value === "boolean") return value;
+	if (typeof value === "string") {
+		const normalized = value.trim().toLowerCase();
+		if (normalized === "true") return true;
+		if (normalized === "false") return false;
+	}
+
+	diagnostics.push(
+		createDiagnostic(
+			"invalid-hidden",
+			filePath,
+			source,
+			`Using default hidden=false for ${filePath}: frontmatter field "hidden" must be true or false.`,
 		),
 	);
 	return false;
@@ -2018,6 +2045,7 @@ function loadPromptsWithModelFromDir(
 				if (!chain && hasModelField && !parsedModels) continue;
 				const models = chain ? [] : (parsedModels ?? []);
 				const rotate = chain ? false : normalizeRotate(frontmatter.rotate, fullPath, source, diagnostics);
+				const hidden = normalizeHidden(frontmatter.hidden, fullPath, source, diagnostics);
 
 				const name = entry.name.slice(0, -3);
 				if (RESERVED_COMMAND_NAMES.has(name)) {
@@ -2172,6 +2200,7 @@ function loadPromptsWithModelFromDir(
 					description,
 					content,
 					models,
+					hidden: hidden || undefined,
 					...(includes !== undefined ? { includes } : {}),
 					chain: chain || undefined,
 					chainContext,
@@ -2324,6 +2353,7 @@ function collectPromptSourceRecordsFromDir(
 				}
 				const frontmatter = normalizeFrontmatterRecord(parsed.frontmatter, fullPath, source, diagnostics);
 				if (!frontmatter) continue;
+				const hidden = normalizeHidden(frontmatter.hidden, fullPath, source, diagnostics);
 
 				if (RESERVED_COMMAND_NAMES.has(promptName)) {
 					const rawChain = typeof frontmatter.chain === "string" && frontmatter.chain.trim() ? frontmatter.chain.trim() : undefined;
@@ -2346,6 +2376,7 @@ function collectPromptSourceRecordsFromDir(
 						hasInlineIncludes: rawChain === undefined && extractPromptInlineIncludes(parsed.body).length > 0,
 						hasIncludesPlaceholder: rawChain === undefined && hasPromptIncludesPlaceholder(parsed.body),
 						isChainWrapper: rawChain !== undefined,
+						hidden: hidden || undefined,
 						skippedReason: "reserved-command-name",
 					});
 					continue;
@@ -2371,6 +2402,7 @@ function collectPromptSourceRecordsFromDir(
 						hasInlineIncludes: false,
 						hasIncludesPlaceholder: false,
 						isChainWrapper: false,
+						hidden: hidden || undefined,
 					});
 					continue;
 				}
@@ -2424,6 +2456,7 @@ function collectPromptSourceRecordsFromDir(
 					hasInlineIncludes,
 					hasIncludesPlaceholder,
 					isChainWrapper,
+					hidden: hidden || undefined,
 					...(includeMetadataInvalid ? { includeMetadataInvalid: true, skippedReason } : {}),
 				});
 			} catch (error) {

@@ -43,6 +43,7 @@ test("validatePromptTemplates reports prompt-library source summary", () => {
 		mkdirSync(join(cwd, ".pi", "prompt-library", "b"), { recursive: true });
 		writeFileSync(join(cwd, ".pi", "prompts", "review.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nReview $@");
 		writeFileSync(join(cwd, ".pi", "prompt-library", "library-review.md"), "---\nthinking: high\n---\nLibrary review $@");
+		writeFileSync(join(cwd, ".pi", "prompt-library", "hidden-review.md"), "---\nmodel: claude-sonnet-4-20250514\nhidden: true\n---\nHidden review $@");
 		writeFileSync(join(cwd, ".pi", "prompt-library", "a", "rules.md"), "Plain shared rules A");
 		writeFileSync(join(cwd, ".pi", "prompt-library", "b", "rules.md"), "Plain shared rules B");
 		writeFileSync(join(cwd, ".pi", "prompt-library", "ignored.md"), "---\n[]\n---\nIgnored invalid frontmatter fragment");
@@ -51,9 +52,10 @@ test("validatePromptTemplates reports prompt-library source summary", () => {
 		const report = formatPromptValidationReport(result);
 
 		assert.equal(result.sourceSummary.projectPrompts, 1);
-		assert.equal(result.sourceSummary.projectLibraryCommands, 1);
+		assert.equal(result.sourceSummary.projectLibraryCommands, 2);
+		assert.equal(result.sourceSummary.projectHiddenLibraryCommands, 1);
 		assert.equal(result.sourceSummary.projectLibraryFragments, 2);
-		assert.match(report, /Sources: 1 project prompt 1 project library command 0 user prompts 0 user library commands 2 include-only library fragments/);
+		assert.match(report, /Sources: 1 project prompt 2 project library commands 0 user prompts 0 user library commands 2 include-only library fragments 1 hidden library command/);
 	});
 });
 
@@ -982,6 +984,8 @@ test("formatPromptValidationReport escapes control characters in diagnostics", (
 			userPrompts: 0,
 			projectLibraryCommands: 0,
 			userLibraryCommands: 0,
+			projectHiddenLibraryCommands: 0,
+			userHiddenLibraryCommands: 0,
 			projectLibraryFragments: 0,
 			userLibraryFragments: 0,
 		},

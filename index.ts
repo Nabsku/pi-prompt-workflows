@@ -214,7 +214,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		prompts = result.prompts;
 		chainPrompts = chainResult.prompts;
 
-		for (const name of prompts.keys()) {
+		for (const [name, prompt] of prompts) {
+			if (prompt.hidden) continue;
 			registerPromptCommand(name);
 		}
 
@@ -1508,6 +1509,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		for (const [name, prompt] of chainPrompts) merged.set(name, prompt);
 		for (const [name, prompt] of prompts) merged.set(name, prompt);
 		return Array.from(merged.values())
+			.filter((prompt) => !prompt.hidden)
 			.sort((a, b) => a.name.localeCompare(b.name))
 			.map((prompt) => ({
 				name: prompt.name,
