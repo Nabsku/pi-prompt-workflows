@@ -41,11 +41,14 @@ test("validatePromptTemplates reports prompt-library source summary", () => {
 		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 		mkdirSync(join(cwd, ".pi", "prompt-library", "a"), { recursive: true });
 		mkdirSync(join(cwd, ".pi", "prompt-library", "b"), { recursive: true });
+		mkdirSync(join(root, ".pi", "agent", "prompt-library"), { recursive: true });
 		writeFileSync(join(cwd, ".pi", "prompts", "review.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nReview $@");
 		writeFileSync(join(cwd, ".pi", "prompt-library", "library-review.md"), "---\nthinking: high\n---\nLibrary review $@");
 		writeFileSync(join(cwd, ".pi", "prompt-library", "hidden-review.md"), "---\nmodel: claude-sonnet-4-20250514\nhidden: true\n---\nHidden review $@");
 		writeFileSync(join(cwd, ".pi", "prompt-library", "a", "rules.md"), "Plain shared rules A");
 		writeFileSync(join(cwd, ".pi", "prompt-library", "b", "rules.md"), "Plain shared rules B");
+		writeFileSync(join(root, ".pi", "agent", "prompt-library", "user-review.md"), "---\nmodel: claude-sonnet-4-20250514\nhidden: true\n---\nUser hidden review $@");
+		writeFileSync(join(root, ".pi", "agent", "prompt-library", "user-rules.md"), "User shared rules");
 		writeFileSync(join(cwd, ".pi", "prompt-library", "ignored.md"), "---\n[]\n---\nIgnored invalid frontmatter fragment");
 
 		const result = validatePromptTemplates(cwd);
@@ -55,7 +58,10 @@ test("validatePromptTemplates reports prompt-library source summary", () => {
 		assert.equal(result.sourceSummary.projectLibraryCommands, 2);
 		assert.equal(result.sourceSummary.projectHiddenLibraryCommands, 1);
 		assert.equal(result.sourceSummary.projectLibraryFragments, 2);
-		assert.match(report, /Sources: 1 project prompt 2 project library commands 0 user prompts 0 user library commands 2 include-only library fragments 1 hidden library command/);
+		assert.equal(result.sourceSummary.userLibraryCommands, 1);
+		assert.equal(result.sourceSummary.userHiddenLibraryCommands, 1);
+		assert.equal(result.sourceSummary.userLibraryFragments, 1);
+		assert.match(report, /Sources: 1 project prompt 2 project library commands 0 user prompts 1 user library command 3 include-only library fragments 2 hidden library commands/);
 	});
 });
 

@@ -275,6 +275,30 @@ test("unsupported chain, deterministic, and compare prompts report clear errors 
 	});
 });
 
+
+test("exact plain dry-run of hidden project prompt-library commands previews without approval", async () => {
+	await setup(async (_root, cwd, pi, ctx) => {
+		writeLibraryPrompt(cwd, "hidden-lib", "---\nmodel: anthropic/claude-sonnet-4-20250514\nhidden: true\n---\nHIDDEN $@");
+		let confirmCalls = 0;
+		ctx.ui.confirm = async () => {
+			confirmCalls++;
+			throw new Error("dry-run must not ask for project-library approval");
+		};
+		await pi.emit("session_start", {}, ctx);
+
+		assert.equal(pi.commands.has("hidden-lib"), false);
+		const printOutput = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("hidden-lib src/app.ts", ctx));
+		const dryRunOutput = await captureStdout(() => pi.commands.get("dry-run-prompt")!.handler!("hidden-lib src/app.ts", ctx));
+
+		for (const output of [printOutput, dryRunOutput]) {
+			assert.match(output, /# Prompt dry-run: hidden-lib/);
+			assert.match(output, /HIDDEN src\/app\.ts/);
+		}
+		assert.equal(confirmCalls, 0);
+		assertNoExecutionSideEffects(pi);
+	});
+});
+
 test("command-capable prompt-library prompt registers as slash command and print-prompt renders it without execution", async () => {
 	await setup(async (_root, cwd, pi, ctx) => {
 		writeLibraryPrompt(cwd, "review", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nLibrary review $@");
