@@ -412,7 +412,13 @@ function createEmptySourceSummary(): PromptValidationSourceSummary {
 	};
 }
 
-function collectValidationSourceSummary(sourceRecords: PromptSourceRecord[], loaded: ReturnType<typeof loadPromptsWithModel>): PromptValidationSourceSummary {
+const SOURCE_SUMMARY_NON_COMMAND_DIAGNOSTIC_CODES = new Set(["duplicate-command-name", "reserved-command-name"]);
+
+function hasSourceSummaryCommandDiagnostic(record: PromptSourceRecord, diagnostics: PromptLoaderDiagnostic[]): boolean {
+	return diagnostics.some((diagnostic) => diagnostic.filePath === record.filePath && !SOURCE_SUMMARY_NON_COMMAND_DIAGNOSTIC_CODES.has(diagnostic.code));
+}
+
+function collectValidationSourceSummary(sourceRecords: PromptSourceRecord[], inventoryRecords: PromptSourceRecord[], loaded: ReturnType<typeof loadPromptsWithModel>): PromptValidationSourceSummary {
 	const summary = createEmptySourceSummary();
 	const loadedPromptPaths = new Set([...loaded.prompts.values()].map((prompt) => prompt.filePath));
 	for (const record of sourceRecords) {
@@ -423,10 +429,13 @@ function collectValidationSourceSummary(sourceRecords: PromptSourceRecord[], loa
 			continue;
 		}
 
-		if (record.promptCapable && loadedPromptPaths.has(record.filePath)) {
+		if (record.promptCapable && (loadedPromptPaths.has(record.filePath) || hasSourceSummaryCommandDiagnostic(record, loaded.diagnostics))) {
 			if (record.source === "project") summary.projectLibraryCommands += 1;
 			else summary.userLibraryCommands += 1;
-		} else if (!record.promptCapable) {
+		}
+	}
+	for (const record of inventoryRecords) {
+		if (record.rootKind === "prompt-library" && !record.promptCapable && record.skippedReason !== "invalid-frontmatter") {
 			if (record.source === "project") summary.projectLibraryFragments += 1;
 			else summary.userLibraryFragments += 1;
 		}
@@ -436,13 +445,13 @@ function collectValidationSourceSummary(sourceRecords: PromptSourceRecord[], loa
 
 export function validatePromptTemplates(cwd: string, options: PromptValidationOptions = {}): PromptValidationResult {
 	const loaded = loadPromptsWithModel(cwd, true);
-	const sourceRecords = collectPromptSourceRecords(cwd, true).records;
+	const sourceRecordResult = collectPromptSourceRecords(cwd, true);
 	const result: PromptValidationResult = {
 		ok: loaded.diagnostics.length === 0,
 		promptCount: loaded.prompts.size,
-		sourceSummary: collectValidationSourceSummary(sourceRecords, loaded),
+		sourceSummary: collectValidationSourceSummary(sourceRecordResult.records, sourceRecordResult.inventoryRecords, loaded),
 		diagnostics: [...loaded.diagnostics],
-		includeGraphs: collectValidationIncludeGraphs(sourceRecords, loaded),
+		includeGraphs: collectValidationIncludeGraphs(sourceRecordResult.records, loaded),
 	};
 
 	validatePromptChains(cwd, result, loaded.prompts);
