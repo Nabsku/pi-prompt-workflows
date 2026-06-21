@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
-import { hasTrustRequiringProjectResources, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
 	extractChainContextFlag,
@@ -153,22 +153,12 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		return prompt.source === "project" && prompt.rootKind === "prompt-library";
 	}
 
-	function contextIsProjectTrusted(ctx: ExtensionContext): boolean {
-		const checker = (ctx as ExtensionContext & { isProjectTrusted?: () => boolean }).isProjectTrusted;
-		return typeof checker === "function" ? checker() : true;
-	}
-
-	function needsExtensionProjectPromptLibraryApproval(ctx: ExtensionContext): boolean {
-		// Older Pi versions do not treat .pi/prompt-library as a trust-requiring
-		// project resource. In that case ctx.isProjectTrusted() can be true simply
-		// because Pi saw no core-known resources. Require extension-local session
-		// approval before executing project prompt-library commands.
-		return !contextIsProjectTrusted(ctx) || !hasTrustRequiringProjectResources(ctx.cwd);
-	}
-
 	async function ensureProjectPromptLibraryApproved(prompt: PromptWithModel, ctx: ExtensionCommandContext): Promise<boolean> {
 		if (!isProjectPromptLibraryPrompt(prompt)) return true;
-		if (!needsExtensionProjectPromptLibraryApproval(ctx)) return true;
+		// Pi core trust has historically covered only core-known project resources
+		// (for example .pi/prompts), not extension-defined .pi/prompt-library
+		// commands. Keep a prompt-library-specific session approval instead of
+		// relying on ctx.isProjectTrusted(), which can be true for unrelated roots.
 
 		const cwdKey = resolvePath(ctx.cwd);
 		if (approvedProjectPromptLibraryCwds.has(cwdKey)) return true;

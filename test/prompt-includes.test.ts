@@ -49,7 +49,7 @@ function render(
 	fixture: IncludeFixture,
 	content: string,
 	includes?: string[],
-	options: { debugBoundaries?: boolean; promptFilePath?: string; promptRoot?: string; rootKind?: "prompts" | "prompt-library" } = {},
+	options: { debugBoundaries?: boolean; promptFilePath?: string; promptRoot?: string; rootKind?: "prompts" | "prompt-library"; source?: "project" | "user" } = {},
 ): RenderPromptIncludesResult {
 	return renderPromptIncludes({
 		promptName: "prompt",
@@ -58,7 +58,7 @@ function render(
 		promptFilePath: options.promptFilePath ?? fixture.promptFilePath,
 		promptRoot: options.promptRoot ?? fixture.promptRoot,
 		cwd: fixture.cwd,
-		source: "project",
+		source: options.source ?? "project",
 		rootKind: options.rootKind,
 		homeDir: fixture.home,
 		debugBoundaries: options.debugBoundaries,
@@ -790,6 +790,22 @@ test("project prompts include project prompt-library partials by fallback", () =
 
 		assertOk(result);
 		assert.equal(result.content, "Review\nlibrary rules");
+	});
+});
+
+test("user prompts do not fall back to project prompt-library partials", () => {
+	withFixture((fixture) => {
+		mkdirSync(join(fixture.projectLibrary, "partials"), { recursive: true });
+		writeFileSync(join(fixture.projectLibrary, "partials", "rules.md"), "project library rules");
+
+		const result = render(fixture, "Review\n<includes />", ["partials/rules.md"], {
+			promptFilePath: join(fixture.home, ".pi", "agent", "prompts", "global.md"),
+			promptRoot: join(fixture.home, ".pi", "agent", "prompts"),
+			source: "user",
+		});
+
+		assertFail(result);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "include-not-found"), true);
 	});
 });
 

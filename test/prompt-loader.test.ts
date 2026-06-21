@@ -336,7 +336,7 @@ test("prompt-library invalid include metadata without model remains prompt-capab
 	});
 });
 
-test("reserved prompt-library include-only source records remain prompt-capable", () => {
+test("reserved prompt-library body-only inline records stay include-only", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
 		const projectLibrary = join(cwd, ".pi", "prompt-library");
@@ -348,7 +348,7 @@ test("reserved prompt-library include-only source records remain prompt-capable"
 		const inlineReserved = records.records.find((record) => record.promptName === "settings");
 		assert.ok(inlineReserved);
 		assert.equal(inlineReserved.rootKind, "prompt-library");
-		assert.equal(inlineReserved.promptCapable, true);
+		assert.equal(inlineReserved.promptCapable, false);
 		assert.equal(inlineReserved.hasInlineIncludes, true);
 		assert.equal(inlineReserved.skippedReason, "reserved-command-name");
 
@@ -358,6 +358,41 @@ test("reserved prompt-library include-only source records remain prompt-capable"
 		assert.equal(placeholderReserved.promptCapable, true);
 		assert.equal(placeholderReserved.hasIncludesPlaceholder, true);
 		assert.equal(placeholderReserved.skippedReason, "reserved-command-name");
+	});
+});
+
+test("prompt-library body-only inline includes stay include-only while include metadata remains command-capable", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const projectLibrary = join(cwd, ".pi", "prompt-library");
+		mkdirSync(join(projectLibrary, "partials"), { recursive: true });
+		writeFileSync(join(projectLibrary, "inline-only.md"), '<include file="partials/rules.md" />');
+		writeFileSync(join(projectLibrary, "metadata-include.md"), '---\ninclude: partials/rules.md\n---\n<includes />');
+		writeFileSync(join(projectLibrary, "partials", "rules.md"), "rules");
+
+		const defaultResult = loadPromptsWithModel(cwd);
+		assert.equal(defaultResult.prompts.has("inline-only"), false);
+		assert.equal(defaultResult.prompts.has("metadata-include"), true);
+
+		const records = collectPromptSourceRecords(cwd, true);
+		assert.equal(records.records.find((record) => record.promptName === "inline-only")?.promptCapable, false);
+		assert.equal(records.records.find((record) => record.promptName === "metadata-include")?.promptCapable, true);
+	});
+});
+
+test("project prompt-library root is rejected when a .pi ancestor is symlinked outside the project", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const outsidePi = join(root, "outside-pi");
+		mkdirSync(join(outsidePi, "prompt-library"), { recursive: true });
+		mkdirSync(cwd, { recursive: true });
+		writeFileSync(join(outsidePi, "prompt-library", "escape.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nescape");
+		symlinkSync(outsidePi, join(cwd, ".pi"), "dir");
+
+		const result = loadPromptsWithModel(cwd, true);
+		assert.equal(result.prompts.has("escape"), false);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "symlink-outside-prompt-root"), true);
+		assert.match(result.diagnostics.map((diagnostic) => diagnostic.message).join("\n"), /symlinked through ancestors/);
 	});
 });
 
