@@ -95,9 +95,13 @@ test("validatePromptTemplates source summary counts skipped prompt-library comma
 test("validatePromptTemplates source summary counts invalid command configs as commands", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompt-library", "nested"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-library", "dup.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nFirst dup $@");
+		writeFileSync(join(cwd, ".pi", "prompt-library", "nested", "dup.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nSecond dup $@");
+		writeFileSync(join(cwd, ".pi", "prompt-library", "empty-chain-command.md"), "---\nchain: \"\"\n---\nEmpty chain $@");
 		writeFileSync(join(cwd, ".pi", "prompt-library", "empty-model-command.md"), "---\nmodel: \"\"\n---\nEmpty model $@");
 		writeFileSync(join(cwd, ".pi", "prompt-library", "loop-command.md"), "---\nloop: 0\n---\nLoop $@");
+		writeFileSync(join(cwd, ".pi", "prompt-library", "settings.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nReserved $@");
 		writeFileSync(join(cwd, ".pi", "prompt-library", "subagent-command.md"), "---\nsubagent: []\n---\nDelegate $@");
 		writeFileSync(join(cwd, ".pi", "prompt-library", "thinking-fragment.md"), "---\nthinking: banana\n---\nPlain fragment");
 
@@ -105,12 +109,15 @@ test("validatePromptTemplates source summary counts invalid command configs as c
 		const report = formatPromptValidationReport(result);
 
 		assert.equal(result.ok, false);
-		assert.equal(result.sourceSummary.projectLibraryCommands, 3);
+		assert.equal(result.sourceSummary.projectLibraryCommands, 7);
 		assert.equal(result.sourceSummary.projectLibraryFragments, 1);
-		assert.match(report, /Sources: 0 project prompts 3 project library commands 0 user prompts 0 user library commands 1 include-only library fragment/);
+		assert.match(report, /Sources: 0 project prompts 7 project library commands 0 user prompts 0 user library commands 1 include-only library fragment/);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "duplicate-command-name"), true);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "empty-chain"), true);
 		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "empty-model"), true);
 		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "invalid-loop"), true);
 		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "invalid-subagent"), true);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "reserved-command-name"), true);
 	});
 });
 
