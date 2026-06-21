@@ -2571,8 +2571,13 @@ function effectiveLineupCount(slots: DelegationLineupSlot[] | undefined): number
 	return slots?.reduce((total, slot) => total + (slot.count ?? 1), 0) ?? 0;
 }
 
+export function formatPromptSourceLabel(prompt: Pick<PromptWithModel, "source" | "rootKind" | "subdir">): string {
+	const rootLabel = prompt.rootKind === "prompt-library" ? `${prompt.source} library` : prompt.source;
+	return prompt.subdir ? `${rootLabel}:${prompt.subdir}` : rootLabel;
+}
+
 export function buildPromptCommandDescription(prompt: PromptWithModel): string {
-	const sourceLabel = prompt.subdir ? `(${prompt.source}:${prompt.subdir})` : `(${prompt.source})`;
+	const sourceLabel = `(${formatPromptSourceLabel(prompt)})`;
 	if (prompt.chain) {
 		const chainContextLabel = prompt.chainContext ? ` ${prompt.chainContext}` : "";
 		const cwdLabel = prompt.cwd ? ` cwd:${prompt.cwd}` : "";

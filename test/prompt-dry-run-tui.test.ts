@@ -38,6 +38,14 @@ const catalog: PromptTemplateCatalogItem[] = [
 		description: "Unsupported deterministic prompt",
 		unsupportedReason: "Dry-run for deterministic prompts is not supported in v1 because it would require running configured commands/scripts.",
 	},
+	{
+		name: "library-review",
+		source: "project",
+		displaySource: "project library",
+		file: ".pi/prompt-library/library-review.md",
+		description: "Review from the prompt library",
+		model: "anthropic/claude-sonnet-4",
+	},
 ];
 
 const okResult: PromptDryRunResult = {
@@ -88,6 +96,7 @@ test("picker renders a searchable template picker by default, marks unsupported 
 	assert.match(text, /review/);
 	assert.match(text, /implement-plan/);
 	assert.match(text, /deterministic-report/);
+	assert.match(text, /library-review\s+project library/);
 	assert.match(text, /unsupported|not supported/i);
 	assert.match(text, /Enter.*inspect/i);
 	assert.match(text, /Esc|q.*quit/i);
@@ -234,6 +243,8 @@ test("inspector Includes pane renders root-only include diagnostics without edge
 					promptRoot: "/repo/.pi/prompts",
 					cwd: "/repo",
 					source: "project",
+					rootKind: "prompts",
+					promptCapable: true,
 					rawBody: "<includes />",
 					hasInlineIncludes: false,
 					hasIncludesPlaceholder: true,
@@ -273,6 +284,8 @@ test("inspector Includes pane renders include edges in graph order with diagnost
 					promptRoot: "/repo/.pi/prompts",
 					cwd: "/repo",
 					source: "project",
+					rootKind: "prompts",
+					promptCapable: true,
 					rawBody: "body",
 					includes: ["b.md", "a.md"],
 					hasInlineIncludes: true,

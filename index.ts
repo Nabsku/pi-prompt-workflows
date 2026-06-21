@@ -23,6 +23,7 @@ import { preparePromptExecution, renderPromptForResolvedModel } from "./prompt-e
 import {
 	buildPromptCommandDescription,
 	expandCwdPath,
+	formatPromptSourceLabel,
 	loadPromptsWithModel,
 	type DelegationLineupSlot,
 	type PromptWithModel,
@@ -1511,7 +1512,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			.map((prompt) => ({
 				name: prompt.name,
 				source: prompt.source,
-				displaySource: prompt.source,
+				displaySource: formatPromptSourceLabel(prompt),
 				file: prompt.filePath,
 				description: prompt.description,
 				model: prompt.models[0],
