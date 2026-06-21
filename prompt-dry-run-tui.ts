@@ -6,7 +6,7 @@ import type { PromptLoaderDiagnostic } from "./prompt-loader.js";
 export interface PromptTemplateCatalogItem {
 	name: string;
 	source: "project" | "user" | "reserved";
-	displaySource: "project" | "user" | "reserved";
+	displaySource: string;
 	file?: string;
 	description?: string;
 	model?: string;

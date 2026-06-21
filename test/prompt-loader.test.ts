@@ -552,6 +552,7 @@ test("prompt-library valid thinking-only metadata promotes command-capable files
 		assert.equal(prompt.rootKind, "prompt-library");
 		assert.equal(prompt.thinking, "high");
 		assert.equal(prompt.content, "Think hard about $@");
+		assert.match(buildPromptCommandDescription(prompt), /\(project library\)$/);
 	});
 });
 

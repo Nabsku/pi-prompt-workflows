@@ -1,6 +1,6 @@
 import { parseChainDeclaration, type ChainStep, type ChainStepOrParallel } from "./chain-parser.js";
 import { collectPromptIncludeGraphs, type PromptIncludeGraph, type PromptIncludeGraphEdge, type PromptIncludeGraphNode } from "./prompt-includes.js";
-import { collectPromptSourceRecords, discoverFilesystemSkills, loadPromptsWithModel, readSkillContent, resolveSkillPath, type PromptLoaderDiagnostic, type PromptSource } from "./prompt-loader.js";
+import { collectPromptSourceRecords, discoverFilesystemSkills, loadPromptsWithModel, readSkillContent, resolveSkillPath, type PromptLoaderDiagnostic, type PromptSource, type PromptSourceRecord } from "./prompt-loader.js";
 
 export interface RegisteredPromptSkill {
 	skillName: string;
@@ -16,9 +16,19 @@ export interface PromptValidationIncludeGraph extends PromptIncludeGraph {
 	skipped: boolean;
 }
 
+export interface PromptValidationSourceSummary {
+	projectPrompts: number;
+	userPrompts: number;
+	projectLibraryCommands: number;
+	userLibraryCommands: number;
+	projectLibraryFragments: number;
+	userLibraryFragments: number;
+}
+
 export interface PromptValidationResult {
 	ok: boolean;
 	promptCount: number;
+	sourceSummary: PromptValidationSourceSummary;
 	diagnostics: PromptLoaderDiagnostic[];
 	includeGraphs: PromptValidationIncludeGraph[];
 }
@@ -379,10 +389,9 @@ function graphRootHasIncludeRelatedLoaderDiagnostic(graph: PromptIncludeGraph, d
 	return diagnostics.some((diagnostic) => diagnostic.filePath === graph.root.filePath && isIncludeRelatedDiagnostic(diagnostic));
 }
 
-function collectValidationIncludeGraphs(cwd: string, loaded: ReturnType<typeof loadPromptsWithModel>): PromptValidationIncludeGraph[] {
-	const sourceRecords = collectPromptSourceRecords(cwd, true);
+function collectValidationIncludeGraphs(sourceRecords: PromptSourceRecord[], loaded: ReturnType<typeof loadPromptsWithModel>): PromptValidationIncludeGraph[] {
 	const loadedPromptPaths = new Set([...loaded.prompts.values()].map((prompt) => prompt.filePath));
-	const includeGraphs = collectPromptIncludeGraphs({ records: sourceRecords.records }).graphs;
+	const includeGraphs = collectPromptIncludeGraphs({ records: sourceRecords }).graphs;
 	return includeGraphs.map((graph) => {
 		const effective = loadedPromptPaths.has(graph.root.filePath);
 		const skipped =
@@ -392,13 +401,48 @@ function collectValidationIncludeGraphs(cwd: string, loaded: ReturnType<typeof l
 	});
 }
 
+function createEmptySourceSummary(): PromptValidationSourceSummary {
+	return {
+		projectPrompts: 0,
+		userPrompts: 0,
+		projectLibraryCommands: 0,
+		userLibraryCommands: 0,
+		projectLibraryFragments: 0,
+		userLibraryFragments: 0,
+	};
+}
+
+function collectValidationSourceSummary(sourceRecords: PromptSourceRecord[], loaded: ReturnType<typeof loadPromptsWithModel>): PromptValidationSourceSummary {
+	const summary = createEmptySourceSummary();
+	const loadedPromptPaths = new Set([...loaded.prompts.values()].map((prompt) => prompt.filePath));
+	for (const record of sourceRecords) {
+		if (record.rootKind === "prompts") {
+			if (!loadedPromptPaths.has(record.filePath)) continue;
+			if (record.source === "project") summary.projectPrompts += 1;
+			else summary.userPrompts += 1;
+			continue;
+		}
+
+		if (record.promptCapable && loadedPromptPaths.has(record.filePath)) {
+			if (record.source === "project") summary.projectLibraryCommands += 1;
+			else summary.userLibraryCommands += 1;
+		} else if (!record.promptCapable) {
+			if (record.source === "project") summary.projectLibraryFragments += 1;
+			else summary.userLibraryFragments += 1;
+		}
+	}
+	return summary;
+}
+
 export function validatePromptTemplates(cwd: string, options: PromptValidationOptions = {}): PromptValidationResult {
 	const loaded = loadPromptsWithModel(cwd, true);
+	const sourceRecords = collectPromptSourceRecords(cwd, true).records;
 	const result: PromptValidationResult = {
 		ok: loaded.diagnostics.length === 0,
 		promptCount: loaded.prompts.size,
+		sourceSummary: collectValidationSourceSummary(sourceRecords, loaded),
 		diagnostics: [...loaded.diagnostics],
-		includeGraphs: collectValidationIncludeGraphs(cwd, loaded),
+		includeGraphs: collectValidationIncludeGraphs(sourceRecords, loaded),
 	};
 
 	validatePromptChains(cwd, result, loaded.prompts);
@@ -479,11 +523,24 @@ function formatIncludeGraphSection(graphs: PromptValidationIncludeGraph[]): stri
 	return lines;
 }
 
+function formatSourceSummary(summary: PromptValidationSourceSummary): string {
+	return [
+		"Sources:",
+		`${summary.projectPrompts} project prompt${summary.projectPrompts === 1 ? "" : "s"}`,
+		`${summary.projectLibraryCommands} project library command${summary.projectLibraryCommands === 1 ? "" : "s"}`,
+		`${summary.userPrompts} user prompt${summary.userPrompts === 1 ? "" : "s"}`,
+		`${summary.userLibraryCommands} user library command${summary.userLibraryCommands === 1 ? "" : "s"}`,
+		`${summary.projectLibraryFragments + summary.userLibraryFragments} include-only library fragment${summary.projectLibraryFragments + summary.userLibraryFragments === 1 ? "" : "s"}`,
+	].join(" ");
+}
+
 export function formatPromptValidationReport(result: PromptValidationResult): string {
 	const includeGraphLines = formatIncludeGraphSection(result.includeGraphs);
+	const sourceSummaryLine = formatSourceSummary(result.sourceSummary);
 	if (result.ok) {
 		return [
 			`[pi-prompt-template-model-enhanced] Prompt validation passed: ${result.promptCount} prompt template(s) loaded.`,
+			sourceSummaryLine,
 			...includeGraphLines,
 		].join("\n");
 	}
@@ -492,6 +549,7 @@ export function formatPromptValidationReport(result: PromptValidationResult): st
 	const lines = diagnostics.map((diagnostic) => `- ${sanitizeReportValue(diagnostic.code)} (${sanitizeReportValue(diagnostic.source)}) ${sanitizeReportValue(diagnostic.filePath)}: ${sanitizeReportValue(diagnostic.message)}`);
 	return [
 		`[pi-prompt-template-model-enhanced] Prompt validation failed: ${diagnostics.length} issue(s) found across ${result.promptCount} loaded prompt template(s).`,
+		sourceSummaryLine,
 		...lines,
 		...includeGraphLines,
 	].join("\n");

@@ -83,7 +83,7 @@ Start a Python REPL session and help me debug: $@
 
 Run `/validate-prompts` to check prompt templates before using them. It reloads the project and user prompt directories, validates frontmatter, include paths, include cycles, chain declarations, reserved command names, and skill references that can be resolved from registered or filesystem skills.
 
-Validation also reports an include graph for prompts that declare frontmatter includes (`include` / `includes`), use inline include directives, or fail include processing. Each relevant prompt is listed with its include dependencies, including nested partial-to-partial includes.
+Validation also reports an include graph for prompts that declare frontmatter includes (`include` / `includes`), use inline include directives, or fail include processing. Each relevant prompt is listed with its include dependencies, including nested partial-to-partial includes. The report also includes a source summary that separates project prompts, user prompts, prompt-library commands, and include-only prompt-library fragments so command-capable library entries are easy to distinguish from reusable parts.
 
 A clean library reports success:
 
@@ -134,6 +134,7 @@ In Pi TUI mode, the commands open an interactive picker/inspector by default:
 TUI behavior:
 
 - no template name opens a searchable template picker;
+- picker rows label prompt-library commands as `project library` or `user library`, so reusable library commands are distinct from core `.pi/prompts` templates;
 - a template name opens the inspector directly;
 - `--plain` forces the stdout/plain report even in TUI mode;
 - unsupported templates, such as deterministic or chain templates, show the same diagnostic as the plain path;

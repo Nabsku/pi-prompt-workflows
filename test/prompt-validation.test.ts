@@ -35,6 +35,25 @@ test("validatePromptTemplates passes a valid prompt library", () => {
 	});
 });
 
+test("validatePromptTemplates reports prompt-library source summary", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompt-library", "partials"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "review.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nReview $@");
+		writeFileSync(join(cwd, ".pi", "prompt-library", "library-review.md"), "---\nthinking: high\n---\nLibrary review $@");
+		writeFileSync(join(cwd, ".pi", "prompt-library", "partials", "rules.md"), "Plain shared rules");
+
+		const result = validatePromptTemplates(cwd);
+		const report = formatPromptValidationReport(result);
+
+		assert.equal(result.sourceSummary.projectPrompts, 1);
+		assert.equal(result.sourceSummary.projectLibraryCommands, 1);
+		assert.equal(result.sourceSummary.projectLibraryFragments, 1);
+		assert.match(report, /Sources: 1 project prompt 1 project library command 0 user prompts 0 user library commands 1 include-only library fragment/);
+	});
+});
+
 test("validation result includes graph for valid include prompt", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
@@ -887,6 +906,14 @@ test("formatPromptValidationReport escapes control characters in diagnostics", (
 	const report = formatPromptValidationReport({
 		ok: false,
 		promptCount: 0,
+		sourceSummary: {
+			projectPrompts: 0,
+			userPrompts: 0,
+			projectLibraryCommands: 0,
+			userLibraryCommands: 0,
+			projectLibraryFragments: 0,
+			userLibraryFragments: 0,
+		},
 		diagnostics: [{
 			code: "bad\ncode",
 			source: "project",
