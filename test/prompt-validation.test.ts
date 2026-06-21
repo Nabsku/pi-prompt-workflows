@@ -74,6 +74,42 @@ test("validatePromptTemplates source summary counts skipped prompt-library comma
 	});
 });
 
+test("validatePromptTemplates source summary counts skipped prompt-library commands with nested include diagnostics", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompt-library", "partials"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-library", "review.md"), "---\nmodel: claude-sonnet-4-20250514\ninclude: partials/rules.md\n---\nReview $@");
+		writeFileSync(join(cwd, ".pi", "prompt-library", "partials", "rules.md"), '<include file="missing.md" />');
+
+		const result = validatePromptTemplates(cwd);
+		const report = formatPromptValidationReport(result);
+
+		assert.equal(result.ok, false);
+		assert.equal(result.sourceSummary.projectLibraryCommands, 1);
+		assert.equal(result.sourceSummary.projectLibraryFragments, 1);
+		assert.match(report, /Sources: 0 project prompts 1 project library command 0 user prompts 0 user library commands 1 include-only library fragment/);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "include-not-found" && diagnostic.filePath.endsWith("partials/rules.md")), true);
+	});
+});
+
+test("validatePromptTemplates source summary counts invalid command configs as commands", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-library", "loop-command.md"), "---\nloop: 0\n---\nLoop $@");
+		writeFileSync(join(cwd, ".pi", "prompt-library", "thinking-fragment.md"), "---\nthinking: banana\n---\nPlain fragment");
+
+		const result = validatePromptTemplates(cwd);
+		const report = formatPromptValidationReport(result);
+
+		assert.equal(result.ok, false);
+		assert.equal(result.sourceSummary.projectLibraryCommands, 1);
+		assert.equal(result.sourceSummary.projectLibraryFragments, 1);
+		assert.match(report, /Sources: 0 project prompts 1 project library command 0 user prompts 0 user library commands 1 include-only library fragment/);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "invalid-loop"), true);
+	});
+});
+
 test("validation result includes graph for valid include prompt", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");

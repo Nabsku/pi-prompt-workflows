@@ -412,15 +412,30 @@ function createEmptySourceSummary(): PromptValidationSourceSummary {
 	};
 }
 
-const SOURCE_SUMMARY_NON_COMMAND_DIAGNOSTIC_CODES = new Set(["duplicate-command-name", "reserved-command-name"]);
+const SOURCE_SUMMARY_COMMAND_INTENT_DIAGNOSTIC_CODES = new Set([
+	"invalid-boomerang",
+	"invalid-boomerang-chain",
+	"invalid-chain",
+	"invalid-chain-context",
+	"invalid-converge",
+	"invalid-fresh",
+	"invalid-loop",
+	"invalid-model",
+	"invalid-model-spec",
+	"invalid-parallel",
+	"invalid-restore",
+	"invalid-rotate",
+	"invalid-skills",
+]);
 
-function hasSourceSummaryCommandDiagnostic(record: PromptSourceRecord, diagnostics: PromptLoaderDiagnostic[]): boolean {
-	return diagnostics.some((diagnostic) => diagnostic.filePath === record.filePath && !SOURCE_SUMMARY_NON_COMMAND_DIAGNOSTIC_CODES.has(diagnostic.code));
+function hasSourceSummaryCommandIntentDiagnostic(record: PromptSourceRecord, diagnostics: PromptLoaderDiagnostic[]): boolean {
+	return diagnostics.some((diagnostic) => diagnostic.filePath === record.filePath && SOURCE_SUMMARY_COMMAND_INTENT_DIAGNOSTIC_CODES.has(diagnostic.code));
 }
 
-function collectValidationSourceSummary(sourceRecords: PromptSourceRecord[], inventoryRecords: PromptSourceRecord[], loaded: ReturnType<typeof loadPromptsWithModel>): PromptValidationSourceSummary {
+function collectValidationSourceSummary(sourceRecords: PromptSourceRecord[], inventoryRecords: PromptSourceRecord[], loaded: ReturnType<typeof loadPromptsWithModel>, includeGraphs: PromptValidationIncludeGraph[]): PromptValidationSourceSummary {
 	const summary = createEmptySourceSummary();
 	const loadedPromptPaths = new Set([...loaded.prompts.values()].map((prompt) => prompt.filePath));
+	const failedLibraryGraphRootPaths = new Set(includeGraphs.filter((graph) => graph.root.rootKind === "prompt-library" && graph.skipped).map((graph) => graph.root.filePath));
 	for (const record of sourceRecords) {
 		if (record.rootKind === "prompts") {
 			if (!loadedPromptPaths.has(record.filePath)) continue;
@@ -429,16 +444,20 @@ function collectValidationSourceSummary(sourceRecords: PromptSourceRecord[], inv
 			continue;
 		}
 
-		if (record.promptCapable && (loadedPromptPaths.has(record.filePath) || hasSourceSummaryCommandDiagnostic(record, loaded.diagnostics))) {
+		if (record.promptCapable && (loadedPromptPaths.has(record.filePath) || failedLibraryGraphRootPaths.has(record.filePath) || hasSourceSummaryCommandIntentDiagnostic(record, loaded.diagnostics))) {
 			if (record.source === "project") summary.projectLibraryCommands += 1;
 			else summary.userLibraryCommands += 1;
 		}
 	}
 	for (const record of inventoryRecords) {
-		if (record.rootKind === "prompt-library" && !record.promptCapable && record.skippedReason !== "invalid-frontmatter") {
-			if (record.source === "project") summary.projectLibraryFragments += 1;
-			else summary.userLibraryFragments += 1;
+		if (record.rootKind !== "prompt-library" || record.promptCapable || record.skippedReason === "invalid-frontmatter") continue;
+		if (hasSourceSummaryCommandIntentDiagnostic(record, loaded.diagnostics)) {
+			if (record.source === "project") summary.projectLibraryCommands += 1;
+			else summary.userLibraryCommands += 1;
+			continue;
 		}
+		if (record.source === "project") summary.projectLibraryFragments += 1;
+		else summary.userLibraryFragments += 1;
 	}
 	return summary;
 }
@@ -446,12 +465,13 @@ function collectValidationSourceSummary(sourceRecords: PromptSourceRecord[], inv
 export function validatePromptTemplates(cwd: string, options: PromptValidationOptions = {}): PromptValidationResult {
 	const loaded = loadPromptsWithModel(cwd, true);
 	const sourceRecordResult = collectPromptSourceRecords(cwd, true);
+	const includeGraphs = collectValidationIncludeGraphs(sourceRecordResult.records, loaded);
 	const result: PromptValidationResult = {
 		ok: loaded.diagnostics.length === 0,
 		promptCount: loaded.prompts.size,
-		sourceSummary: collectValidationSourceSummary(sourceRecordResult.records, sourceRecordResult.inventoryRecords, loaded),
+		sourceSummary: collectValidationSourceSummary(sourceRecordResult.records, sourceRecordResult.inventoryRecords, loaded, includeGraphs),
 		diagnostics: [...loaded.diagnostics],
-		includeGraphs: collectValidationIncludeGraphs(sourceRecordResult.records, loaded),
+		includeGraphs,
 	};
 
 	validatePromptChains(cwd, result, loaded.prompts);
