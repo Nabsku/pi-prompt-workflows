@@ -95,7 +95,10 @@ test("validatePromptTemplates source summary counts skipped prompt-library comma
 test("validatePromptTemplates source summary counts invalid command configs as commands", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
+		mkdirSync(join(root, ".pi", "agent", "prompt-library"), { recursive: true });
+		writeFileSync(join(root, ".pi", "agent", "prompt-library", "same.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nUser shadowed $@");
 		mkdirSync(join(cwd, ".pi", "prompt-library", "nested"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-library", "same.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nProject shadow $@");
 		writeFileSync(join(cwd, ".pi", "prompt-library", "dup.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nFirst dup $@");
 		writeFileSync(join(cwd, ".pi", "prompt-library", "nested", "dup.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nSecond dup $@");
 		writeFileSync(join(cwd, ".pi", "prompt-library", "empty-chain-command.md"), "---\nchain: \"\"\n---\nEmpty chain $@");
@@ -109,9 +112,10 @@ test("validatePromptTemplates source summary counts invalid command configs as c
 		const report = formatPromptValidationReport(result);
 
 		assert.equal(result.ok, false);
-		assert.equal(result.sourceSummary.projectLibraryCommands, 7);
+		assert.equal(result.sourceSummary.projectLibraryCommands, 8);
+		assert.equal(result.sourceSummary.userLibraryCommands, 1);
 		assert.equal(result.sourceSummary.projectLibraryFragments, 1);
-		assert.match(report, /Sources: 0 project prompts 7 project library commands 0 user prompts 0 user library commands 1 include-only library fragment/);
+		assert.match(report, /Sources: 0 project prompts 8 project library commands 0 user prompts 1 user library command 1 include-only library fragment/);
 		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "duplicate-command-name"), true);
 		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "empty-chain"), true);
 		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "empty-model"), true);

@@ -454,17 +454,15 @@ const SOURCE_SUMMARY_COMMAND_INTENT_DIAGNOSTIC_CODES = new Set([
 	"invalid-subagent",
 	"invalid-subagent-chain",
 	"invalid-worktree",
-	"reserved-command-name",
 ]);
 
 function hasSourceSummaryCommandIntentDiagnostic(record: PromptSourceRecord, diagnostics: PromptLoaderDiagnostic[]): boolean {
 	return diagnostics.some((diagnostic) => diagnostic.filePath === record.filePath && SOURCE_SUMMARY_COMMAND_INTENT_DIAGNOSTIC_CODES.has(diagnostic.code));
 }
 
-function collectValidationSourceSummary(sourceRecords: PromptSourceRecord[], inventoryRecords: PromptSourceRecord[], loaded: ReturnType<typeof loadPromptsWithModel>, includeGraphs: PromptValidationIncludeGraph[]): PromptValidationSourceSummary {
+function collectValidationSourceSummary(sourceRecords: PromptSourceRecord[], inventoryRecords: PromptSourceRecord[], loaded: ReturnType<typeof loadPromptsWithModel>, _includeGraphs: PromptValidationIncludeGraph[]): PromptValidationSourceSummary {
 	const summary = createEmptySourceSummary();
 	const loadedPromptPaths = new Set([...loaded.prompts.values()].map((prompt) => prompt.filePath));
-	const failedLibraryGraphRootPaths = new Set(includeGraphs.filter((graph) => graph.root.rootKind === "prompt-library" && graph.skipped).map((graph) => graph.root.filePath));
 	for (const record of sourceRecords) {
 		if (record.rootKind !== "prompts") continue;
 		if (!loadedPromptPaths.has(record.filePath)) continue;
@@ -473,8 +471,8 @@ function collectValidationSourceSummary(sourceRecords: PromptSourceRecord[], inv
 	}
 	for (const record of inventoryRecords) {
 		if (record.rootKind !== "prompt-library" || record.skippedReason === "invalid-frontmatter") continue;
-		const isLibraryCommand = record.promptCapable && (loadedPromptPaths.has(record.filePath) || failedLibraryGraphRootPaths.has(record.filePath) || hasSourceSummaryCommandIntentDiagnostic(record, loaded.diagnostics));
-		if (isLibraryCommand || hasSourceSummaryCommandIntentDiagnostic(record, loaded.diagnostics)) {
+		const isLibraryCommand = record.promptCapable || hasSourceSummaryCommandIntentDiagnostic(record, loaded.diagnostics);
+		if (isLibraryCommand) {
 			if (record.source === "project") summary.projectLibraryCommands += 1;
 			else summary.userLibraryCommands += 1;
 			continue;
