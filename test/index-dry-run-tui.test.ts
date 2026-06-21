@@ -415,3 +415,32 @@ test("exact dry-run names can open prompt-library commands while fragments stay 
 		assertNoExecutionSideEffects(pi);
 	});
 });
+
+test("user prompt-library hidden commands are excluded from picker and slash registration but exact dry-run works", async () => {
+	await setup("tui", async (cwd, pi, ctx) => {
+		const userLibrary = join(cwd, "..", ".pi", "agent", "prompt-library");
+		mkdirSync(userLibrary, { recursive: true });
+		writeFileSync(join(userLibrary, "visible-user.md"), "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nVisible user library");
+		writeFileSync(join(userLibrary, "hidden-user.md"), "---\nmodel: anthropic/claude-sonnet-4-20250514\nhidden: true\n---\nHidden user library $@");
+		await pi.emit("session_start", {}, ctx);
+
+		assert.ok(pi.commands.has("visible-user"));
+		assert.equal(pi.commands.has("hidden-user"), false);
+		await pi.commands.get("dry-run-prompt")!.handler!("", ctx);
+
+		assert.equal(pi.customCalls.length, 1);
+		const picker = pi.customComponents.at(-1) as { render(width: number): string[] };
+		const renderedPicker = picker.render(1000).join("\n");
+		assert.match(renderedPicker, /visible-user\s+user library/);
+		assert.doesNotMatch(renderedPicker, /hidden-user\s+user library/);
+
+		await pi.commands.get("dry-run-prompt")!.handler!("hidden-user src/app.ts", ctx);
+
+		assert.equal(pi.customCalls.length, 2);
+		const inspector = pi.customComponents.at(-1) as { render(width: number): string[] };
+		const renderedInspector = inspector.render(1000).join("\n");
+		assert.match(renderedInspector, /Prompt dry-run: hidden-user/);
+		assert.match(renderedInspector, /Hidden user library src\/app\.ts/);
+		assertNoExecutionSideEffects(pi);
+	});
+});
