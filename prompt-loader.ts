@@ -1762,7 +1762,6 @@ function loadPromptsWithModelFromDir(
 				const includes = includesResult.includes;
 				const chain = normalizeChain(frontmatter.chain, fullPath, source, diagnostics);
 				const hasBodyIncludeDirectives = chain ? false : hasPromptIncludeDirectives(body);
-				const shouldRenderIncludes = !chain && (includes !== undefined || hasBodyIncludeDirectives);
 				if (chain && includesResult.declaredKey) {
 					diagnostics.push(
 						createDiagnostic(
@@ -2090,25 +2089,7 @@ function loadPromptsWithModelFromDir(
 				}
 				let content = body;
 				let includeGraph: PromptIncludeGraph | undefined;
-				if (shouldRenderIncludes) {
-					const renderedIncludes = renderPromptIncludes({
-						promptName: name,
-						content: body,
-						includes,
-						promptFilePath: fullPath,
-						promptRoot,
-						cwd: loadCwd,
-						source,
-						rootKind,
-					});
-					if (!renderedIncludes.ok) {
-						diagnostics.push(...renderedIncludes.diagnostics);
-						continue;
-					}
-					content = renderedIncludes.content;
-					includeGraph = renderedIncludes.includeGraph;
-				}
-				const includeConfigIsCommandCapable = shouldRenderIncludes && !(rootKind === "prompt-library" && includes === undefined);
+				const includeConfigIsCommandCapable = includes !== undefined;
 				const hasExtensionSpecificConfig =
 					skills !== undefined ||
 					thinking !== undefined ||
@@ -2130,6 +2111,25 @@ function loadPromptsWithModelFromDir(
 					hasExtensionSpecificConfig,
 					ignoreBodyIncludes: rootKind === "prompt-library" && includes === undefined,
 				});
+				const shouldRenderIncludes = !chain && (includes !== undefined || (hasBodyIncludeDirectives && promptCapable));
+				if (shouldRenderIncludes) {
+					const renderedIncludes = renderPromptIncludes({
+						promptName: name,
+						content: body,
+						includes,
+						promptFilePath: fullPath,
+						promptRoot,
+						cwd: loadCwd,
+						source,
+						rootKind,
+					});
+					if (!renderedIncludes.ok) {
+						diagnostics.push(...renderedIncludes.diagnostics);
+						continue;
+					}
+					content = renderedIncludes.content;
+					includeGraph = renderedIncludes.includeGraph;
+				}
 				if (!promptCapable && (rootKind === "prompt-library" || !includePlainPrompts)) {
 					continue;
 				}

@@ -208,9 +208,11 @@ function collectPromptIncludeGraph(record: PromptSourceRecord, homeDir?: string)
 		diagnostics: [],
 	});
 
+	const promptLibraryIncludeOnlyRoot = record.rootKind === "prompt-library" && !record.promptCapable && record.includes === undefined;
+
 	if (record.includeMetadataInvalid === true && record.skippedReason) {
 		addRootDiagnostic(context, nodes, rootNodeId, createIncludeMetadataInvalidGraphDiagnostic(context, record));
-	} else if (!record.isChainWrapper && record.hasIncludesPlaceholder && record.includes === undefined) {
+	} else if (!record.isChainWrapper && !promptLibraryIncludeOnlyRoot && record.hasIncludesPlaceholder && record.includes === undefined) {
 		addRootDiagnostic(
 			context,
 			nodes,
@@ -241,20 +243,22 @@ function collectPromptIncludeGraph(record: PromptSourceRecord, homeDir?: string)
 			});
 		}
 
-		for (const includePath of extractPromptInlineIncludes(record.rawBody)) {
-			collectIncludeEdge({
-				includePath,
-				kind: "inline",
-				fromNodeId: rootNodeId,
-				currentFilePath: context.promptFilePath,
-				context,
-				nodes,
-				edges,
-				traversedPartials,
-				stack: canonicalPromptStackEntry(context.promptFilePath) ? [canonicalPromptStackEntry(context.promptFilePath)!] : [],
-				nextOrder: () => nextOrder++,
-				nextUnresolvedNodeId: () => nextUnresolvedNodeId++,
-			});
+		if (!promptLibraryIncludeOnlyRoot) {
+			for (const includePath of extractPromptInlineIncludes(record.rawBody)) {
+				collectIncludeEdge({
+					includePath,
+					kind: "inline",
+					fromNodeId: rootNodeId,
+					currentFilePath: context.promptFilePath,
+					context,
+					nodes,
+					edges,
+					traversedPartials,
+					stack: canonicalPromptStackEntry(context.promptFilePath) ? [canonicalPromptStackEntry(context.promptFilePath)!] : [],
+					nextOrder: () => nextOrder++,
+					nextUnresolvedNodeId: () => nextUnresolvedNodeId++,
+				});
+			}
 		}
 	}
 

@@ -330,7 +330,7 @@ Prompt-library files can be executable extension prompt templates, chain steps, 
 
 Dot-prefixed files and directories under prompt-library roots are ignored. Symlinks are followed only when their resolved target remains inside the canonical prompt root; symlinks that escape the root are skipped.
 
-Project prompt-library commands are protected by Pi's project trust when the core runtime marks the project trusted. Some Pi core versions may not include `.pi/prompt-library/` in their project trust resource discovery. As an extension-side mitigation, running an untrusted project prompt-library command requires a per-session UI approval; non-UI contexts block execution until the project is trusted or the command is moved to a trusted prompt root such as `.pi/prompts/`.
+Project prompt-library commands require extension-side per-session UI approval before execution. This approval is separate from Pi's project trust state: even trusted projects still need the extension approval for commands loaded from `.pi/prompt-library/`. Non-UI/headless contexts cannot show that prompt, so move commands that must run headlessly in trusted projects to a core prompt root such as `.pi/prompts/`; keep `.pi/prompt-library/` for UI-approved project commands and include-only fragments.
 
 For example, a project prompt can include a standards fragment from the project prompt library:
 
@@ -428,22 +428,22 @@ If Pi does not find the file there, it checks these roots in order:
 1. Current file directory
 2. Current owner root
 3. Original prompt root
-4. Project prompt-library
+4. Project prompt-library (project prompts only; user/global prompts do not fall back into the current project's prompt library)
 5. User prompt-library
 6. Global prompt-partials
 7. Project prompt-partials
 
-Example layout:
+Example project layout:
 
 ```text
-~/.pi/agent/prompts/review.md
-~/.pi/agent/prompts/shared/repo-rules.md
+<cwd>/.pi/prompts/review.md
+<cwd>/.pi/prompts/shared/repo-rules.md
 <cwd>/.pi/prompt-library/partials/repo-standards.md
 ~/.pi/agent/prompt-partials/shared/review-checklist.md
 <cwd>/.pi/prompt-partials/languages/typescript.md
 ```
 
-With that layout, `review.md` can include `shared/repo-rules.md`, `partials/repo-standards.md`, `shared/review-checklist.md`, and `languages/typescript.md` without absolute paths.
+With that layout, the project prompt `.pi/prompts/review.md` can include `shared/repo-rules.md`, `partials/repo-standards.md`, `shared/review-checklist.md`, and `languages/typescript.md` without absolute paths. The project-library fallback (`partials/repo-standards.md`) applies because `review.md` is a project prompt; a user prompt from `~/.pi/agent/prompts/` would not search `<cwd>/.pi/prompt-library/` for that include.
 
 ### Rules and guardrails
 

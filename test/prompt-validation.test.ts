@@ -774,6 +774,23 @@ test("unreferenced plain prompt-library include fragments do not count or valida
 	});
 });
 
+test("unreferenced prompt-library inline-only fragments do not validate missing includes", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompt-library", "fragment.md"), '<include file="missing.md" />');
+
+		const result = validatePromptTemplates(cwd);
+		const report = formatPromptValidationReport(result);
+
+		assert.equal(result.ok, true);
+		assert.equal(result.promptCount, 0);
+		assert.deepEqual(result.diagnostics, []);
+		assert.equal(result.includeGraphs.find((entry) => entry.root.promptName === "fragment")?.edges.length, 0);
+		assert.doesNotMatch(report, /include-not-found/);
+	});
+});
+
 test("plain prompt-library fragment appears in include graph when included", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
