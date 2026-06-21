@@ -190,6 +190,10 @@ function normalizeStringField(
 	return normalized.length > 0 ? normalized : undefined;
 }
 
+function isFrontmatterRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 function isValidModelSelectionSpec(spec: string): boolean {
 	if (!spec || spec.includes("*") || /\s/.test(spec)) return false;
 
@@ -208,8 +212,8 @@ function normalizeFrontmatterRecord(
 	source: PromptSource,
 	diagnostics: PromptLoaderDiagnostic[],
 ): Record<string, unknown> | undefined {
-	if (value && typeof value === "object" && !Array.isArray(value)) {
-		return value as Record<string, unknown>;
+	if (isFrontmatterRecord(value)) {
+		return value;
 	}
 
 	diagnostics.push(
@@ -1777,6 +1781,7 @@ function loadPromptsWithModelFromDir(
 			try {
 				const rawContent = readFileSync(fullPath, "utf-8");
 				const parsed = parseFrontmatter<Record<string, unknown>>(rawContent);
+				if (rootKind === "prompt-library" && !isFrontmatterRecord(parsed.frontmatter)) continue;
 				const frontmatter = normalizeFrontmatterRecord(parsed.frontmatter, fullPath, source, diagnostics);
 				if (!frontmatter) continue;
 				const { body } = parsed;
@@ -1785,7 +1790,8 @@ function loadPromptsWithModelFromDir(
 				const includes = includesResult.includes;
 				const chain = normalizeChain(frontmatter.chain, fullPath, source, diagnostics);
 				const hasBodyIncludeDirectives = chain ? false : hasPromptIncludeDirectives(body);
-				if (rootKind === "prompt-library" && !chain && includes === undefined && !hasPromptIncludeDirectives(body) && !hasPromptLibraryCommandMarker(frontmatter)) {
+				const hasModelConditionalDirectives = MODEL_CONDITIONAL_DIRECTIVE_PATTERN.test(body);
+				if (rootKind === "prompt-library" && !chain && includes === undefined && !hasBodyIncludeDirectives && !hasModelConditionalDirectives && !hasPromptLibraryCommandMarker(frontmatter)) {
 					continue;
 				}
 				if (chain && includesResult.declaredKey) {
@@ -2296,10 +2302,27 @@ function collectPromptSourceRecordsFromDir(
 			try {
 				const rawContent = readFileSync(fullPath, "utf-8");
 				const parsed = parseFrontmatter<Record<string, unknown>>(rawContent);
+				const promptName = entry.name.slice(0, -3);
+				if (rootKind === "prompt-library" && !isFrontmatterRecord(parsed.frontmatter)) {
+					if (!includePlainPrompts) continue;
+					records.push({
+						promptName,
+						filePath: fullPath,
+						promptRoot,
+						cwd: loadCwd,
+						source,
+						rootKind,
+						promptCapable: false,
+						rawBody: parsed.body,
+						hasInlineIncludes: false,
+						hasIncludesPlaceholder: false,
+						isChainWrapper: false,
+					});
+					continue;
+				}
 				const frontmatter = normalizeFrontmatterRecord(parsed.frontmatter, fullPath, source, diagnostics);
 				if (!frontmatter) continue;
 
-				const promptName = entry.name.slice(0, -3);
 				if (RESERVED_COMMAND_NAMES.has(promptName)) {
 					const rawChain = typeof frontmatter.chain === "string" && frontmatter.chain.trim() ? frontmatter.chain.trim() : undefined;
 					const hasIncludeMetadata = Object.hasOwn(frontmatter, "include") || Object.hasOwn(frontmatter, "includes");
@@ -2331,7 +2354,8 @@ function collectPromptSourceRecordsFromDir(
 				const includes = includesResult.ok ? includesResult.includes : undefined;
 				const chain = normalizeChain(frontmatter.chain, fullPath, source, diagnostics);
 				const isChainWrapper = chain !== undefined;
-				if (rootKind === "prompt-library" && !isChainWrapper && includesResult.ok && includes === undefined && !hasPromptIncludeDirectives(parsed.body) && !hasPromptLibraryCommandMarker(frontmatter)) {
+				const hasModelConditionalDirectives = !isChainWrapper && MODEL_CONDITIONAL_DIRECTIVE_PATTERN.test(parsed.body);
+				if (rootKind === "prompt-library" && !isChainWrapper && includesResult.ok && includes === undefined && !hasPromptIncludeDirectives(parsed.body) && !hasModelConditionalDirectives && !hasPromptLibraryCommandMarker(frontmatter)) {
 					if (!includePlainPrompts) continue;
 					records.push({
 						promptName,

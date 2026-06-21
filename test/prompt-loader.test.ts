@@ -555,6 +555,48 @@ test("prompt-library valid thinking-only metadata promotes command-capable files
 	});
 });
 
+test("prompt-library model-conditional body promotes command-capable files", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const projectLibrary = join(cwd, ".pi", "prompt-library");
+		mkdirSync(projectLibrary, { recursive: true });
+		writeFileSync(join(projectLibrary, "conditional.md"), '<if-model is="anthropic/*">Use Claude</if-model>');
+
+		const prompt = loadPromptsWithModel(cwd).prompts.get("conditional");
+		assert.ok(prompt);
+		assert.equal(prompt.rootKind, "prompt-library");
+		assert.equal(prompt.content, '<if-model is="anthropic/*">Use Claude</if-model>');
+
+		const records = collectPromptSourceRecords(cwd, true);
+		assert.equal(records.records.find((record) => record.promptName === "conditional")?.promptCapable, true);
+	});
+});
+
+test("prompt-library fragments with non-object frontmatter stay ignored and quiet", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const projectLibrary = join(cwd, ".pi", "prompt-library");
+		mkdirSync(projectLibrary, { recursive: true });
+		writeFileSync(join(projectLibrary, "bad-frontmatter.md"), "---\n- shared\n---\nPlain library fragment.");
+
+		const defaultRuntime = loadPromptsWithModel(cwd);
+		assert.equal(defaultRuntime.prompts.has("bad-frontmatter"), false);
+		assert.equal(defaultRuntime.diagnostics.some((diagnostic) => diagnostic.code === "invalid-frontmatter"), false);
+
+		const plainRuntime = loadPromptsWithModel(cwd, true);
+		assert.equal(plainRuntime.prompts.has("bad-frontmatter"), false);
+		assert.equal(plainRuntime.diagnostics.some((diagnostic) => diagnostic.code === "invalid-frontmatter"), false);
+
+		const records = collectPromptSourceRecords(cwd, true);
+		const record = records.records.find((item) => item.promptName === "bad-frontmatter");
+		assert.ok(record);
+		assert.equal(record.rootKind, "prompt-library");
+		assert.equal(record.promptCapable, false);
+		assert.equal(record.rawBody, "Plain library fragment.");
+		assert.equal(records.diagnostics.some((diagnostic) => diagnostic.code === "invalid-frontmatter"), false);
+	});
+});
+
 test("plain .pi/prompts files still load only when plain prompts are requested", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
