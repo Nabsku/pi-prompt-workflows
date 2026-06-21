@@ -2,34 +2,18 @@
 
 ## [0.13.0](https://github.com/Nabsku/pi-prompt-template-model-enhanced/compare/v0.12.0...v0.13.0) (2026-06-21)
 
+### Prompt library
 
-### Features
+* Added `.pi/prompt-library` and `~/.pi/agent/prompt-library` roots for reusable prompt commands, chain steps, and include fragments ([b5e235b](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/b5e235b099df3a4089b196a3e482c64e545f5bbb), [4eba6b3](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/4eba6b3c98b83d50ab167e66eb26c782ade00d99)).
+* Prompt-library commands now support validation, source summaries, dry-run/TUI labels, and includes from library-local fragments ([7dec4c8](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/7dec4c8bc2f774fa6451c842f9ee12cc875de648), [5468b16](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/5468b16e19ac1e556980f9a5416fc574be055aeb), [ceda208](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/ceda208e9f027d7a45c600bf2bcfb36d4552f55e)).
+* Added `hidden: true` for internal prompt-library commands: hidden commands stay out of slash-command discovery and pickers, but remain addressable by exact dry-run/print lookup and chain references ([413ef55](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/413ef55ac8c3bafe61c8b1a3d560eb644e7e7d15)).
 
-* discover prompt-library roots ([b5e235b](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/b5e235b099df3a4089b196a3e482c64e545f5bbb))
-* hide internal prompt-library commands ([413ef55](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/413ef55ac8c3bafe61c8b1a3d560eb644e7e7d15))
-* polish prompt-library UX ([ceda208](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/ceda208e9f027d7a45c600bf2bcfb36d4552f55e))
-* resolve includes from prompt-library ([5468b16](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/5468b16e19ac1e556980f9a5416fc574be055aeb))
-* run prompt-library templates ([4eba6b3](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/4eba6b3c98b83d50ab167e66eb26c782ade00d99))
-* validate prompt-library templates ([7dec4c8](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/7dec4c8bc2f774fa6451c842f9ee12cc875de648))
+### Hardening and compatibility
 
-
-### Bug Fixes
-
-* address prompt-library review comments ([b62cbec](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/b62cbecbeaf25ecef66abf14c6e71bca03c40c3c))
-* allow thinking-only library prompts ([dea05fc](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/dea05fc9b27755f9407976e4028f77704e27e044))
-* classify broken library commands in summary ([126ab9b](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/126ab9bbe2149f1c6c78967ded308f56f933a6e7))
-* correct prompt-library source summary ([354bea9](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/354bea956a13e0845167246f4ba68778db5ce6b8))
-* count empty-model library commands ([fd028ca](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/fd028ca1ad78f329ef1d9325158d66a2541701e4))
-* count invalid library command markers ([0fc6877](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/0fc6877dca2b16385d7a95e6d01a7a3f94d2ce07))
-* count shadowed library commands ([73c91c1](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/73c91c1b2d41792528dc32c5e9798b7bb213c09e))
-* count skipped library command entries ([e8a91d1](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/e8a91d14be0430894cdc3716f28754ad561edd68))
-* harden hidden prompt-library commands ([ace7651](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/ace76519fcea80a20b217ce82e62a201ad0afa06))
-* harden prompt-library loading ([94c8bdd](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/94c8bddcba1d16502676d34f47fccbeb3235fd05))
-* keep ignored prompt-library fragments quiet ([f2e8850](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/f2e8850ea2c5be080d7c73764303f5fabdcd1c44))
-* keep prompt-library fragments inert ([c353e1e](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/c353e1e0d10377e94bae763084efd1f9ac398260))
-* keep prompt-library fragments quiet ([8808b05](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/8808b05eeafd226adfb5a57a07c195d0550fe4e8))
-* preflight prompt-library chain approval ([40c4458](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/40c44587ff8a94e2f6d6d94f13a9c2894503d35b))
-* tighten prompt-library trust boundaries ([c1198cf](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/c1198cf918045db38d2d7c8f767e1be82843f634))
+* Tightened project prompt-library trust boundaries, including chain preflight approval and safer handling of project library includes ([c1198cf](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/c1198cf918045db38d2d7c8f767e1be82843f634), [40c4458](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/40c44587ff8a94e2f6d6d94f13a9c2894503d35b)).
+* Hardened prompt-library loading around symlinks, dot-prefixed entries, invalid metadata, include-only fragments, and stale hidden command handlers ([94c8bdd](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/94c8bddcba1d16502676d34f47fccbeb3235fd05), [b62cbec](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/b62cbecbeaf25ecef66abf14c6e71bca03c40c3c), [ace7651](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/ace76519fcea80a20b217ce82e62a201ad0afa06)).
+* Plain prompt-library fragments now stay quiet unless included, while valid thinking-only and model-conditional library commands still load normally ([c353e1e](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/c353e1e0d10377e94bae763084efd1f9ac398260), [f2e8850](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/f2e8850ea2c5be080d7c73764303f5fabdcd1c44), [8808b05](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/8808b05eeafd226adfb5a57a07c195d0550fe4e8), [dea05fc](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/dea05fc9b27755f9407976e4028f77704e27e044)).
+* Validation source summaries now count broken, skipped, duplicate, empty-model, invalid-marker, and shadowed library commands consistently instead of misreporting them as fragments or dropping them ([354bea9](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/354bea956a13e0845167246f4ba68778db5ce6b8), [126ab9b](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/126ab9bbe2149f1c6c78967ded308f56f933a6e7), [fd028ca](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/fd028ca1ad78f329ef1d9325158d66a2541701e4), [0fc6877](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/0fc6877dca2b16385d7a95e6d01a7a3f94d2ce07), [e8a91d1](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/e8a91d14be0430894cdc3716f28754ad561edd68), [73c91c1](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/73c91c1b2d41792528dc32c5e9798b7bb213c09e)).
 
 ## [0.12.0](https://github.com/Nabsku/pi-prompt-template-model-enhanced/compare/v0.11.2...v0.12.0) (2026-06-20)
 
