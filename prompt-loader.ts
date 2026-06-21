@@ -1550,7 +1550,8 @@ function getPromptRoots(cwd: string): PromptRoot[] {
 function isPathInsideOrEqual(path: string, root: string): boolean {
 	const canonicalPath = realpathSync(path);
 	const canonicalRoot = realpathSync(root);
-	return canonicalPath === canonicalRoot || canonicalPath.startsWith(`${canonicalRoot}/`);
+	const relativePath = relative(canonicalRoot, canonicalPath);
+	return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
 }
 
 function shouldSkipPromptLibraryEntry(entryName: string, rootKind: PromptRootKind): boolean {

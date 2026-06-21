@@ -1197,7 +1197,12 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			return true;
 		};
 
+		const resolveChainStepPrompts = (): PromptWithModel[] => flattenChainSteps()
+			.map((step) => chainPrompts.get(step.name))
+			.filter((prompt): prompt is PromptWithModel => prompt !== undefined);
+
 		if (!validateChainSteps()) return;
+		if (!(await ensureProjectPromptLibraryStepsApproved(resolveChainStepPrompts(), ctx))) return;
 
 		const originalModel = getCurrentModel(ctx);
 		const chainInheritedModel = originalModel;
@@ -1232,6 +1237,10 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					updateLoopStatus(ctx);
 					refreshPrompts(ctx.cwd, ctx);
 					if (!validateChainSteps()) {
+						chainAborted = true;
+						break;
+					}
+					if (!(await ensureProjectPromptLibraryStepsApproved(resolveChainStepPrompts(), ctx))) {
 						chainAborted = true;
 						break;
 					}
