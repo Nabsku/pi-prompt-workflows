@@ -1057,3 +1057,51 @@ test("compare prompts handle partial-success policy, final-applier fallback, ove
 		}
 	});
 });
+
+test("project best-of-N preset approval is scoped to session_start", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "compare.md"),
+			[
+				"---",
+				"bestOfN:",
+				"  preset: projectQuick",
+				"---",
+				"$@",
+			].join("\n"),
+		);
+		writeFileSync(
+			join(cwd, ".pi", "best-of-n-presets.json"),
+			JSON.stringify({
+				presets: {
+					projectQuick: {
+						workers: [{ agent: "delegate" }],
+						reviewers: [{ agent: "reviewer" }],
+					},
+				},
+			}),
+		);
+
+		const pi = new FakePi();
+		const { ctx } = createContext(cwd, pi);
+		let confirmCount = 0;
+		ctx.hasUI = true;
+		ctx.ui.confirm = async () => {
+			confirmCount++;
+			return true;
+		};
+		promptModelExtension(pi as never);
+		respondWithParallelDelegatedResult(pi);
+
+		await pi.emit("session_start", {}, ctx);
+		await pi.commands.get("compare")!.handler("first", ctx);
+		assert.equal(confirmCount, 1);
+
+		await pi.emit("session_start", {}, ctx);
+		await pi.commands.get("compare")!.handler("second", ctx);
+		assert.equal(confirmCount, 2);
+	});
+});

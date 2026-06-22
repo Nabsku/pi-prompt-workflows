@@ -1837,6 +1837,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	function resetSessionScopedState(ctx: ExtensionContext) {
 		storedCommandCtx = null;
 		approvedProjectPromptLibraryCwds.clear();
+		approvedProjectPresetCwds.clear();
 		pendingSkillMessage = undefined;
 		previousModel = undefined;
 		previousThinking = undefined;

@@ -297,13 +297,22 @@ test("extractSubagentOverride extracts --preset and strips it from args", () => 
 		args: "task",
 		preset: "quick",
 	});
-	assert.deepEqual(extractSubagentOverride("task --model=openai/gpt-5.4 --preset=deep"), {
+	assert.deepEqual(extractSubagentOverride("--preset quick task"), {
+		args: "task",
+		preset: "quick",
+	});
+	assert.deepEqual(extractSubagentOverride("task --model=openai/gpt-5.4 --preset deep"), {
 		args: "task",
 		model: "openai/gpt-5.4",
 		preset: "deep",
 	});
 	assert.deepEqual(extractSubagentOverride('"--preset=quick" task --preset='), {
 		args: '"--preset=quick" task',
+	});
+	assert.deepEqual(extractSubagentOverride("task --preset --fork"), {
+		args: "task",
+		override: { enabled: true },
+		fork: true,
 	});
 });
 

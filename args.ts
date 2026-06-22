@@ -304,6 +304,24 @@ export function extractSubagentOverride(argsString: string): SubagentOverrideExt
 			continue;
 		}
 
+		if (token === "--preset") {
+			let lookahead = i;
+			while (lookahead < argsString.length && /\s/.test(argsString[lookahead])) lookahead++;
+			if (lookahead < argsString.length && argsString[lookahead] !== '"' && argsString[lookahead] !== "'") {
+				const valueStart = lookahead;
+				while (lookahead < argsString.length && !/\s/.test(argsString[lookahead])) lookahead++;
+				const value = argsString.slice(valueStart, lookahead);
+				if (value && !value.startsWith("--")) {
+					tokensToRemove.push({ start: tokenStart, end: i }, { start: valueStart, end: lookahead });
+					presetRaw = value;
+					i = lookahead;
+					continue;
+				}
+			}
+			tokensToRemove.push({ start: tokenStart, end: i });
+			continue;
+		}
+
 		if (token === "--fork") {
 			tokensToRemove.push({ start: tokenStart, end: i });
 			fork = true;
