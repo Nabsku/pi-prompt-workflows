@@ -21,6 +21,7 @@ export interface SubagentOverrideExtraction {
 	override?: SubagentOverride;
 	cwd?: string;
 	model?: string;
+	preset?: string;
 	fork?: boolean;
 }
 
@@ -244,6 +245,7 @@ export function extractSubagentOverride(argsString: string): SubagentOverrideExt
 	let override: SubagentOverride | undefined;
 	let cwdRaw: string | undefined;
 	let modelRaw: string | undefined;
+	let presetRaw: string | undefined;
 	let fork = false;
 	const tokensToRemove: Array<{ start: number; end: number }> = [];
 
@@ -295,6 +297,13 @@ export function extractSubagentOverride(argsString: string): SubagentOverrideExt
 			continue;
 		}
 
+		if (token.startsWith("--preset=")) {
+			tokensToRemove.push({ start: tokenStart, end: i });
+			const value = token.slice("--preset=".length);
+			presetRaw = value || undefined;
+			continue;
+		}
+
 		if (token === "--fork") {
 			tokensToRemove.push({ start: tokenStart, end: i });
 			fork = true;
@@ -317,6 +326,7 @@ export function extractSubagentOverride(argsString: string): SubagentOverrideExt
 		...(override ? { override } : {}),
 		...(cwdRaw !== undefined ? { cwd: cwdRaw } : {}),
 		...(modelRaw !== undefined ? { model: modelRaw } : {}),
+		...(presetRaw !== undefined ? { preset: presetRaw } : {}),
 		...(fork ? { fork: true } : {}),
 	};
 }

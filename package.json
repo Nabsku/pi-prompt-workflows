@@ -27,6 +27,7 @@
   "files": [
     "index.ts",
     "args.ts",
+    "best-of-n-presets.ts",
     "chain-parser.ts",
     "loop-utils.ts",
     "model-selection.ts",

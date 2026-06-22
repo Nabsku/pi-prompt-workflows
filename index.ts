@@ -15,6 +15,7 @@ import {
 	type LineupOverrideAction,
 	type SubagentOverride,
 } from "./args.js";
+import { loadBestOfNPresetCatalog, applyPresetDefaultModel, type ResolvedBestOfNPreset } from "./best-of-n-presets.js";
 import { parseChainSteps, parseChainDeclaration, type ChainStep, type ChainStepOrParallel, type ParallelChainStep } from "./chain-parser.js";
 import { generateBoomerangSummary, generateChainStepSummary, generateIterationSummary, didIterationMakeChanges, getIterationEntries, wasIterationAborted } from "./loop-utils.js";
 import { selectModelCandidate } from "./model-selection.js";
@@ -130,6 +131,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	let lastDiagnostics = "";
 	let storedCommandCtx: ExtensionCommandContext | null = null;
 	const approvedProjectPromptLibraryCwds = new Set<string>();
+	const approvedProjectPresetCwds = new Set<string>();
 	const UNLIMITED_LOOP_CAP = 999;
 
 	const toolManager = createToolManager(pi, {
@@ -192,6 +194,47 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return false;
 		}
 		return true;
+	}
+
+	async function ensureProjectPresetApproved(preset: ResolvedBestOfNPreset, ctx: ExtensionCommandContext): Promise<boolean> {
+		if (preset.source !== "project") return true;
+		const cwdKey = resolvePath(ctx.cwd);
+		if (approvedProjectPresetCwds.has(cwdKey)) return true;
+		const message = `Best-of-N preset \`${preset.name}\` is loaded from ${preset.filePath}. Approve project best-of-N presets for this session?`;
+		if (!ctx.hasUI || typeof (ctx.ui as { confirm?: unknown }).confirm !== "function") {
+			notify(ctx, `${message} Run in an interactive UI session and approve it, or move trusted presets to ~/.pi/agent/best-of-n-presets.json.`, "error");
+			return false;
+		}
+		const approved = await ctx.ui.confirm("Approve project best-of-N preset", message, { timeout: 30_000 });
+		if (!approved) {
+			notify(ctx, `Project best-of-N preset \`${preset.name}\` was not approved.`, "warning");
+			return false;
+		}
+		approvedProjectPresetCwds.add(cwdKey);
+		return true;
+	}
+
+	async function resolveBestOfNPresetLineup(
+		prompt: PromptWithModel,
+		runtimePreset: string | undefined,
+		ctx: ExtensionCommandContext,
+	): Promise<{ workers?: DelegationLineupSlot[]; reviewers?: DelegationLineupSlot[] } | undefined> {
+		const presetName = runtimePreset ?? prompt.preset;
+		if (!presetName) return {};
+		const catalog = loadBestOfNPresetCatalog(ctx.cwd);
+		for (const diagnostic of catalog.diagnostics) {
+			notify(ctx, diagnostic.message, "warning");
+		}
+		const preset = catalog.presets.get(presetName);
+		if (!preset) {
+			notify(ctx, `Best-of-N preset \`${presetName}\` was not found. Define it in ~/.pi/agent/best-of-n-presets.json or .pi/best-of-n-presets.json.`, "error");
+			return undefined;
+		}
+		if (!(await ensureProjectPresetApproved(preset, ctx))) return undefined;
+		return {
+			workers: applyPresetDefaultModel(preset.workers, preset.defaultModel),
+			reviewers: applyPresetDefaultModel(preset.reviewers, preset.defaultModel),
+		};
 	}
 
 	pi.registerMessageRenderer<SkillLoadedDetails>("skill-loaded", renderSkillLoaded);
@@ -729,7 +772,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		args: string,
 		ctx: ExtensionCommandContext,
 		currentModel: Model<any> | undefined,
-		runtime: { cwd?: string; model?: string; subagentOverride?: SubagentOverride; fork?: boolean },
+		runtime: { cwd?: string; model?: string; preset?: string; subagentOverride?: SubagentOverride; fork?: boolean },
 	) {
 		if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return;
 
@@ -782,8 +825,10 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 		const sharedTask = rendered.content;
 
-		const requestedWorkers = applyLineupActions(prompt.workers, lineupExtraction.actions, "workers") ?? [];
-		const requestedReviewers = applyLineupActions(prompt.reviewers, lineupExtraction.actions, "reviewers") ?? [];
+		const presetLineup = await resolveBestOfNPresetLineup(prompt, runtime.preset, ctx);
+		if (!presetLineup) return;
+		const requestedWorkers = applyLineupActions(presetLineup.workers ?? prompt.workers, lineupExtraction.actions, "workers") ?? [];
+		const requestedReviewers = applyLineupActions(presetLineup.reviewers ?? prompt.reviewers, lineupExtraction.actions, "reviewers") ?? [];
 		const requestedFinalApplier = applyFinalApplierAction(prompt.finalApplier, lineupExtraction.actions);
 		if (requestedFinalApplier && prompt.worktree !== true) {
 			notify(ctx, "Compare prompts with finalApplier require worktree: true.", "error");
@@ -1659,7 +1704,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			}
 		}
 
-		const hasCompareLineup = prompt.workers !== undefined || prompt.reviewers !== undefined || prompt.finalApplier !== undefined;
+		const hasCompareLineup = prompt.workers !== undefined || prompt.reviewers !== undefined || prompt.finalApplier !== undefined || prompt.preset !== undefined || subagent.preset !== undefined;
 		if (hasCompareLineup) {
 			await runComparePrompt(
 				name,
@@ -1670,6 +1715,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				{
 					cwd: runtimeCwd,
 					model: subagent.model,
+					preset: subagent.preset,
 					subagentOverride: subagent.override,
 					fork: subagent.fork,
 				},

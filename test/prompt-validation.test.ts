@@ -572,6 +572,26 @@ test("validatePromptTemplates rejects delegated parallel steps with mixed inheri
 	});
 });
 
+test("validatePromptTemplates validates best-of-N preset references and preset files", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "missing.md"), "---\nbestOfN:\n  preset: missing\n---\n$@");
+		writeFileSync(join(cwd, ".pi", "prompts", "invalid-preset-file.md"), "---\nbestOfN:\n  preset: bad\n---\n$@");
+		writeFileSync(join(cwd, ".pi", "best-of-n-presets.json"), JSON.stringify({ presets: { bad: { workers: [] } } }));
+
+		const result = validatePromptTemplates(cwd);
+		const codes = result.diagnostics.map((diagnostic) => diagnostic.code);
+
+		assert.equal(result.ok, false);
+		assert.equal(codes.filter((code) => code === "invalid-best-of-n-preset").length, 1);
+		assert.equal(codes.filter((code) => code === "best-of-n-preset-not-found").length, 2);
+		assert.match(result.diagnostics.map((diagnostic) => diagnostic.message).join("\n"), /references missing best-of-N preset "missing"/);
+		assert.match(result.diagnostics.map((diagnostic) => diagnostic.message).join("\n"), /references missing best-of-N preset "bad"/);
+	});
+});
+
 test("validatePromptTemplates rejects worktree parallel steps with mixed effective cwd values", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");

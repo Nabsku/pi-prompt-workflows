@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildPromptCommandDescription, collectPromptSourceRecords, loadPromptsWithModel, RESERVED_COMMAND_NAMES, resolveSkillPath } from "../prompt-loader.js";
+import { loadBestOfNPresetCatalog } from "../best-of-n-presets.js";
 
 function withTempHome(run: (root: string) => void) {
 	const root = mkdtempSync(join(tmpdir(), "pi-prompt-template-model-enhanced-"));
@@ -2337,6 +2338,86 @@ test("loadPromptsWithModel parses the shipped best-of-n example", () => {
 		assert.match(buildPromptCommandDescription(prompt), /reviewers:3/);
 		assert.match(buildPromptCommandDescription(prompt), /final-applier/);
 		assert.equal(result.diagnostics.length, 0);
+	});
+});
+
+test("loadPromptsWithModel accepts bestOfN preset-only commands and preset catalog precedence", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(root, ".pi", "agent"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(
+			join(root, ".pi", "agent", "best-of-n-presets.json"),
+			JSON.stringify({
+				presets: {
+					quick: {
+						defaultModel: "openai/gpt-5.4-mini",
+						workers: [{ agent: "delegate", count: 2 }],
+						reviewers: [{ subagent: true }],
+					},
+				},
+			}),
+		);
+		writeFileSync(
+			join(cwd, ".pi", "best-of-n-presets.json"),
+			JSON.stringify({
+				presets: {
+					quick: {
+						description: "project override",
+						defaultModel: "anthropic/claude-sonnet-4-20250514",
+						workers: [{ agent: "delegate" }],
+					},
+					deep: {
+						workers: [{ agent: "delegate", model: "openai/gpt-5.4", count: 3 }],
+						reviewers: [{ agent: "reviewer", count: 2 }],
+						maxModelCalls: 6,
+					},
+				},
+			}),
+		);
+		writeFileSync(join(cwd, ".pi", "prompts", "compare.md"), "---\nbestOfN:\n  preset: quick\n---\n$@");
+
+		const promptResult = loadPromptsWithModel(cwd);
+		const prompt = promptResult.prompts.get("compare");
+		assert.ok(prompt);
+		assert.equal(prompt.preset, "quick");
+		assert.equal(prompt.workers, undefined);
+		assert.equal(prompt.reviewers, undefined);
+		assert.equal(promptResult.diagnostics.length, 0);
+
+		const catalog = loadBestOfNPresetCatalog(cwd);
+		assert.equal(catalog.diagnostics.length, 0);
+		assert.equal(catalog.presets.get("quick")?.source, "project");
+		assert.equal(catalog.presets.get("quick")?.description, "project override");
+		assert.equal(catalog.presets.get("quick")?.workers?.[0]?.model, undefined);
+		assert.equal(catalog.presets.get("deep")?.workers?.[0]?.count, 3);
+		assert.equal(catalog.presets.get("deep")?.reviewers?.[0]?.count, 2);
+		assert.equal(catalog.presets.get("deep")?.maxModelCalls, 6);
+	});
+});
+
+test("loadBestOfNPresetCatalog rejects invalid preset files and presets", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "best-of-n-presets.json"),
+			JSON.stringify({
+				presets: {
+					badEmpty: { workers: [] },
+					badModel: { workers: [{ model: "bad model" }] },
+					badCap: { workers: [{ agent: "delegate" }], maxModelCalls: 0 },
+					good: { workers: [{ subagent: true, count: "2" }] },
+				},
+			}),
+		);
+
+		const catalog = loadBestOfNPresetCatalog(cwd);
+		assert.deepEqual([...catalog.presets.keys()], ["good"]);
+		assert.equal(catalog.presets.get("good")?.workers?.[0]?.agent, "delegate");
+		assert.equal(catalog.presets.get("good")?.workers?.[0]?.count, 2);
+		assert.equal(catalog.diagnostics.filter((diagnostic) => diagnostic.code === "invalid-best-of-n-preset").length, 3);
 	});
 });
 

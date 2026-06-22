@@ -209,7 +209,7 @@ function errorResult(
 }
 
 function hasCompareLineup(prompt: PromptWithModel): boolean {
-	return prompt.workers !== undefined || prompt.reviewers !== undefined || prompt.finalApplier !== undefined;
+	return prompt.workers !== undefined || prompt.reviewers !== undefined || prompt.finalApplier !== undefined || prompt.preset !== undefined;
 }
 
 function shouldDelegatePrompt(prompt: Pick<PromptWithModel, "subagent">, override?: SubagentOverride): boolean {

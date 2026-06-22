@@ -917,6 +917,46 @@ test("compare prompts handle partial-success policy, final-applier fallback, ove
 				},
 			},
 			{
+				name: "compare-preset",
+				command: "compare-preset fix",
+				content: [
+					"---",
+					"bestOfN:",
+					"  preset: quick",
+					"---",
+					"$@",
+				].join("\n"),
+				handle(request: any, phase: number) {
+					if (phase === 1) {
+						assert.equal(request.tasks?.length, 2);
+						assert.deepEqual(request.tasks?.map((task: any) => task.agent), ["delegate", "delegate"]);
+						assert.deepEqual(request.tasks?.map((task: any) => task.model), ["anthropic/claude-sonnet-4-20250514", "anthropic/claude-sonnet-4-20250514"]);
+						return {
+							messages: [],
+							parallelResults: [
+								{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "w1" }] }], isError: false },
+								{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "w2" }] }], isError: false },
+							],
+							isError: false,
+						};
+					}
+					assert.equal(request.tasks?.length, 1);
+					assert.equal(request.tasks?.[0]?.agent, "reviewer");
+					assert.equal(request.tasks?.[0]?.model, "anthropic/claude-sonnet-4-20250514");
+					return {
+						messages: [],
+						parallelResults: [{ agent: "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: "review" }] }], isError: false }],
+						isError: false,
+					};
+				},
+				assert(pi: FakePi, phase: number) {
+					assert.equal(phase, 2);
+					assert.equal(pi.userMessages.length, 1);
+					assert.match(pi.userMessages[0]!, /\[Compare review complete: compare-preset\]/);
+					assert.match(pi.userMessages[0]!, /review/);
+				},
+			},
+			{
 				name: "compare-final-applier-guardrail",
 				command: 'compare-final-applier-guardrail --final-applier={"agent":"reviewer"} fix',
 				content: [
@@ -977,6 +1017,19 @@ test("compare prompts handle partial-success policy, final-applier fallback, ove
 		] as const;
 
 		mkdirSync(join(root, "other-repo"), { recursive: true });
+		mkdirSync(join(root, ".pi", "agent"), { recursive: true });
+		writeFileSync(
+			join(root, ".pi", "agent", "best-of-n-presets.json"),
+			JSON.stringify({
+				presets: {
+					quick: {
+						defaultModel: "anthropic/claude-sonnet-4-20250514",
+						workers: [{ agent: "delegate", count: 2 }],
+						reviewers: [{ agent: "reviewer" }],
+					},
+				},
+			}),
+		);
 		for (const testCase of cases) {
 			const cwd = join(root, testCase.name);
 			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
