@@ -564,6 +564,12 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		return slots?.map((slot) => ({ ...slot }));
 	}
 
+	function expandedLineupCallCount(slots: DelegationLineupSlot[]): number {
+		let total = 0;
+		for (const slot of slots) total += slot.count ?? 1;
+		return total;
+	}
+
 	function expandLineupCounts(slots: DelegationLineupSlot[]): DelegationLineupSlot[] {
 		const expanded: DelegationLineupSlot[] = [];
 		for (const slot of slots) {
@@ -837,21 +843,20 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			return;
 		}
 
-		const workerSlots = expandLineupCounts(
-			requestedWorkers.length > 0
-				? requestedWorkers
-				: [{ agent: DEFAULT_SUBAGENT_NAME }],
-		);
-		const reviewerSlots = expandLineupCounts(
-			requestedReviewers.length > 0
-				? requestedReviewers
-				: [{ agent: "reviewer" }],
-		);
-		const presetModelCalls = workerSlots.length + reviewerSlots.length;
+		const effectiveWorkerSlots = requestedWorkers.length > 0
+			? requestedWorkers
+			: [{ agent: DEFAULT_SUBAGENT_NAME }];
+		const effectiveReviewerSlots = requestedReviewers.length > 0
+			? requestedReviewers
+			: [{ agent: "reviewer" }];
+		const presetModelCalls = expandedLineupCallCount(effectiveWorkerSlots) + expandedLineupCallCount(effectiveReviewerSlots);
 		if (presetLineup.maxModelCalls !== undefined && presetModelCalls > presetLineup.maxModelCalls) {
 			notify(ctx, `Best-of-N preset model-call cap exceeded: requested ${presetModelCalls} worker/reviewer call(s), but preset allows ${presetLineup.maxModelCalls}.`, "error");
 			return;
 		}
+
+		const workerSlots = expandLineupCounts(effectiveWorkerSlots);
+		const reviewerSlots = expandLineupCounts(effectiveReviewerSlots);
 
 		const normalizedWorkers = normalizeLineupCwds(workerSlots, compareCwd, ctx);
 		if (!normalizedWorkers) return;

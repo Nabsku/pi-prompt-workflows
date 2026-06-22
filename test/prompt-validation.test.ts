@@ -362,7 +362,6 @@ test("validation report omits include graph section for irrelevant graphs", () =
 	});
 });
 
-
 test("validatePromptTemplates reports loader diagnostics and unresolved skills", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
@@ -589,6 +588,21 @@ test("validatePromptTemplates validates best-of-N preset references and preset f
 		assert.equal(codes.filter((code) => code === "best-of-n-preset-not-found").length, 2);
 		assert.match(result.diagnostics.map((diagnostic) => diagnostic.message).join("\n"), /references missing best-of-N preset "missing"/);
 		assert.match(result.diagnostics.map((diagnostic) => diagnostic.message).join("\n"), /references missing best-of-N preset "bad"/);
+	});
+});
+
+test("validatePromptTemplates ignores invalid preset files when no prompt references a preset", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "plain.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nbody");
+		writeFileSync(join(cwd, ".pi", "best-of-n-presets.json"), "{ not json");
+
+		const result = validatePromptTemplates(cwd);
+
+		assert.equal(result.ok, true);
+		assert.deepEqual(result.diagnostics, []);
 	});
 });
 
@@ -1015,7 +1029,6 @@ test("duplicate prompt-library names and reserved command names surface diagnost
 		assert.equal(codes.includes("reserved-command-name"), true);
 	});
 });
-
 
 test("formatPromptValidationReport escapes control characters in diagnostics", () => {
 	const report = formatPromptValidationReport({
