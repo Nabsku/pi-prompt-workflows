@@ -217,11 +217,12 @@ All fields are optional. Templates that don't use any extension features (no `mo
 | `subagent` | — | Delegate execution to a subagent instead of running in the current session. `true` uses the default `delegate` agent; a string value like `reviewer` targets that specific agent. Requires [pi-subagents](https://github.com/nicobailon/pi-subagents/). |
 | `inheritContext` | `false` | Only meaningful with `subagent`. When `true`, the subagent receives a fork of the current conversation context instead of starting fresh. |
 | `parallel` | — | Delegated prompts only. Repeats the same subagent in parallel `N` times. Each copy gets a slot header like `[Parallel subagent 2/3]` prepended to the task. Must be an integer greater than or equal to 2. |
-| `bestOfN` | — | Compare templates only. Nested compare authoring block with `workers`, `reviewers`, optional `preset`, optional `finalApplier`, and optional `worktree`. Top-level compare fields are not supported in templates. |
+| `bestOfN` | — | Compare templates only. Nested compare authoring block with `workers`, `reviewers`, optional `preset`, optional `finalApplier`, optional `worktree`, and optional `commit: ask`. Top-level compare fields are not supported in templates. |
 | `bestOfN.preset` | — | Name of a best-of-N preset from `~/.pi/agent/best-of-n-presets.json` or `<compare-cwd>/.pi/best-of-n-presets.json`. Presets can supply worker/reviewer agents, models, counts, `defaultModel`, and `maxModelCalls`; prompt templates still own task text, `cwd`, final apply, dirty/report/commit policy, and other execution policy. |
 | `bestOfN.workers` | — | Ordered worker lineup used for the worker phase. Each slot object supports optional `agent`/`subagent`, optional `model`, optional `task`, optional `taskSuffix`, optional `cwd`, and optional `count`. If both `agent` and `subagent` are omitted, the default agent is `delegate`. |
 | `bestOfN.reviewers` | — | Ordered reviewer lineup used after worker aggregation. Slot shape matches workers. If both `agent` and `subagent` are omitted, the default agent is `reviewer`. |
 | `bestOfN.finalApplier` | — | Optional single-slot final apply phase that edits the real branch after reviewers. Supports optional `agent`/`subagent`, optional `model`, optional `task`, and optional `taskSuffix`. If both `agent` and `subagent` are omitted, the default agent is `delegate`. `count` and `cwd` are not supported. Requires `bestOfN.worktree: true` at runtime. |
+| `bestOfN.commit` | — | Optional final-applier follow-up policy. `ask` does not commit automatically; after the final applier runs, the completion message shows changed files, a diff summary, the report path, a suggested commit message, and a safe manual flow: stage only intended files (for example with `git add --patch`), then run the suggested `git commit -m ...`. Requires `bestOfN.finalApplier`. |
 | `cwd` | — | Working directory for delegated subagent subprocesses. Must be an absolute path (`~/...` is expanded). Valid with `subagent`, on chain templates as the default cwd for delegated steps, and on compare prompts as the default repo cwd. Worker/reviewer slots can also set their own `cwd` inside `bestOfN.workers` / `bestOfN.reviewers`. |
 
 ## Model Format
@@ -653,6 +654,7 @@ Compare prompt templates are authored under `bestOfN:`. Top-level `workers`, `re
 3. Optional final apply phase: if `finalApplier` is configured, run one delegated apply step on the real compare repo (`compareCwd`) to pick a winner or synthesize/cherry-pick and apply the final patch.
 4. If all reviewers fail but `finalApplier` exists, the final apply step still runs with fallback context from workers plus reviewer failure summaries.
 5. Every successful compare run writes `.pi/runs/best-of-n/<timestamp>-<prompt>-<id>/report.md` plus `lineup.json`; pass `--keep-artifacts` to also retain raw worker/reviewer/final-applier outputs as separate Markdown files.
+6. If `bestOfN.commit: ask` is set, the apply completion stops at a manual commit approval block with changed files, diff summary, report path, suggested commit message, and a copyable `git add --patch` / `git commit -m ...` flow. The extension never commits for you.
 
 Worker/reviewer lineups are fully configurable from `bestOfN` frontmatter, presets, or runtime overrides, so there is no fixed three-model worker assumption. If a compare prompt omits `bestOfN.workers`, it falls back to one `delegate` worker using the current/main model. If it omits `bestOfN.reviewers`, it falls back to one `reviewer` slot. `bestOfN.finalApplier` is optional, and compare runs reject an effective final applier unless `bestOfN.worktree: true` is set.
 
@@ -727,6 +729,8 @@ bestOfN:
   finalApplier:
     model: anthropic/claude-sonnet-4-20250514:high
     taskSuffix: Apply the final patch on the current branch and report verification.
+  worktree: true
+  commit: ask
 ```
 
 Within compare lineups, omitting both `agent` and `subagent` uses phase defaults: `delegate` in workers, `reviewer` in reviewers, and `delegate` in finalApplier. You can still set explicit `agent` or `subagent` when needed.
@@ -735,7 +739,7 @@ Explicitly repeating the same slot still works, but `count: N` is the cleaner sh
 
 Within a compare lineup, use `task` for a full per-slot override and `taskSuffix` for a small per-slot append. `taskSuffix` is added after the shared worker task (or after the slot's `task` if you set one), which makes it the better fit for things like per-model output file names.
 
-When a compare prompt uses `bestOfN.worktree: true`, all worker slots must resolve to the same `cwd`. Mixed worker `cwd` values are only allowed when worktree isolation is off. Worktree isolation is for the worker phase only; `bestOfN.finalApplier` always applies on the real branch (`compareCwd`).
+When a compare prompt uses `bestOfN.worktree: true`, all worker slots must resolve to the same `cwd`. Mixed worker `cwd` values are only allowed when worktree isolation is off. Worktree isolation is for the worker phase only; `bestOfN.finalApplier` always applies on the real branch (`compareCwd`). `bestOfN.commit: ask` is only valid with a final applier; it reports what changed after that apply step but leaves the branch uncommitted until you approve and run the suggested git command yourself.
 
 ## Deterministic Steps
 

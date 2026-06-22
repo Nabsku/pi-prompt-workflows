@@ -104,6 +104,7 @@ export interface PromptWithModel {
 	workers?: DelegationLineupSlot[];
 	reviewers?: DelegationLineupSlot[];
 	finalApplier?: DelegationLineupSlot;
+	commit?: "ask";
 	preset?: string;
 	source: PromptSource;
 	rootKind: PromptRootKind;
@@ -1280,6 +1281,25 @@ function normalizeBestOfN(
 	return undefined;
 }
 
+function normalizeBestOfNCommit(
+	value: unknown,
+	filePath: string,
+	source: PromptSource,
+	diagnostics: PromptLoaderDiagnostic[],
+): "ask" | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value === "string" && value.trim().toLowerCase() === "ask") return "ask";
+	diagnostics.push(
+		createDiagnostic(
+			"invalid-best-of-n-commit",
+			filePath,
+			source,
+			`Ignoring invalid bestOfN.commit value in ${filePath}: expected "ask".`,
+		),
+	);
+	return undefined;
+}
+
 function pushLegacyCompareFieldDiagnostic(
 	field: "workers" | "reviewers" | "finalApplier",
 	filePath: string,
@@ -1886,10 +1906,12 @@ function loadPromptsWithModelFromDir(
 				const reviewers = normalizeLineup(hasBestOfN ? bestOfN?.reviewers : undefined, "reviewers", fullPath, source, diagnostics);
 				const finalApplier = normalizeFinalApplier(hasBestOfN ? bestOfN?.finalApplier : undefined, fullPath, source, diagnostics);
 				const preset = normalizeStringField("best-of-n-preset", hasBestOfN ? bestOfN?.preset : undefined, fullPath, source, diagnostics);
+				const commit = normalizeBestOfNCommit(hasBestOfN ? bestOfN?.commit : undefined, fullPath, source, diagnostics);
 				let safeWorkers = workers;
 				let safeReviewers = reviewers;
 				let safeFinalApplier = finalApplier;
 				let safePreset = preset;
+				let safeCommit = commit;
 				if (chain && subagent !== undefined) {
 					diagnostics.push(
 						createDiagnostic(
@@ -1912,7 +1934,7 @@ function loadPromptsWithModelFromDir(
 					);
 					deterministic = undefined;
 				}
-				if (chain && (safeWorkers !== undefined || safeReviewers !== undefined || safeFinalApplier !== undefined || safePreset !== undefined)) {
+				if (chain && (safeWorkers !== undefined || safeReviewers !== undefined || safeFinalApplier !== undefined || safePreset !== undefined || safeCommit !== undefined)) {
 					diagnostics.push(
 						createDiagnostic(
 							"invalid-lineup-chain",
@@ -1925,8 +1947,9 @@ function loadPromptsWithModelFromDir(
 					safeReviewers = undefined;
 					safeFinalApplier = undefined;
 					safePreset = undefined;
+					safeCommit = undefined;
 				}
-				if (subagent !== undefined && (safeWorkers !== undefined || safeReviewers !== undefined || safeFinalApplier !== undefined || safePreset !== undefined)) {
+				if (subagent !== undefined && (safeWorkers !== undefined || safeReviewers !== undefined || safeFinalApplier !== undefined || safePreset !== undefined || safeCommit !== undefined)) {
 					diagnostics.push(
 						createDiagnostic(
 							"invalid-lineup-subagent",
@@ -1939,6 +1962,7 @@ function loadPromptsWithModelFromDir(
 					safeReviewers = undefined;
 					safeFinalApplier = undefined;
 					safePreset = undefined;
+					safeCommit = undefined;
 				}
 				if (subagent !== undefined && deterministic !== undefined) {
 					diagnostics.push(
@@ -1984,7 +2008,7 @@ function loadPromptsWithModelFromDir(
 					);
 					safeParallel = undefined;
 				}
-				if (safeParallel !== undefined && (safeWorkers !== undefined || safeReviewers !== undefined || safeFinalApplier !== undefined || safePreset !== undefined)) {
+				if (safeParallel !== undefined && (safeWorkers !== undefined || safeReviewers !== undefined || safeFinalApplier !== undefined || safePreset !== undefined || safeCommit !== undefined)) {
 					diagnostics.push(
 						createDiagnostic(
 							"invalid-lineup-parallel",
@@ -1997,6 +2021,7 @@ function loadPromptsWithModelFromDir(
 					safeReviewers = undefined;
 					safeFinalApplier = undefined;
 					safePreset = undefined;
+					safeCommit = undefined;
 				}
 				if (safeParallel !== undefined && deterministic !== undefined) {
 					diagnostics.push(
@@ -2010,6 +2035,17 @@ function loadPromptsWithModelFromDir(
 					deterministic = undefined;
 				}
 				const hasLineup = safeWorkers !== undefined || safeReviewers !== undefined || safeFinalApplier !== undefined || safePreset !== undefined;
+				if (safeCommit !== undefined && safeFinalApplier === undefined) {
+					diagnostics.push(
+						createDiagnostic(
+							"invalid-best-of-n-commit",
+							fullPath,
+							source,
+							`Ignoring bestOfN.commit in ${fullPath}: commit ask mode requires bestOfN.finalApplier.`,
+						),
+					);
+					safeCommit = undefined;
+				}
 				if (!hasBestOfN && hasLegacyCompareFields) {
 					diagnostics.push(
 						createDiagnostic(
@@ -2229,6 +2265,7 @@ function loadPromptsWithModelFromDir(
 					workers: safeWorkers,
 					reviewers: safeReviewers,
 					finalApplier: safeFinalApplier,
+					commit: safeCommit,
 					preset: safePreset,
 					source,
 					rootKind,
@@ -2644,11 +2681,12 @@ export function buildPromptCommandDescription(prompt: PromptWithModel): string {
 	const workersLabel = prompt.workers ? ` workers:${effectiveLineupCount(prompt.workers)}` : "";
 	const reviewersLabel = prompt.reviewers ? ` reviewers:${effectiveLineupCount(prompt.reviewers)}` : "";
 	const finalApplierLabel = prompt.finalApplier ? " final-applier" : "";
+	const commitLabel = prompt.commit ? ` commit:${prompt.commit}` : "";
 	const cwdLabel = prompt.cwd ? ` cwd:${prompt.cwd}` : "";
 	const inheritContextLabel = prompt.inheritContext ? " fork" : "";
 	const worktreeLabel = prompt.worktree ? " worktree" : "";
 	const details =
-		`[${modelLabel}${rotateLabel}${thinkingLabel}${skillLabel}${loopLabel}${boomerangLabel}${subagentLabel}${parallelLabel}${deterministicLabel}${workersLabel}${reviewersLabel}${finalApplierLabel}${cwdLabel}${inheritContextLabel}${worktreeLabel}] ${sourceLabel}`;
+		`[${modelLabel}${rotateLabel}${thinkingLabel}${skillLabel}${loopLabel}${boomerangLabel}${subagentLabel}${parallelLabel}${deterministicLabel}${workersLabel}${reviewersLabel}${finalApplierLabel}${commitLabel}${cwdLabel}${inheritContextLabel}${worktreeLabel}] ${sourceLabel}`;
 	return prompt.description ? `${prompt.description} ${details}` : details;
 }
 

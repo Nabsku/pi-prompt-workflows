@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve as resolvePath } from "node:path";
@@ -75,6 +76,12 @@ interface LoopState {
 }
 
 type ReportLineupSlot = DelegationLineupSlot & { effectiveModel: string; effectiveTask: string };
+
+interface GitSnapshot {
+	status?: string;
+	diffStat?: string;
+	shortStat?: string;
+}
 
 interface FreshCollapse {
 	targetId: string;
@@ -794,6 +801,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		sharedTask: string;
 		taskArgs: string[];
 		presetName?: string;
+		commitMode?: "ask";
 		keepArtifacts: boolean;
 		workers: ReportLineupSlot[];
 		reviewers: ReportLineupSlot[];
@@ -812,6 +820,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			prompt: options.promptName,
 			status: options.status,
 			preset: options.presetName,
+			commit: options.commitMode,
 			keepArtifacts: options.keepArtifacts,
 			args: options.taskArgs,
 			workers: options.workers.map(serializeLineupSlot),
@@ -829,6 +838,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			`- Status: ${options.status}`,
 			`- Compare cwd: ${options.compareCwd}`,
 			...(options.presetName ? [`- Preset: ${options.presetName}`] : []),
+			...(options.commitMode ? [`- Commit policy: ${options.commitMode}`] : []),
 			`- Worker calls: ${options.workers.length}`,
 			`- Reviewer calls: ${options.reviewers.length}`,
 			`- Final applier: ${options.finalApplier ? "yes" : "no"}`,
@@ -857,6 +867,94 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 	function formatRunReportCompletionLine(reportPath: string | undefined): string {
 		return reportPath ? `Report: ${reportPath}` : "Report: unavailable (failed to write run artifacts)";
+	}
+
+	function runGitCapture(cwd: string, args: string[]): string | undefined {
+		try {
+			const output = execFileSync("git", args, {
+				cwd,
+				encoding: "utf8",
+				env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+				stdio: ["ignore", "pipe", "pipe"],
+			});
+			return output.trim();
+		} catch {
+			return undefined;
+		}
+	}
+
+	function captureGitSnapshot(cwd: string): GitSnapshot {
+		return {
+			status: runGitCapture(cwd, ["status", "--short"]),
+			diffStat: runGitCapture(cwd, ["diff", "--no-ext-diff", "--stat", "HEAD"]),
+			shortStat: runGitCapture(cwd, ["diff", "--no-ext-diff", "--shortstat", "HEAD"]),
+		};
+	}
+
+	function statusLinesChangedAfter(before: string | undefined, after: string | undefined): string {
+		if (!after) return "(git status unavailable or no changes detected)";
+		const beforeLines = new Set((before || "").split("\n").filter(Boolean));
+		const changed = after.split("\n").filter((line) => line && !beforeLines.has(line));
+		return changed.length > 0 ? changed.join("\n") : "(no new status entries since final applier started; inspect full diff if pre-existing files were modified)";
+	}
+
+	function buildSuggestedBestOfNCommitMessage(promptName: string, taskArgs: string[]): string {
+		const target = taskArgs.join(" ").replace(/\s+/g, " ").trim();
+		const suffix = target ? `: ${target.slice(0, 72)}` : "";
+		return `feat: apply ${promptName} best-of-n result${suffix}`;
+	}
+
+	function shellQuote(value: string): string {
+		return `'${value.replace(/'/g, `'"'"'`)}'`;
+	}
+
+	function renderBestOfNCommitAsk(options: {
+		compareCwd: string;
+		promptName: string;
+		taskArgs: string[];
+		reportPath?: string;
+		beforeFinalApplier: GitSnapshot;
+		afterFinalApplier: GitSnapshot;
+	}): string {
+		const suggestedMessage = buildSuggestedBestOfNCommitMessage(options.promptName, options.taskArgs);
+		const command = `git commit -m ${shellQuote(suggestedMessage)}`;
+		const changedStatus = statusLinesChangedAfter(options.beforeFinalApplier.status, options.afterFinalApplier.status);
+		return [
+			"## Commit approval",
+			"",
+			"`bestOfN.commit: ask` is enabled. Review and stage only the intended final-applier changes before committing.",
+			"",
+			`- Compare cwd: ${options.compareCwd}`,
+			`- ${formatRunReportCompletionLine(options.reportPath)}`,
+			`- Suggested commit: \`${suggestedMessage}\``,
+			"",
+			"New status entries since final applier started:",
+			"```",
+			changedStatus,
+			"```",
+			...(options.beforeFinalApplier.status ? [
+				"Pre-existing status before final applier:",
+				"```",
+				options.beforeFinalApplier.status,
+				"```",
+			] : []),
+			"Full diff summary after final applier:",
+			"```",
+			[options.afterFinalApplier.diffStat, options.afterFinalApplier.shortStat].filter((value): value is string => Boolean(value)).join("\n") || "(git diff unavailable or empty)",
+			"```",
+			"Diff summary before final applier:",
+			"```",
+			[options.beforeFinalApplier.diffStat, options.beforeFinalApplier.shortStat].filter((value): value is string => Boolean(value)).join("\n") || "(empty)",
+			"```",
+			"Stage only the intended files, for example:",
+			"```bash",
+			"git add --patch",
+			"```",
+			"Then commit the staged changes:",
+			"```bash",
+			command,
+			"```",
+		].join("\n");
 	}
 
 	function buildReviewerPreamble(sharedTask: string, workerAggregation: string, workerFailureSummary?: string): string {
@@ -1128,6 +1226,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					sharedTask,
 					taskArgs,
 					presetName: runtime.preset ?? prompt.preset,
+					commitMode: undefined,
 					keepArtifacts,
 					workers: reportWorkers,
 					reviewers: reportReviewers,
@@ -1145,6 +1244,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				return;
 			}
 
+			const beforeFinalApplierSnapshot = prompt.commit === "ask" ? captureGitSnapshot(compareCwd) : undefined;
 			const finalResult = await executeSubagentPromptStep({
 				pi,
 				ctx,
@@ -1168,6 +1268,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				args: [],
 			});
 			if (!finalResult?.text) return;
+			const afterFinalApplierSnapshot = prompt.commit === "ask" ? captureGitSnapshot(compareCwd) : undefined;
 			const reportFinalApplier = buildReportLineupSlots([normalizedFinalApplier], finalResult.preparedTasks)[0];
 			const reportPath = tryWriteBestOfNRunReport({
 				compareCwd,
@@ -1176,6 +1277,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				sharedTask,
 				taskArgs,
 				presetName: runtime.preset ?? prompt.preset,
+				commitMode: prompt.commit,
 				keepArtifacts,
 				workers: reportWorkers,
 				reviewers: reportReviewers,
@@ -1188,7 +1290,10 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				reviewerFailures: reviewerFailureSummary,
 				finalText: finalResult.text,
 			}, ctx);
-			pi.sendUserMessage(`[Compare apply complete: ${name}]\n\n${formatRunReportCompletionLine(reportPath)}\n\n${finalResult.text}`);
+			const commitAsk = prompt.commit === "ask" && beforeFinalApplierSnapshot && afterFinalApplierSnapshot
+				? `\n\n${renderBestOfNCommitAsk({ compareCwd, promptName: name, taskArgs, reportPath, beforeFinalApplier: beforeFinalApplierSnapshot, afterFinalApplier: afterFinalApplierSnapshot })}`
+				: "";
+			pi.sendUserMessage(`[Compare apply complete: ${name}]\n\n${formatRunReportCompletionLine(reportPath)}\n\n${finalResult.text}${commitAsk}`);
 			await waitForTurnStart(ctx);
 			await ctx.waitForIdle();
 		} catch (error) {
