@@ -1105,3 +1105,52 @@ test("project best-of-N preset approval is scoped to session_start", async () =>
 		assert.equal(confirmCount, 2);
 	});
 });
+
+test("project best-of-N presets resolve from compare cwd", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "session");
+		const target = join(root, "target");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(target, ".pi"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "parallel-patch-compare-at-path.md"),
+			[
+				"---",
+				"bestOfN:",
+				"  preset: targetQuick",
+				"---",
+				"$@",
+			].join("\n"),
+		);
+		writeFileSync(
+			join(target, ".pi", "best-of-n-presets.json"),
+			JSON.stringify({
+				presets: {
+					targetQuick: {
+						workers: [{ agent: "delegate", count: 2 }],
+						reviewers: [{ agent: "reviewer" }],
+					},
+				},
+			}),
+		);
+
+		const pi = new FakePi();
+		const { ctx } = createContext(cwd, pi);
+		let confirmCount = 0;
+		let firstTaskCount = 0;
+		ctx.hasUI = true;
+		ctx.ui.confirm = async () => {
+			confirmCount++;
+			return true;
+		};
+		promptModelExtension(pi as never);
+		respondWithParallelDelegatedResult(pi, (request) => {
+			if (firstTaskCount === 0) firstTaskCount = request.tasks?.length ?? 0;
+		});
+
+		await pi.emit("session_start", {}, ctx);
+		await pi.commands.get("parallel-patch-compare-at-path")!.handler(`${target} implement it`, ctx);
+		assert.equal(confirmCount, 1);
+		assert.equal(firstTaskCount, 2);
+	});
+});

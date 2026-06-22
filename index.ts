@@ -196,9 +196,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		return true;
 	}
 
-	async function ensureProjectPresetApproved(preset: ResolvedBestOfNPreset, ctx: ExtensionCommandContext): Promise<boolean> {
+	async function ensureProjectPresetApproved(preset: ResolvedBestOfNPreset, ctx: ExtensionCommandContext, catalogCwd: string): Promise<boolean> {
 		if (preset.source !== "project") return true;
-		const cwdKey = resolvePath(ctx.cwd);
+		const cwdKey = resolvePath(catalogCwd);
 		if (approvedProjectPresetCwds.has(cwdKey)) return true;
 		const message = `Best-of-N preset \`${preset.name}\` is loaded from ${preset.filePath}. Approve project best-of-N presets for this session?`;
 		if (!ctx.hasUI || typeof (ctx.ui as { confirm?: unknown }).confirm !== "function") {
@@ -218,10 +218,11 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		prompt: PromptWithModel,
 		runtimePreset: string | undefined,
 		ctx: ExtensionCommandContext,
+		catalogCwd: string,
 	): Promise<{ workers?: DelegationLineupSlot[]; reviewers?: DelegationLineupSlot[] } | undefined> {
 		const presetName = runtimePreset ?? prompt.preset;
 		if (!presetName) return {};
-		const catalog = loadBestOfNPresetCatalog(ctx.cwd);
+		const catalog = loadBestOfNPresetCatalog(catalogCwd);
 		for (const diagnostic of catalog.diagnostics) {
 			notify(ctx, diagnostic.message, "warning");
 		}
@@ -230,7 +231,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			notify(ctx, `Best-of-N preset \`${presetName}\` was not found. Define it in ~/.pi/agent/best-of-n-presets.json or .pi/best-of-n-presets.json.`, "error");
 			return undefined;
 		}
-		if (!(await ensureProjectPresetApproved(preset, ctx))) return undefined;
+		if (!(await ensureProjectPresetApproved(preset, ctx, catalogCwd))) return undefined;
 		return {
 			workers: applyPresetDefaultModel(preset.workers, preset.defaultModel),
 			reviewers: applyPresetDefaultModel(preset.reviewers, preset.defaultModel),
@@ -825,7 +826,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 		const sharedTask = rendered.content;
 
-		const presetLineup = await resolveBestOfNPresetLineup(prompt, runtime.preset, ctx);
+		const presetLineup = await resolveBestOfNPresetLineup(prompt, runtime.preset, ctx, compareCwd);
 		if (!presetLineup) return;
 		const requestedWorkers = applyLineupActions(presetLineup.workers ?? prompt.workers, lineupExtraction.actions, "workers") ?? [];
 		const requestedReviewers = applyLineupActions(presetLineup.reviewers ?? prompt.reviewers, lineupExtraction.actions, "reviewers") ?? [];
