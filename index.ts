@@ -83,8 +83,6 @@ interface GitSnapshot {
 	status?: string;
 	diffStat?: string;
 	shortStat?: string;
-	diffPatch?: string;
-	stagedPatch?: string;
 	diffRaw?: string;
 	stagedRaw?: string;
 	diffFingerprint?: string;
@@ -913,8 +911,6 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			status: runGitCapture(cwd, ["status", "--short"]),
 			diffStat: runGitCapture(cwd, ["diff", "--no-ext-diff", "--stat", "HEAD"]),
 			shortStat: runGitCapture(cwd, ["diff", "--no-ext-diff", "--shortstat", "HEAD"]),
-			diffPatch: runGitCapture(cwd, ["diff", "--no-ext-diff", "HEAD"]),
-			stagedPatch: runGitCapture(cwd, ["diff", "--no-ext-diff", "--cached", "HEAD"]),
 			diffRaw: runGitCapture(cwd, ["diff", "--no-ext-diff", "--raw", "-z", "HEAD"]),
 			stagedRaw: runGitCapture(cwd, ["diff", "--no-ext-diff", "--cached", "--raw", "-z", "HEAD"]),
 			diffFingerprint: captureDiffFingerprint(cwd),
@@ -981,6 +977,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	function diffChangedPaths(before: GitSnapshot, after: GitSnapshot): Set<string> {
 		return new Set([
 			...diffPatchChangedPaths(before.diffFingerprint, after.diffFingerprint),
+			...diffPatchChangedPaths(before.diffRaw, after.diffRaw),
 			...diffPatchChangedPaths(before.stagedRaw, after.stagedRaw),
 		]);
 	}
@@ -988,9 +985,16 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	function unquoteGitPath(path: string): string {
 		if (!path.startsWith('"') || !path.endsWith('"')) return path;
 		let result = "";
+		let octalBytes: number[] = [];
+		const flushOctalBytes = () => {
+			if (octalBytes.length === 0) return;
+			result += Buffer.from(octalBytes).toString("utf8");
+			octalBytes = [];
+		};
 		for (let i = 1; i < path.length - 1; i++) {
 			const char = path[i]!;
 			if (char !== "\\") {
+				flushOctalBytes();
 				result += char;
 				continue;
 			}
@@ -1001,12 +1005,14 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				for (let count = 0; count < 2 && i + 1 < path.length - 1 && path[i + 1]! >= "0" && path[i + 1]! <= "7"; count++) {
 					octal += path[++i]!;
 				}
-				result += String.fromCharCode(Number.parseInt(octal, 8));
+				octalBytes.push(Number.parseInt(octal, 8));
 				continue;
 			}
+			flushOctalBytes();
 			const escapes: Record<string, string> = { a: "\x07", b: "\b", f: "\f", n: "\n", r: "\r", t: "	", v: "\v", "\\": "\\", '"': '"' };
 			result += escapes[next] ?? next;
 		}
+		flushOctalBytes();
 		return result;
 	}
 
@@ -1068,10 +1074,10 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		if (before.head && after.head && before.head !== after.head) {
 			warnings.push(`HEAD changed during the final applier run (${before.head.slice(0, 12)} -> ${after.head.slice(0, 12)}). Inspect history before committing; the final applier may have committed already.`);
 		}
-		if ((before.stagedNameStatus || "") || (before.stagedPatch || "")) {
+		if ((before.stagedNameStatus || "") || (before.stagedRaw || "")) {
 			warnings.push("Pre-existing staged changes were present before the final applier ran. Review `git diff --cached` and unstage unrelated hunks before using the suggested commit command.");
 		}
-		if ((after.stagedNameStatus || "") !== (before.stagedNameStatus || "") || (after.stagedPatch || "") !== (before.stagedPatch || "")) {
+		if ((after.stagedNameStatus || "") !== (before.stagedNameStatus || "") || (after.stagedRaw || "") !== (before.stagedRaw || "")) {
 			warnings.push("Staged changes changed during the final applier run. Review `git diff --cached` and unstage anything that should remain under manual approval.");
 		}
 		const preExistingUntracked = preExistingUntrackedLines(before);
