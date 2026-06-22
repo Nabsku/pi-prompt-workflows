@@ -161,7 +161,9 @@ function normalizePreset(name: string, value: unknown, filePath: string, source:
 		preset.maxModelCalls = value.maxModelCalls;
 	}
 	const workers = normalizePresetLineup(value.workers, "workers", name, filePath, source, diagnostics);
+	if (value.workers !== undefined && !workers) return undefined;
 	const reviewers = normalizePresetLineup(value.reviewers, "reviewers", name, filePath, source, diagnostics);
+	if (value.reviewers !== undefined && !reviewers) return undefined;
 	if (workers) preset.workers = workers;
 	if (reviewers) preset.reviewers = reviewers;
 	if (!preset.workers && !preset.reviewers && value.workers === undefined && value.reviewers === undefined) {
