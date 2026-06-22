@@ -79,9 +79,13 @@ interface LoopState {
 type ReportLineupSlot = DelegationLineupSlot & { effectiveModel: string; effectiveTask: string };
 
 interface GitSnapshot {
+	head?: string;
 	status?: string;
 	diffStat?: string;
 	shortStat?: string;
+	diffPatch?: string;
+	stagedPatch?: string;
+	stagedNameStatus?: string;
 }
 
 interface FreshCollapse {
@@ -885,19 +889,91 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 	}
 
+	function resolveGitRoot(cwd: string): string | undefined {
+		return runGitCapture(cwd, ["rev-parse", "--show-toplevel"]);
+	}
+
 	function captureGitSnapshot(cwd: string): GitSnapshot {
 		return {
+			head: runGitCapture(cwd, ["rev-parse", "HEAD"]),
 			status: runGitCapture(cwd, ["status", "--short"]),
 			diffStat: runGitCapture(cwd, ["diff", "--no-ext-diff", "--stat", "HEAD"]),
 			shortStat: runGitCapture(cwd, ["diff", "--no-ext-diff", "--shortstat", "HEAD"]),
+			diffPatch: runGitCapture(cwd, ["diff", "--no-ext-diff", "HEAD"]),
+			stagedPatch: runGitCapture(cwd, ["diff", "--no-ext-diff", "--cached", "HEAD"]),
+			stagedNameStatus: runGitCapture(cwd, ["diff", "--no-ext-diff", "--cached", "--name-status", "HEAD"]),
 		};
 	}
 
-	function statusLinesChangedAfter(before: string | undefined, after: string | undefined): string {
-		if (!after) return "(git status unavailable or no changes detected)";
-		const beforeLines = new Set((before || "").split("\n").filter(Boolean));
-		const changed = after.split("\n").filter((line) => line && !beforeLines.has(line));
+	function splitGitDiffByPath(diff: string | undefined): Map<string, string> {
+		const blocks = new Map<string, string>();
+		if (!diff) return blocks;
+		const lines = diff.split("\n");
+		let currentPath: string | undefined;
+		let currentBlock: string[] = [];
+		const flush = () => {
+			if (currentPath) blocks.set(currentPath, currentBlock.join("\n"));
+		};
+		for (const line of lines) {
+			const match = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
+			if (match) {
+				flush();
+				currentPath = match[2];
+				currentBlock = [line];
+				continue;
+			}
+			if (currentPath) currentBlock.push(line);
+		}
+		flush();
+		return blocks;
+	}
+
+	function diffPatchChangedPaths(beforePatch: string | undefined, afterPatch: string | undefined): Set<string> {
+		const beforeBlocks = splitGitDiffByPath(beforePatch);
+		const afterBlocks = splitGitDiffByPath(afterPatch);
+		const changed = new Set<string>();
+		for (const [path, afterBlock] of afterBlocks) {
+			if (beforeBlocks.get(path) !== afterBlock) changed.add(path);
+		}
+		return changed;
+	}
+
+	function diffChangedPaths(before: GitSnapshot, after: GitSnapshot): Set<string> {
+		return new Set([
+			...diffPatchChangedPaths(before.diffPatch, after.diffPatch),
+			...diffPatchChangedPaths(before.stagedPatch, after.stagedPatch),
+		]);
+	}
+
+	function statusLinePath(line: string): string | undefined {
+		if (line.length < 4) return undefined;
+		const raw = line.slice(3);
+		const renameIndex = raw.indexOf(" -> ");
+		return renameIndex >= 0 ? raw.slice(renameIndex + 4) : raw;
+	}
+
+	function statusLinesChangedAfter(before: GitSnapshot, after: GitSnapshot): string {
+		if (!after.status) return "(git status unavailable or no changes detected)";
+		const beforeLines = new Set((before.status || "").split("\n").filter(Boolean));
+		const dirtyPathsWithDiffChanges = diffChangedPaths(before, after);
+		const changed = after.status.split("\n").filter((line) => {
+			if (!line) return false;
+			if (!beforeLines.has(line)) return true;
+			const path = statusLinePath(line);
+			return path ? dirtyPathsWithDiffChanges.has(path) : false;
+		});
 		return changed.length > 0 ? changed.join("\n") : "(no new status entries since final applier started; inspect full diff if pre-existing files were modified)";
+	}
+
+	function formatApprovalGuardWarnings(before: GitSnapshot, after: GitSnapshot): string | undefined {
+		const warnings: string[] = [];
+		if (before.head && after.head && before.head !== after.head) {
+			warnings.push(`HEAD changed during the final applier run (${before.head.slice(0, 12)} -> ${after.head.slice(0, 12)}). Inspect history before committing; the final applier may have committed already.`);
+		}
+		if ((after.stagedNameStatus || "") !== (before.stagedNameStatus || "") || (after.stagedPatch || "") !== (before.stagedPatch || "")) {
+			warnings.push("Staged changes changed during the final applier run. Review `git diff --cached` and unstage anything that should remain under manual approval.");
+		}
+		return warnings.length > 0 ? warnings.join("\n") : undefined;
 	}
 
 	function buildSuggestedBestOfNCommitMessage(promptName: string, taskArgs: string[]): string {
@@ -923,7 +999,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		const addPatchCommand = `${gitBase} add --patch`;
 		const addIntentCommand = `${gitBase} add -N -- ${shellQuote("<path>")}`;
 		const command = `${gitBase} commit -m ${shellQuote(suggestedMessage)}`;
-		const changedStatus = statusLinesChangedAfter(options.beforeFinalApplier.status, options.afterFinalApplier.status);
+		const changedStatus = statusLinesChangedAfter(options.beforeFinalApplier, options.afterFinalApplier);
+		const guardWarnings = formatApprovalGuardWarnings(options.beforeFinalApplier, options.afterFinalApplier);
 		return [
 			"## Commit approval",
 			"",
@@ -933,6 +1010,12 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			`- ${formatRunReportCompletionLine(options.reportPath)}`,
 			`- Suggested commit: \`${suggestedMessage}\``,
 			"",
+			...(guardWarnings ? [
+				"Approval guard warnings:",
+				"```",
+				guardWarnings,
+				"```",
+			] : []),
 			"New status entries since final applier started:",
 			"```",
 			changedStatus,
@@ -998,6 +1081,17 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			"",
 			"[Final apply instructions]",
 			"Pick one winner or synthesize/cherry-pick from multiple variants, apply the final patch directly in the current repo, keep edits minimal, run obvious relevant verification when practical, and report changed files plus verification run.",
+		].join("\n");
+	}
+
+	function buildCommitAskFinalApplierTask(task: string): string {
+		return [
+			task,
+			"",
+			"Commit approval mode:",
+			"- Do not run `git add`, `git commit`, or any command that stages or commits changes.",
+			"- Leave all changes unstaged in the worktree for the user to review and approve after you finish.",
+			"- If you need git for verification or reporting, use read-only commands such as `git status` or `git diff`.",
 		].join("\n");
 	}
 
@@ -1089,6 +1183,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			notify(ctx, `cwd directory does not exist: ${compareCwd}`, "error");
 			return;
 		}
+		const approvalCwd = prompt.commit === "ask" ? (resolveGitRoot(compareCwd) ?? compareCwd) : compareCwd;
 
 		const baseModel = await resolveCompareBaseModel(prompt, currentModel, ctx, runtime.model);
 		if (!baseModel) return;
@@ -1253,7 +1348,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			const beforeFinalApplierSnapshot = prompt.commit === "ask" ? captureGitSnapshot(compareCwd) : undefined;
+			const beforeFinalApplierSnapshot = prompt.commit === "ask" ? captureGitSnapshot(approvalCwd) : undefined;
+			const finalApplierTask = buildLineupSlotTask(DEFAULT_COMPARE_FINAL_APPLIER_TASK, normalizedFinalApplier, taskArgs);
 			const finalResult = await executeSubagentPromptStep({
 				pi,
 				ctx,
@@ -1269,7 +1365,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				prompt: buildComparePrompt(prompt, {
 					name: `${prompt.name}-final-applier`,
 					agent: normalizedFinalApplier.agent,
-					task: buildLineupSlotTask(DEFAULT_COMPARE_FINAL_APPLIER_TASK, normalizedFinalApplier, taskArgs),
+					task: prompt.commit === "ask" ? buildCommitAskFinalApplierTask(finalApplierTask) : finalApplierTask,
 					model: normalizedFinalApplier.model,
 					cwd: compareCwd,
 					inheritContext: false,
@@ -1277,7 +1373,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				args: [],
 			});
 			if (!finalResult?.text) return;
-			const afterFinalApplierSnapshot = prompt.commit === "ask" ? captureGitSnapshot(compareCwd) : undefined;
+			const afterFinalApplierSnapshot = prompt.commit === "ask" ? captureGitSnapshot(approvalCwd) : undefined;
 			const reportFinalApplier = buildReportLineupSlots([normalizedFinalApplier], finalResult.preparedTasks)[0];
 			const reportPath = tryWriteBestOfNRunReport({
 				compareCwd,
@@ -1300,7 +1396,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				finalText: finalResult.text,
 			}, ctx);
 			const commitAsk = prompt.commit === "ask" && beforeFinalApplierSnapshot && afterFinalApplierSnapshot
-				? renderBestOfNCommitAsk({ compareCwd, promptName: name, taskArgs, reportPath, beforeFinalApplier: beforeFinalApplierSnapshot, afterFinalApplier: afterFinalApplierSnapshot })
+				? renderBestOfNCommitAsk({ compareCwd: approvalCwd, promptName: name, taskArgs, reportPath, beforeFinalApplier: beforeFinalApplierSnapshot, afterFinalApplier: afterFinalApplierSnapshot })
 				: "";
 			pi.sendUserMessage(`[Compare apply complete: ${name}]\n\n${formatRunReportCompletionLine(reportPath)}\n\n${finalResult.text}`);
 			if (commitAsk) {
@@ -1311,7 +1407,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					details: {
 						approvalText: commitAsk,
 						promptName: name,
-						compareCwd,
+						compareCwd: approvalCwd,
 						reportPath,
 						commit: "ask",
 					},
