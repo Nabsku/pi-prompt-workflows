@@ -219,7 +219,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		runtimePreset: string | undefined,
 		ctx: ExtensionCommandContext,
 		catalogCwd: string,
-	): Promise<{ workers?: DelegationLineupSlot[]; reviewers?: DelegationLineupSlot[] } | undefined> {
+	): Promise<{ workers?: DelegationLineupSlot[]; reviewers?: DelegationLineupSlot[]; maxModelCalls?: number } | undefined> {
 		const presetName = runtimePreset ?? prompt.preset;
 		if (!presetName) return {};
 		const catalog = loadBestOfNPresetCatalog(catalogCwd);
@@ -235,6 +235,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		return {
 			workers: applyPresetDefaultModel(preset.workers, preset.defaultModel),
 			reviewers: applyPresetDefaultModel(preset.reviewers, preset.defaultModel),
+			maxModelCalls: preset.maxModelCalls,
 		};
 	}
 
@@ -846,6 +847,11 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				? requestedReviewers
 				: [{ agent: "reviewer" }],
 		);
+		const presetModelCalls = workerSlots.length + reviewerSlots.length;
+		if (presetLineup.maxModelCalls !== undefined && presetModelCalls > presetLineup.maxModelCalls) {
+			notify(ctx, `Best-of-N preset model-call cap exceeded: requested ${presetModelCalls} worker/reviewer call(s), but preset allows ${presetLineup.maxModelCalls}.`, "error");
+			return;
+		}
 
 		const normalizedWorkers = normalizeLineupCwds(workerSlots, compareCwd, ctx);
 		if (!normalizedWorkers) return;
@@ -1705,7 +1711,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			}
 		}
 
-		const hasCompareLineup = prompt.workers !== undefined || prompt.reviewers !== undefined || prompt.finalApplier !== undefined || prompt.preset !== undefined || subagent.preset !== undefined;
+		const hasCompareLineup = prompt.workers !== undefined || prompt.reviewers !== undefined || prompt.finalApplier !== undefined || prompt.preset !== undefined;
 		if (hasCompareLineup) {
 			await runComparePrompt(
 				name,
@@ -1722,6 +1728,10 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				},
 			);
 			return;
+		}
+
+		if (subagent.preset) {
+			notify(ctx, `--preset is only supported on compare prompts (ignored)`, "warning");
 		}
 
 		if (prompt.chain) {

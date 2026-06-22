@@ -153,18 +153,29 @@ Supports exact IDs, `provider/model-id` pairs, wildcards (`anthropic/*`), and co
 
 ## Best-of-N Compare
 
-Run multiple workers, aggregate with reviewers, optionally apply final changes:
+Run multiple workers, aggregate with reviewers, optionally apply final changes. Put workflow policy in the prompt and reusable lineup choices in optional presets:
+
+```json
+{
+  "presets": {
+    "quick": {
+      "defaultModel": "openai-codex/gpt-5.4-mini:low",
+      "maxModelCalls": 3,
+      "workers": [{ "agent": "delegate", "count": 2 }],
+      "reviewers": [{ "agent": "reviewer" }]
+    }
+  }
+}
+```
+
+Preset files live at `~/.pi/agent/best-of-n-presets.json` and `<compare-cwd>/.pi/best-of-n-presets.json`. Project presets override user presets after approval. Preset slots only support `agent`/`subagent`, `model`, and `count`; keep `task`, `taskSuffix`, `cwd`, `finalApplier`, `worktree`, and dirty/report/commit policy in prompt templates.
 
 ```yaml
 ---
 description: Best-of-N code review
 bestOfN:
+  preset: quick
   worktree: true            # required if using finalApplier
-  workers:
-    - model: openai-codex/gpt-5.4-mini:low
-      count: 2
-  reviewers:
-    - model: anthropic/claude-sonnet-4-20250514:medium
   finalApplier:
     agent: delegate
     model: anthropic/claude-sonnet-4-20250514:high
@@ -185,5 +196,6 @@ Override frontmatter at invocation:
 - `--cwd=/absolute/path` — working directory override when the prompt supports `cwd`
 - `--chain-context` — pass summaries to later delegated chain steps
 - `--worktree` — use git worktrees for parallel delegated work
+- `--preset=<name>` / `--preset <name>` — select a best-of-N preset for compare prompts only
 
 When stuck, check `README.md` and `examples/best-of-n.md` in this extension.

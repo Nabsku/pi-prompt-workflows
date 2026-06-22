@@ -2412,6 +2412,8 @@ test("loadBestOfNPresetCatalog rejects invalid preset files and presets", () => 
 				presets: {
 					badEmpty: { workers: [] },
 					badPartial: { workers: [], reviewers: [{ agent: "reviewer" }] },
+					badPolicy: { workers: [{ agent: "delegate", taskSuffix: "do more", cwd: "/tmp/repo" }] },
+					badTopLevel: { workers: [{ agent: "delegate" }], commit: "auto" },
 					badModel: { workers: [{ model: "bad model" }] },
 					badCap: { workers: [{ agent: "delegate" }], maxModelCalls: 0 },
 					good: { workers: [{ subagent: true, count: "2" }] },
@@ -2421,10 +2423,12 @@ test("loadBestOfNPresetCatalog rejects invalid preset files and presets", () => 
 
 		const catalog = loadBestOfNPresetCatalog(cwd);
 		assert.deepEqual([...catalog.presets.keys()], ["good"]);
-		assert.deepEqual([...catalog.invalidPresetNames].sort(), ["badCap", "badEmpty", "badModel", "badPartial"]);
+		assert.deepEqual([...catalog.invalidPresetNames].sort(), ["badCap", "badEmpty", "badModel", "badPartial", "badPolicy", "badTopLevel"]);
 		assert.equal(catalog.presets.get("good")?.workers?.[0]?.agent, "delegate");
 		assert.equal(catalog.presets.get("good")?.workers?.[0]?.count, 2);
-		assert.equal(catalog.diagnostics.filter((diagnostic) => diagnostic.code === "invalid-best-of-n-preset").length, 4);
+		assert.equal(catalog.diagnostics.filter((diagnostic) => diagnostic.code === "invalid-best-of-n-preset").length, 6);
+		assert.match(catalog.diagnostics.map((diagnostic) => diagnostic.message).join("\n"), /unsupported field\(s\): taskSuffix, cwd/);
+		assert.match(catalog.diagnostics.map((diagnostic) => diagnostic.message).join("\n"), /unsupported field\(s\): commit/);
 	});
 });
 
