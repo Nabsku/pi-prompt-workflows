@@ -779,6 +779,7 @@ test("compare prompt commit ask mode reports changed files without committing", 
 
 			assert.equal(phase, 3);
 			writeFileSync(join(cwd, "README.md"), "after\n");
+			writeFileSync(join(cwd, "NEW.md"), "new\n");
 			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
 				...request,
 				messages: [{ role: "assistant", content: [{ type: "text", text: "Applied final patch." }] }],
@@ -789,21 +790,34 @@ test("compare prompt commit ask mode reports changed files without committing", 
 		await pi.commands.get("compare")!.handler('bug $(touch nope)', ctx);
 		assert.equal(phase, 3);
 		assert.equal(pi.userMessages.length, 1);
+		assert.equal(pi.customMessages.length, 4);
 		assert.match(pi.userMessages[0]!, /\[Compare apply complete: compare\]/);
-		assert.match(pi.userMessages[0]!, /## Commit approval/);
-		assert.match(pi.userMessages[0]!, /`bestOfN\.commit: ask` is enabled/);
-		assert.match(pi.userMessages[0]!, /New status entries since final applier started:/);
-		assert.match(pi.userMessages[0]!, /Pre-existing status before final applier:/);
-		assert.match(pi.userMessages[0]!, /M README\.md/);
-		assert.match(pi.userMessages[0]!, /README\.md/);
-		assert.doesNotMatch(pi.userMessages[0]!, /New status entries since final applier started:[\s\S]*\.pi\/runs[\s\S]*Pre-existing status/);
-		assert.match(pi.userMessages[0]!, /git add --patch/);
-		assert.doesNotMatch(pi.userMessages[0]!, /git add -A/);
-		assert.match(pi.userMessages[0]!, /git commit -m 'feat: apply compare best-of-n result: bug \$\(touch nope\)'/);
+		assert.doesNotMatch(pi.userMessages[0]!, /## Commit approval/);
+		const commitAsk = pi.customMessages.at(-1)!;
+		assert.equal(commitAsk.customType, "prompt-template-commit-ask");
+		assert.equal(commitAsk.display, true);
+		assert.equal(commitAsk.content, "[Commit approval: compare]");
+		assert.doesNotMatch(commitAsk.content, /git -C|git commit|git add|\$\(touch nope\)/);
+		const approvalText = commitAsk.details.approvalText;
+		assert.match(approvalText, /## Commit approval/);
+		assert.match(approvalText, /`bestOfN\.commit: ask` is enabled/);
+		assert.match(approvalText, /New status entries since final applier started:/);
+		assert.match(approvalText, /Pre-existing status before final applier:/);
+		assert.match(approvalText, /M README\.md/);
+		assert.match(approvalText, /\?\? NEW\.md/);
+		assert.match(approvalText, /For intended new files shown as `\?\?`/);
+		assert.match(approvalText, /git -C '[^']+' add -N -- '<path>'/);
+		assert.match(approvalText, /README\.md/);
+		assert.doesNotMatch(approvalText, /New status entries since final applier started:[\s\S]*\.pi\/runs[\s\S]*Pre-existing status/);
+		assert.match(approvalText, /git -C '[^']+' add --patch/);
+		assert.doesNotMatch(approvalText, /git add -A/);
+		assert.match(approvalText, /git -C '[^']+' commit -m 'feat: apply compare best-of-n result: bug \$\(touch nope\)'/);
 		const runRoot = join(cwd, ".pi", "runs", "best-of-n");
 		const runDir = join(runRoot, readdirSync(runRoot)[0]!);
 		assert.match(readFileSync(join(runDir, "lineup.json"), "utf8"), /"commit": "ask"/);
-		assert.match(execFileSync("git", ["status", "--short"], { cwd, encoding: "utf8" }), / M README\.md/);
+		const status = execFileSync("git", ["status", "--short"], { cwd, encoding: "utf8" });
+		assert.match(status, / M README\.md/);
+		assert.match(status, /\?\? NEW\.md/);
 	});
 });
 
