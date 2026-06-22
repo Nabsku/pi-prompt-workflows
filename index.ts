@@ -74,6 +74,8 @@ interface LoopState {
 	rotationLabel?: string;
 }
 
+type ReportLineupSlot = DelegationLineupSlot & { effectiveModel: string };
+
 interface FreshCollapse {
 	targetId: string;
 	task: string;
@@ -750,14 +752,37 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		return { args: cleaned.trim(), keepArtifacts };
 	}
 
-	function serializeLineupSlot(slot: DelegationLineupSlot): Record<string, unknown> {
+	function formatModelRef(model: Model<any>): string {
+		return `${model.provider}/${model.id}`;
+	}
+
+	async function resolveReportLineupSlot(slot: DelegationLineupSlot, inheritedModel: Model<any>, ctx: ExtensionCommandContext): Promise<ReportLineupSlot> {
+		if (!slot.model) return { ...slot, effectiveModel: formatModelRef(inheritedModel) };
+		const selected = await selectModelCandidate([slot.model], inheritedModel, ctx.modelRegistry);
+		return { ...slot, effectiveModel: selected ? formatModelRef(selected.model) : slot.model };
+	}
+
+	async function resolveReportLineupSlots(slots: DelegationLineupSlot[], inheritedModel: Model<any>, ctx: ExtensionCommandContext): Promise<ReportLineupSlot[]> {
+		return Promise.all(slots.map((slot) => resolveReportLineupSlot(slot, inheritedModel, ctx)));
+	}
+
+	function serializeLineupSlot(slot: ReportLineupSlot): Record<string, unknown> {
 		return {
 			agent: slot.agent,
 			...(slot.model ? { model: slot.model } : {}),
+			effectiveModel: slot.effectiveModel,
 			...(slot.cwd ? { cwd: slot.cwd } : {}),
 			...(slot.task ? { task: slot.task } : {}),
 			...(slot.taskSuffix ? { taskSuffix: slot.taskSuffix } : {}),
 		};
+	}
+
+	function formatRunArtifactResult(result: DelegatedPromptParallelResult): string {
+		const text = result.text?.trim();
+		if (!result.isError) return text || "(no assistant text)";
+		const parts = [`Error: ${result.errorText || "(error)"}`];
+		if (text) parts.push("", "Assistant output:", text);
+		return parts.join("\n");
 	}
 
 	function renderRunReportSection(title: string, body?: string): string[] {
@@ -772,9 +797,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		taskArgs: string[];
 		presetName?: string;
 		keepArtifacts: boolean;
-		workers: DelegationLineupSlot[];
-		reviewers: DelegationLineupSlot[];
-		finalApplier?: DelegationLineupSlot;
+		workers: ReportLineupSlot[];
+		reviewers: ReportLineupSlot[];
+		finalApplier?: ReportLineupSlot;
 		workerPairs: Array<{ index: number; slot: DelegationLineupSlot; result: DelegatedPromptParallelResult }>;
 		reviewerPairs: Array<{ index: number; slot: DelegationLineupSlot; result: DelegatedPromptParallelResult }>;
 		workerSummary: string;
@@ -796,8 +821,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			finalApplier: options.finalApplier ? serializeLineupSlot(options.finalApplier) : undefined,
 		}, null, 2)}\n`);
 		if (options.keepArtifacts) {
-			for (const { index, result } of options.workerPairs) writeFileSync(join(runDir, `worker-${index + 1}.md`), `${result.isError ? result.errorText || "(error)" : result.text || "(no assistant text)"}\n`);
-			for (const { index, result } of options.reviewerPairs) writeFileSync(join(runDir, `reviewer-${index + 1}.md`), `${result.isError ? result.errorText || "(error)" : result.text || "(no assistant text)"}\n`);
+			for (const { index, result } of options.workerPairs) writeFileSync(join(runDir, `worker-${index + 1}.md`), `${formatRunArtifactResult(result)}\n`);
+			for (const { index, result } of options.reviewerPairs) writeFileSync(join(runDir, `reviewer-${index + 1}.md`), `${formatRunArtifactResult(result)}\n`);
 			if (options.finalText) writeFileSync(join(runDir, "final-applier.md"), `${options.finalText}\n`);
 		}
 		const report = [
@@ -820,6 +845,20 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		].join("\n");
 		writeFileSync(join(runDir, "report.md"), report);
 		return join(runDir, "report.md");
+	}
+
+	function tryWriteBestOfNRunReport(options: Parameters<typeof writeBestOfNRunReport>[0], ctx: ExtensionCommandContext): string | undefined {
+		try {
+			return writeBestOfNRunReport(options);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			notify(ctx, `Best-of-N report could not be written: ${message}`, "warning");
+			return undefined;
+		}
+	}
+
+	function formatRunReportCompletionLine(reportPath: string | undefined): string {
+		return reportPath ? `Report: ${reportPath}` : "Report: unavailable (failed to write run artifacts)";
 	}
 
 	function buildReviewerPreamble(sharedTask: string, workerAggregation: string, workerFailureSummary?: string): string {
@@ -1002,6 +1041,12 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 
 		try {
+			const reportWorkers = await resolveReportLineupSlots(normalizedWorkers, baseModel, ctx);
+			const reportReviewers = await resolveReportLineupSlots(normalizedReviewers, baseModel, ctx);
+			const reportFinalApplier = normalizedFinalApplier
+				? await resolveReportLineupSlot(normalizedFinalApplier, baseModel, ctx)
+				: undefined;
+
 			const workerResult = await executeSubagentPromptStep({
 				pi,
 				ctx,
@@ -1082,7 +1127,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				const finalText = reviewerFailureSummary
 					? `${successfulReviewerText}\n\n${reviewerFailureSummary}`
 					: successfulReviewerText;
-				const reportPath = writeBestOfNRunReport({
+				const reportPath = tryWriteBestOfNRunReport({
 					compareCwd,
 					promptName: name,
 					status: "review-complete",
@@ -1090,17 +1135,17 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					taskArgs,
 					presetName: runtime.preset ?? prompt.preset,
 					keepArtifacts,
-					workers: normalizedWorkers,
-					reviewers: normalizedReviewers,
-					finalApplier: normalizedFinalApplier,
+					workers: reportWorkers,
+					reviewers: reportReviewers,
+					finalApplier: reportFinalApplier,
 					workerPairs,
 					reviewerPairs,
 					workerSummary: successfulWorkerText,
 					workerFailures: workerFailureSummary,
 					reviewerSummary: successfulReviewerText,
 					reviewerFailures: reviewerFailureSummary,
-				});
-				pi.sendUserMessage(`[Compare review complete: ${name}]\n\nReport: ${reportPath}\n\n${finalText}`);
+				}, ctx);
+				pi.sendUserMessage(`[Compare review complete: ${name}]\n\n${formatRunReportCompletionLine(reportPath)}\n\n${finalText}`);
 				await waitForTurnStart(ctx);
 				await ctx.waitForIdle();
 				return;
@@ -1129,7 +1174,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				args: [],
 			});
 			if (!finalResult?.text) return;
-			const reportPath = writeBestOfNRunReport({
+			const reportPath = tryWriteBestOfNRunReport({
 				compareCwd,
 				promptName: name,
 				status: "apply-complete",
@@ -1137,9 +1182,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				taskArgs,
 				presetName: runtime.preset ?? prompt.preset,
 				keepArtifacts,
-				workers: normalizedWorkers,
-				reviewers: normalizedReviewers,
-				finalApplier: normalizedFinalApplier,
+				workers: reportWorkers,
+				reviewers: reportReviewers,
+				finalApplier: reportFinalApplier,
 				workerPairs,
 				reviewerPairs,
 				workerSummary: successfulWorkerText,
@@ -1147,8 +1192,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				reviewerSummary: successfulReviewerText,
 				reviewerFailures: reviewerFailureSummary,
 				finalText: finalResult.text,
-			});
-			pi.sendUserMessage(`[Compare apply complete: ${name}]\n\nReport: ${reportPath}\n\n${finalResult.text}`);
+			}, ctx);
+			pi.sendUserMessage(`[Compare apply complete: ${name}]\n\n${formatRunReportCompletionLine(reportPath)}\n\n${finalResult.text}`);
 			await waitForTurnStart(ctx);
 			await ctx.waitForIdle();
 		} catch (error) {

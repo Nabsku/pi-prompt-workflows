@@ -646,7 +646,7 @@ test("compare prompt expands count, applies taskSuffix, and runs a final applier
 					messages: [],
 					parallelResults: [
 						{ agent: "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: "Winner: worker 2" }] }], isError: false },
-						{ agent: "reviewer", messages: [], isError: true, errorText: "quota" },
+						{ agent: "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: "Partial reviewer draft" }] }], isError: true, errorText: "quota" },
 					],
 					isError: false,
 				});
@@ -693,15 +693,70 @@ test("compare prompt expands count, applies taskSuffix, and runs a final applier
 		assert.match(report, /Final apply: combined worker 2 with worker 1 tests\./);
 		const lineup = JSON.parse(readFileSync(join(runDir, "lineup.json"), "utf8"));
 		assert.equal(lineup.workers.length, 3);
+		assert.equal(lineup.workers[0].effectiveModel, "anthropic/claude-sonnet-4-20250514");
 		assert.equal(lineup.workers[0].taskSuffix, "Save findings to `.compare-findings/w1.md`.");
 		assert.equal(lineup.workers[1].agent, "delegate");
+		assert.equal(lineup.workers[2].effectiveModel, "anthropic/claude-sonnet-4-20250514");
 		assert.equal(lineup.reviewers.length, 2);
+		assert.equal(lineup.reviewers[0].effectiveModel, "anthropic/claude-sonnet-4-20250514");
 		assert.equal(lineup.reviewers[0].taskSuffix, "Mention `.compare-findings/w1.md` in the recommendation.");
 		assert.equal(lineup.finalApplier.agent, "reviewer");
+		assert.equal(lineup.finalApplier.effectiveModel, "anthropic/claude-sonnet-4-20250514");
 		assert.equal(lineup.finalApplier.taskSuffix, "Apply the best patch and report verification.");
 		assert.equal(existsSync(join(runDir, "worker-1.md")), true);
 		assert.equal(existsSync(join(runDir, "reviewer-2.md")), true);
+		const failedReviewerArtifact = readFileSync(join(runDir, "reviewer-2.md"), "utf8");
+		assert.match(failedReviewerArtifact, /Error: quota/);
+		assert.match(failedReviewerArtifact, /Assistant output:\nPartial reviewer draft/);
 		assert.equal(existsSync(join(runDir, "final-applier.md")), true);
+	});
+});
+
+test("compare prompt still sends completion when best-of-N report writes fail", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "runs"), "not a directory");
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "compare.md"),
+			[
+				"---",
+				"bestOfN:",
+				"  workers:",
+				"    - agent: delegate",
+				"  reviewers:",
+				"    - agent: reviewer",
+				"---",
+				"Fix: $@",
+			].join("\n"),
+		);
+
+		const pi = new FakePi();
+		const { ctx } = createContext(cwd, pi);
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+
+		let phase = 0;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+			const request = payload as any;
+			phase++;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [],
+				parallelResults: [
+					{ agent: phase === 1 ? "delegate" : "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: phase === 1 ? "worker output" : "reviewer output" }] }], isError: false },
+				],
+				isError: false,
+			});
+		});
+
+		await pi.commands.get("compare")!.handler("bug", ctx);
+		assert.equal(phase, 2);
+		assert.equal(pi.userMessages.length, 1);
+		assert.match(pi.userMessages[0]!, /\[Compare review complete: compare\]/);
+		assert.match(pi.userMessages[0]!, /Report: unavailable \(failed to write run artifacts\)/);
+		assert.match(pi.userMessages[0]!, /reviewer output/);
 	});
 });
 
