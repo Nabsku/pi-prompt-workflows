@@ -636,7 +636,6 @@ test("prompt-library model-conditional body promotes command-capable files", () 
 	});
 });
 
-
 test("prompt-library command marker matrix matches runtime and source inventory", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
@@ -2432,6 +2431,22 @@ test("loadBestOfNPresetCatalog rejects invalid preset files and presets", () => 
 	});
 });
 
+test("loadBestOfNPresetCatalog fails closed when project preset file is invalid", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(root, ".pi", "agent"), { recursive: true });
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(join(root, ".pi", "agent", "best-of-n-presets.json"), JSON.stringify({ presets: { quick: { workers: [{ agent: "delegate" }] } } }));
+		writeFileSync(join(cwd, ".pi", "best-of-n-presets.json"), "{ not json");
+
+		const catalog = loadBestOfNPresetCatalog(cwd);
+
+		assert.equal(catalog.projectFileInvalid, true);
+		assert.equal(catalog.presets.has("quick"), false);
+		assert.equal(catalog.diagnostics.some((diagnostic) => diagnostic.code === "invalid-best-of-n-presets-file"), true);
+	});
+});
+
 test("loadPromptsWithModel validates bestOfN compare lineups and cutover diagnostics", () => {
 	withTempHome((root) => {
 		const cases = [
@@ -2696,7 +2711,6 @@ test("reserved built-in command mirror is explicit", () => {
 		"validate-prompts",
 	].sort());
 });
-
 
 test("prompt-library includes render plain fragments and preserve prompt-library graph root kind", () => {
 	withTempHome((root) => {

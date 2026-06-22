@@ -1179,6 +1179,30 @@ test("best-of-N preset maxModelCalls aborts before delegation", async () => {
 	});
 });
 
+test("best-of-N preset maxModelCalls aborts before expanding huge counts", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(root, ".pi", "agent"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "compare.md"), "---\nbestOfN:\n  preset: capped\n---\n$@");
+		writeFileSync(
+			join(root, ".pi", "agent", "best-of-n-presets.json"),
+			JSON.stringify({ presets: { capped: { maxModelCalls: 2, workers: [{ agent: "delegate", count: 1000000000 }], reviewers: [{ agent: "reviewer" }] } } }),
+		);
+
+		const pi = new FakePi();
+		const { ctx } = createContext(cwd, pi);
+		promptModelExtension(pi as never);
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, () => {
+			assert.fail("maxModelCalls should reject before expanding huge counts");
+		});
+
+		await pi.emit("session_start", {}, ctx);
+		await pi.commands.get("compare")!.handler("fix it", ctx);
+		assert.equal(pi.userMessages.length, 0);
+	});
+});
+
 test("runtime --preset is ignored for non-compare prompts", async () => {
 	await withTempHome(async (root) => {
 		const cwd = join(root, "project");

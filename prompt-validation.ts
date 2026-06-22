@@ -329,16 +329,18 @@ function validateComparePrompts(cwd: string, result: PromptValidationResult, pro
 		return catalog;
 	}
 	for (const prompt of prompts.values()) {
-		const presetCatalog = catalogFor(prompt.cwd ?? cwd);
-		if (prompt.preset && !presetCatalog.presets.has(prompt.preset)) {
-			result.diagnostics.push(
-				createValidationDiagnostic(
-					"best-of-n-preset-not-found",
-					prompt.filePath,
-					prompt.source,
-					`Prompt template ${prompt.filePath} references missing best-of-N preset ${JSON.stringify(prompt.preset)}.`,
-				),
-			);
+		if (prompt.preset) {
+			const presetCatalog = catalogFor(prompt.cwd ?? cwd);
+			if (!presetCatalog.presets.has(prompt.preset)) {
+				result.diagnostics.push(
+					createValidationDiagnostic(
+						"best-of-n-preset-not-found",
+						prompt.filePath,
+						prompt.source,
+						`Prompt template ${prompt.filePath} references missing best-of-N preset ${JSON.stringify(prompt.preset)}.`,
+					),
+				);
+			}
 		}
 
 		if (prompt.finalApplier && prompt.worktree !== true) {
