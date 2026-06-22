@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.14.0](https://github.com/Nabsku/pi-prompt-template-model-enhanced/compare/v0.13.1...v0.14.0) (2026-06-22)
+
+
+### Features
+
+* add best-of-n preset resolution ([e0f45e6](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/e0f45e64490e6874e6693e7b6450954d7f9dde64))
+
+
+### Bug Fixes
+
+* address best-of-n preset review comments ([0dfdf80](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/0dfdf8065c0a241f0786f7271800b1c877b117cc))
+* close preset review edge cases ([df85bf3](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/df85bf3d86c2f43bcbec8d9fdb150e2fde37e61f))
+* close preset validation review gaps ([1822061](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/1822061ae90ee9b5ee2d7ea222ce9cabc9698e79))
+* harden best-of-n preset overrides ([caa0981](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/caa0981936d5e264f5e2dd334d9f0e1abe59aa59))
+* harden project preset resolution ([04cddc9](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/04cddc919256b0c40b28a51b67c185a592f899fb))
+* prevent invalid project presets from falling through ([8b0f589](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/8b0f5899ca5ebd1350218cd0d87d24af891a9656))
+* validate presets from prompt cwd ([ce97729](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/ce9772947bf31abbc1fc4481bdc13bf51385da62))
+
 ## [0.13.1](https://github.com/Nabsku/pi-prompt-template-model-enhanced/compare/v0.13.0...v0.13.1) (2026-06-21)
 
 
