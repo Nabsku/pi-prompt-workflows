@@ -15,7 +15,7 @@ const PREVIEW_LINES = 24;
 function sanitizeApprovalLine(line: string): string {
 	return Array.from(line).map((char) => {
 		const code = char.charCodeAt(0);
-		return code < 32 || code === 127 ? `\\u${code.toString(16).padStart(4, "0")}` : char;
+		return code < 32 || (code >= 127 && code <= 159) ? `\\u${code.toString(16).padStart(4, "0")}` : char;
 	}).join("");
 }
 

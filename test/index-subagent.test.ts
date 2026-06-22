@@ -734,14 +734,18 @@ test("compare prompt commit ask mode reports changed files without committing", 
 		writeFileSync(join(cwd, "README.md"), "before\n");
 		writeFileSync(join(cwd, "foo bar.ts"), "before\n");
 		writeFileSync(join(cwd, "tab	file.ts"), "before\n");
+		writeFileSync(join(cwd, "é.txt"), "before\n");
+		writeFileSync(join(cwd, "script.sh"), "#!/bin/sh\necho before\n");
 		execFileSync("git", ["init"], { cwd });
 		execFileSync("git", ["config", "user.email", "test@example.com"], { cwd });
 		execFileSync("git", ["config", "user.name", "Test User"], { cwd });
-		execFileSync("git", ["add", "README.md", "foo bar.ts", "tab	file.ts"], { cwd });
+		execFileSync("git", ["add", "README.md", "foo bar.ts", "tab	file.ts", "é.txt", "script.sh"], { cwd });
 		execFileSync("git", ["commit", "-m", "initial"], { cwd });
 		writeFileSync(join(cwd, "README.md"), "pre-existing dirty\n");
 		writeFileSync(join(cwd, "foo bar.ts"), "pre-existing dirty\n");
 		writeFileSync(join(cwd, "tab	file.ts"), "pre-existing dirty\n");
+		writeFileSync(join(cwd, "é.txt"), "pre-existing dirty\n");
+		writeFileSync(join(cwd, "script.sh"), "#!/bin/sh\necho dirty\n");
 		writeFileSync(
 			join(cwd, ".pi", "prompts", "compare.md"),
 			[
@@ -788,6 +792,8 @@ test("compare prompt commit ask mode reports changed files without committing", 
 			writeFileSync(join(cwd, "README.md"), "after\n");
 			writeFileSync(join(cwd, "foo bar.ts"), "after\n");
 			writeFileSync(join(cwd, "tab	file.ts"), "after\n");
+			writeFileSync(join(cwd, "é.txt"), "after\n");
+			execFileSync("chmod", ["+x", "script.sh"], { cwd });
 			writeFileSync(join(cwd, "NEW.md"), "new\n");
 			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
 				...request,
@@ -816,6 +822,8 @@ test("compare prompt commit ask mode reports changed files without committing", 
 		assert.match(approvalText, /^ M README\.md$/m);
 		assert.match(approvalText, /^ M "foo bar\.ts"$/m);
 		assert.ok(approvalText.includes(' M "tab\\tfile.ts"'));
+		assert.ok(approvalText.includes(' M "\\303\\251.txt"'));
+		assert.match(approvalText, /^ M script\.sh$/m);
 		assert.doesNotMatch(approvalText, /^M README\.md$/m);
 		assert.match(approvalText, /\?\? NEW\.md/);
 		assert.match(approvalText, /For intended new files shown as `\?\?`/);
