@@ -85,6 +85,8 @@ interface GitSnapshot {
 	shortStat?: string;
 	diffPatch?: string;
 	stagedPatch?: string;
+	diffRaw?: string;
+	stagedRaw?: string;
 	stagedNameStatus?: string;
 }
 
@@ -901,6 +903,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			shortStat: runGitCapture(cwd, ["diff", "--no-ext-diff", "--shortstat", "HEAD"]),
 			diffPatch: runGitCapture(cwd, ["diff", "--no-ext-diff", "HEAD"]),
 			stagedPatch: runGitCapture(cwd, ["diff", "--no-ext-diff", "--cached", "HEAD"]),
+			diffRaw: runGitCapture(cwd, ["diff", "--no-ext-diff", "--raw", "-z", "HEAD"]),
+			stagedRaw: runGitCapture(cwd, ["diff", "--no-ext-diff", "--cached", "--raw", "-z", "HEAD"]),
 			stagedNameStatus: runGitCapture(cwd, ["diff", "--no-ext-diff", "--cached", "--name-status", "HEAD"]),
 		};
 	}
@@ -908,6 +912,20 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	function splitGitDiffByPath(diff: string | undefined): Map<string, string> {
 		const blocks = new Map<string, string>();
 		if (!diff) return blocks;
+		if (diff.includes("\0")) {
+			const tokens = diff.split("\0").filter(Boolean);
+			for (let i = 0; i < tokens.length;) {
+				const header = tokens[i++];
+				if (!header?.startsWith(":")) continue;
+				const status = header.trim().split(/\s+/)[4] ?? "";
+				const firstPath = tokens[i++];
+				if (!firstPath) continue;
+				const secondPath = /^[RC]/.test(status) ? tokens[i++] : undefined;
+				const path = secondPath || firstPath;
+				blocks.set(path, [header, firstPath, secondPath].filter((value): value is string => Boolean(value)).join("\0"));
+			}
+			return blocks;
+		}
 		const lines = diff.split("\n");
 		let currentPath: string | undefined;
 		let currentBlock: string[] = [];
@@ -941,8 +959,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 	function diffChangedPaths(before: GitSnapshot, after: GitSnapshot): Set<string> {
 		return new Set([
-			...diffPatchChangedPaths(before.diffPatch, after.diffPatch),
-			...diffPatchChangedPaths(before.stagedPatch, after.stagedPatch),
+			...diffPatchChangedPaths(before.diffRaw, after.diffRaw),
+			...diffPatchChangedPaths(before.stagedRaw, after.stagedRaw),
 		]);
 	}
 
@@ -971,10 +989,32 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		return result;
 	}
 
+	function findUnquotedRenameSeparator(value: string): number {
+		let inQuote = false;
+		let escaped = false;
+		for (let i = 0; i <= value.length - 4; i++) {
+			const char = value[i]!;
+			if (escaped) {
+				escaped = false;
+				continue;
+			}
+			if (char === "\\" && inQuote) {
+				escaped = true;
+				continue;
+			}
+			if (char === '"') {
+				inQuote = !inQuote;
+				continue;
+			}
+			if (!inQuote && value.slice(i, i + 4) === " -> ") return i;
+		}
+		return -1;
+	}
+
 	function statusLinePath(line: string): string | undefined {
 		if (line.length < 4) return undefined;
 		const raw = line.slice(3);
-		const renameIndex = raw.indexOf(" -> ");
+		const renameIndex = findUnquotedRenameSeparator(raw);
 		return unquoteGitPath(renameIndex >= 0 ? raw.slice(renameIndex + 4) : raw);
 	}
 
