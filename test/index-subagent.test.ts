@@ -732,12 +732,14 @@ test("compare prompt commit ask mode reports changed files without committing", 
 		const cwd = join(root, "project");
 		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 		writeFileSync(join(cwd, "README.md"), "before\n");
+		writeFileSync(join(cwd, "foo bar.ts"), "before\n");
 		execFileSync("git", ["init"], { cwd });
 		execFileSync("git", ["config", "user.email", "test@example.com"], { cwd });
 		execFileSync("git", ["config", "user.name", "Test User"], { cwd });
-		execFileSync("git", ["add", "README.md"], { cwd });
+		execFileSync("git", ["add", "README.md", "foo bar.ts"], { cwd });
 		execFileSync("git", ["commit", "-m", "initial"], { cwd });
 		writeFileSync(join(cwd, "README.md"), "pre-existing dirty\n");
+		writeFileSync(join(cwd, "foo bar.ts"), "pre-existing dirty\n");
 		writeFileSync(
 			join(cwd, ".pi", "prompts", "compare.md"),
 			[
@@ -782,6 +784,7 @@ test("compare prompt commit ask mode reports changed files without committing", 
 			assert.match(request.task ?? "", /Commit approval mode:/);
 			assert.match(request.task ?? "", /Do not run `git add`, `git commit`/);
 			writeFileSync(join(cwd, "README.md"), "after\n");
+			writeFileSync(join(cwd, "foo bar.ts"), "after\n");
 			writeFileSync(join(cwd, "NEW.md"), "new\n");
 			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
 				...request,
@@ -808,6 +811,7 @@ test("compare prompt commit ask mode reports changed files without committing", 
 		assert.match(approvalText, /Pre-existing status before final applier:/);
 		assert.match(approvalText, /New status entries since final applier started:\n```\n[\s\S]*^ M README\.md$/m);
 		assert.match(approvalText, /^ M README\.md$/m);
+		assert.match(approvalText, /^ M "foo bar\.ts"$/m);
 		assert.doesNotMatch(approvalText, /^M README\.md$/m);
 		assert.match(approvalText, /\?\? NEW\.md/);
 		assert.match(approvalText, /For intended new files shown as `\?\?`/);
@@ -823,6 +827,76 @@ test("compare prompt commit ask mode reports changed files without committing", 
 		const status = execFileSync("git", ["status", "--short"], { cwd, encoding: "utf8" });
 		assert.match(status, / M README\.md/);
 		assert.match(status, /\?\? NEW\.md/);
+	});
+});
+
+test("compare prompt commit ask flags cleaned dirty files and pre-existing untracked entries", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, "README.md"), "before\n");
+		execFileSync("git", ["init"], { cwd });
+		execFileSync("git", ["config", "user.email", "test@example.com"], { cwd });
+		execFileSync("git", ["config", "user.name", "Test User"], { cwd });
+		execFileSync("git", ["add", "README.md"], { cwd });
+		execFileSync("git", ["commit", "-m", "initial"], { cwd });
+		writeFileSync(join(cwd, "README.md"), "pre-existing dirty\n");
+		writeFileSync(join(cwd, "scratch.md"), "pre-existing untracked\n");
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "compare.md"),
+			[
+				"---",
+				"bestOfN:",
+				"  workers:",
+				"    - agent: delegate",
+				"  reviewers:",
+				"    - agent: reviewer",
+				"  finalApplier:",
+				"    agent: reviewer",
+				"  worktree: true",
+				"  commit: ask",
+				"---",
+				"Fix: $@",
+			].join("\n"),
+		);
+
+		const pi = new FakePi();
+		const { ctx } = createContext(cwd, pi);
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+
+		let phase = 0;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+			const request = payload as any;
+			phase++;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			if (phase === 1 || phase === 2) {
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [],
+					parallelResults: [
+						{ agent: phase === 1 ? "delegate" : "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: phase === 1 ? "worker output" : "reviewer output" }] }], isError: false },
+					],
+					isError: false,
+				});
+				return;
+			}
+
+			writeFileSync(join(cwd, "README.md"), "before\n");
+			writeFileSync(join(cwd, "scratch.md"), "changed untracked\n");
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [{ role: "assistant", content: [{ type: "text", text: "Cleaned dirty file." }] }],
+				isError: false,
+			});
+		});
+
+		await pi.commands.get("compare")!.handler("bug", ctx);
+		assert.equal(phase, 3);
+		const approvalText = pi.customMessages.at(-1)!.details.approvalText;
+		assert.match(approvalText, /^ M README\.md \(pre-existing status entry removed or cleaned by final applier\)$/m);
+		assert.match(approvalText, /Pre-existing untracked entries were present before the final applier ran/);
+		assert.match(approvalText, /\?\? scratch\.md/);
 	});
 });
 
