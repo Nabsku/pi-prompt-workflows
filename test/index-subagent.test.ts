@@ -817,6 +817,7 @@ test("compare prompt commit ask mode reports changed files without committing", 
 		assert.match(approvalText, /For intended new files shown as `\?\?`/);
 		assert.match(approvalText, /git -C '[^']+' add -N -- '<path>'/);
 		assert.match(approvalText, /README\.md/);
+		assert.ok(approvalText.indexOf("add -N -- '<path>'") < approvalText.indexOf("add --patch"));
 		assert.doesNotMatch(approvalText, /New status entries since final applier started:[\s\S]*\.pi\/runs[\s\S]*Pre-existing status/);
 		assert.match(approvalText, /git -C '[^']+' add --patch/);
 		assert.doesNotMatch(approvalText, /git add -A/);
@@ -883,7 +884,7 @@ test("compare prompt commit ask flags cleaned dirty files and pre-existing untra
 			}
 
 			writeFileSync(join(cwd, "README.md"), "before\n");
-			writeFileSync(join(cwd, "scratch.md"), "changed untracked\n");
+			rmSync(join(cwd, "scratch.md"));
 			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
 				...request,
 				messages: [{ role: "assistant", content: [{ type: "text", text: "Cleaned dirty file." }] }],
@@ -982,6 +983,8 @@ test("compare prompt commit ask warns if final applier staged or committed", asy
 		execFileSync("git", ["config", "user.name", "Test User"], { cwd });
 		execFileSync("git", ["add", "README.md"], { cwd });
 		execFileSync("git", ["commit", "-m", "initial"], { cwd });
+		writeFileSync(join(cwd, "STAGED.md"), "pre-existing staged\n");
+		execFileSync("git", ["add", "STAGED.md"], { cwd });
 		writeFileSync(
 			join(cwd, ".pi", "prompts", "compare.md"),
 			[
@@ -1039,6 +1042,7 @@ test("compare prompt commit ask warns if final applier staged or committed", asy
 		const approvalText = commitAsk.details.approvalText;
 		assert.match(approvalText, /Approval guard warnings:/);
 		assert.match(approvalText, /HEAD changed during the final applier run/);
+		assert.match(approvalText, /Pre-existing staged changes were present before the final applier ran/);
 		assert.match(approvalText, /final applier may have committed already/);
 	});
 });

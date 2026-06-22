@@ -979,7 +979,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	}
 
 	function statusLinesChangedAfter(before: GitSnapshot, after: GitSnapshot): string {
-		if (!after.status) return "(git status unavailable or no changes detected)";
+		if (after.status === undefined) return "(git status unavailable or no changes detected)";
 		const beforeLines = (before.status || "").split("\n").filter(Boolean);
 		const afterLines = after.status.split("\n").filter(Boolean);
 		const beforeLineSet = new Set(beforeLines);
@@ -1006,6 +1006,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		const warnings: string[] = [];
 		if (before.head && after.head && before.head !== after.head) {
 			warnings.push(`HEAD changed during the final applier run (${before.head.slice(0, 12)} -> ${after.head.slice(0, 12)}). Inspect history before committing; the final applier may have committed already.`);
+		}
+		if ((before.stagedNameStatus || "") || (before.stagedPatch || "")) {
+			warnings.push("Pre-existing staged changes were present before the final applier ran. Review `git diff --cached` and unstage unrelated hunks before using the suggested commit command.");
 		}
 		if ((after.stagedNameStatus || "") !== (before.stagedNameStatus || "") || (after.stagedPatch || "") !== (before.stagedPatch || "")) {
 			warnings.push("Staged changes changed during the final applier run. Review `git diff --cached` and unstage anything that should remain under manual approval.");
@@ -1075,13 +1078,13 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			"```",
 			[options.beforeFinalApplier.diffStat, options.beforeFinalApplier.shortStat].filter((value): value is string => Boolean(value)).join("\n") || "(empty)",
 			"```",
-			"Stage only the intended tracked-file hunks, for example:",
-			"```bash",
-			addPatchCommand,
-			"```",
 			"For intended new files shown as `??`, first mark the path for patch selection (or explicitly stage the file):",
 			"```bash",
 			addIntentCommand,
+			"```",
+			"Stage only the intended tracked-file and intent-to-add hunks, for example:",
+			"```bash",
+			addPatchCommand,
 			"```",
 			"Then commit the staged changes:",
 			"```bash",

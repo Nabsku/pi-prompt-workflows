@@ -12,8 +12,12 @@ interface CommitAskMessage {
 
 const PREVIEW_LINES = 24;
 
+function sanitizeApprovalText(value: string): string {
+	return value.split("\n").map((line) => JSON.stringify(line).slice(1, -1)).join("\n");
+}
+
 export function renderCommitAskMessage(message: CommitAskMessage, options: MessageRenderOptions, theme: Theme) {
-	const content = typeof message.details?.approvalText === "string" ? message.details.approvalText : "";
+	const content = typeof message.details?.approvalText === "string" ? sanitizeApprovalText(message.details.approvalText) : "";
 	const container = new Container();
 	container.addChild(new Spacer(1));
 	const box = new Box(1, 1, (text: string) => theme.bg("toolPendingBg", text));
