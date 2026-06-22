@@ -39,7 +39,7 @@ import {
 } from "./prompt-skills.js";
 import { renderSkillLoaded } from "./skill-loaded-renderer.js";
 import { createToolManager } from "./tool-manager.js";
-import { executeSubagentPromptStep, type DelegatedPromptParallelResult } from "./subagent-step.js";
+import { executeSubagentPromptStep, type DelegatedPromptParallelResult, type PreparedDelegatedTask } from "./subagent-step.js";
 import { DEFAULT_SUBAGENT_NAME, PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE } from "./subagent-runtime.js";
 import { renderDelegatedSubagentResult } from "./subagent-renderer.js";
 import {
@@ -752,18 +752,15 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		return { args: cleaned.trim(), keepArtifacts };
 	}
 
-	function formatModelRef(model: Model<any>): string {
-		return `${model.provider}/${model.id}`;
-	}
-
-	async function resolveReportLineupSlot(slot: DelegationLineupSlot, inheritedModel: Model<any>, ctx: ExtensionCommandContext, effectiveTask: string): Promise<ReportLineupSlot> {
-		if (!slot.model) return { ...slot, effectiveModel: formatModelRef(inheritedModel), effectiveTask };
-		const selected = await selectModelCandidate([slot.model], inheritedModel, ctx.modelRegistry);
-		return { ...slot, effectiveModel: selected ? formatModelRef(selected.model) : slot.model, effectiveTask };
-	}
-
-	async function resolveReportLineupSlots(slots: DelegationLineupSlot[], inheritedModel: Model<any>, ctx: ExtensionCommandContext, effectiveTaskForSlot: (slot: DelegationLineupSlot) => string): Promise<ReportLineupSlot[]> {
-		return Promise.all(slots.map((slot) => resolveReportLineupSlot(slot, inheritedModel, ctx, effectiveTaskForSlot(slot))));
+	function buildReportLineupSlots(slots: DelegationLineupSlot[], preparedTasks: PreparedDelegatedTask[]): ReportLineupSlot[] {
+		return slots.map((slot, index) => {
+			const prepared = preparedTasks[index];
+			return {
+				...slot,
+				effectiveModel: prepared?.model ?? slot.model ?? "unknown",
+				effectiveTask: prepared?.task ?? "",
+			};
+		});
 	}
 
 	function serializeLineupSlot(slot: ReportLineupSlot): Record<string, unknown> {
@@ -1042,12 +1039,6 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 
 		try {
-			const reportWorkers = await resolveReportLineupSlots(normalizedWorkers, baseModel, ctx, (slot) => buildLineupSlotTask(sharedTask, slot, taskArgs));
-			const reportReviewers = await resolveReportLineupSlots(normalizedReviewers, baseModel, ctx, (slot) => buildLineupSlotTask(DEFAULT_COMPARE_REVIEWER_TASK, slot, taskArgs));
-			const reportFinalApplier = normalizedFinalApplier
-				? await resolveReportLineupSlot(normalizedFinalApplier, baseModel, ctx, buildLineupSlotTask(DEFAULT_COMPARE_FINAL_APPLIER_TASK, normalizedFinalApplier, taskArgs))
-				: undefined;
-
 			const workerResult = await executeSubagentPromptStep({
 				pi,
 				ctx,
@@ -1119,6 +1110,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				? renderComparePhaseResults("Reviewer", successfulReviewers)
 				: undefined;
 			const reviewerFailureSummary = formatPhaseFailureSummary("Reviewer", failedReviewers);
+			const reportWorkers = buildReportLineupSlots(normalizedWorkers, workerResult.preparedTasks);
+			const reportReviewers = buildReportLineupSlots(normalizedReviewers, reviewerResult.preparedTasks);
 
 			if (!normalizedFinalApplier) {
 				if (!successfulReviewerText) {
@@ -1138,7 +1131,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					keepArtifacts,
 					workers: reportWorkers,
 					reviewers: reportReviewers,
-					finalApplier: reportFinalApplier,
+					finalApplier: undefined,
 					workerPairs,
 					reviewerPairs,
 					workerSummary: successfulWorkerText,
@@ -1175,6 +1168,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				args: [],
 			});
 			if (!finalResult?.text) return;
+			const reportFinalApplier = buildReportLineupSlots([normalizedFinalApplier], finalResult.preparedTasks)[0];
 			const reportPath = tryWriteBestOfNRunReport({
 				compareCwd,
 				promptName: name,
