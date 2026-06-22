@@ -803,7 +803,8 @@ test("compare prompt commit ask mode reports changed files without committing", 
 		assert.match(approvalText, /`bestOfN\.commit: ask` is enabled/);
 		assert.match(approvalText, /New status entries since final applier started:/);
 		assert.match(approvalText, /Pre-existing status before final applier:/);
-		assert.match(approvalText, /M README\.md/);
+		assert.match(approvalText, /^ M README\.md$/m);
+		assert.doesNotMatch(approvalText, /^M README\.md$/m);
 		assert.match(approvalText, /\?\? NEW\.md/);
 		assert.match(approvalText, /For intended new files shown as `\?\?`/);
 		assert.match(approvalText, /git -C '[^']+' add -N -- '<path>'/);
