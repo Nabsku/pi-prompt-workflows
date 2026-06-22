@@ -879,7 +879,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
 				stdio: ["ignore", "pipe", "pipe"],
 			});
-			return output.trim();
+			return output.trimEnd();
 		} catch {
 			return undefined;
 		}
