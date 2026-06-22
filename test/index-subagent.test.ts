@@ -737,6 +737,7 @@ test("compare prompt commit ask mode reports changed files without committing", 
 		execFileSync("git", ["config", "user.name", "Test User"], { cwd });
 		execFileSync("git", ["add", "README.md"], { cwd });
 		execFileSync("git", ["commit", "-m", "initial"], { cwd });
+		writeFileSync(join(cwd, "README.md"), "pre-existing dirty\n");
 		writeFileSync(
 			join(cwd, ".pi", "prompts", "compare.md"),
 			[
@@ -778,6 +779,8 @@ test("compare prompt commit ask mode reports changed files without committing", 
 			}
 
 			assert.equal(phase, 3);
+			assert.match(request.task ?? "", /Commit approval mode:/);
+			assert.match(request.task ?? "", /Do not run `git add`, `git commit`/);
 			writeFileSync(join(cwd, "README.md"), "after\n");
 			writeFileSync(join(cwd, "NEW.md"), "new\n");
 			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
@@ -803,6 +806,7 @@ test("compare prompt commit ask mode reports changed files without committing", 
 		assert.match(approvalText, /`bestOfN\.commit: ask` is enabled/);
 		assert.match(approvalText, /New status entries since final applier started:/);
 		assert.match(approvalText, /Pre-existing status before final applier:/);
+		assert.match(approvalText, /New status entries since final applier started:\n```\n[\s\S]*^ M README\.md$/m);
 		assert.match(approvalText, /^ M README\.md$/m);
 		assert.doesNotMatch(approvalText, /^M README\.md$/m);
 		assert.match(approvalText, /\?\? NEW\.md/);
@@ -819,6 +823,149 @@ test("compare prompt commit ask mode reports changed files without committing", 
 		const status = execFileSync("git", ["status", "--short"], { cwd, encoding: "utf8" });
 		assert.match(status, / M README\.md/);
 		assert.match(status, /\?\? NEW\.md/);
+	});
+});
+
+test("compare prompt commit ask approval commands use repo root from subdir cwd", async () => {
+	await withTempHome(async (root) => {
+		const repoRoot = join(root, "repo");
+		const subdir = join(repoRoot, "sub");
+		mkdirSync(join(subdir, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(repoRoot, "README.md"), "before\n");
+		execFileSync("git", ["init"], { cwd: repoRoot });
+		execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repoRoot });
+		execFileSync("git", ["config", "user.name", "Test User"], { cwd: repoRoot });
+		execFileSync("git", ["add", "README.md"], { cwd: repoRoot });
+		execFileSync("git", ["commit", "-m", "initial"], { cwd: repoRoot });
+		writeFileSync(
+			join(subdir, ".pi", "prompts", "compare.md"),
+			[
+				"---",
+				"bestOfN:",
+				"  workers:",
+				"    - agent: delegate",
+				"  reviewers:",
+				"    - agent: reviewer",
+				"  finalApplier:",
+				"    agent: reviewer",
+				"  worktree: true",
+				"  commit: ask",
+				"---",
+				"Fix: $@",
+			].join("\n"),
+		);
+
+		const pi = new FakePi();
+		const { ctx } = createContext(subdir, pi);
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+
+		let phase = 0;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+			const request = payload as any;
+			phase++;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			if (phase === 1 || phase === 2) {
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [],
+					parallelResults: [
+						{ agent: phase === 1 ? "delegate" : "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: phase === 1 ? "worker output" : "reviewer output" }] }], isError: false },
+					],
+					isError: false,
+				});
+				return;
+			}
+
+			assert.equal(request.cwd, subdir);
+			writeFileSync(join(repoRoot, "sibling.md"), "sibling\n");
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [{ role: "assistant", content: [{ type: "text", text: "Applied sibling change." }] }],
+				isError: false,
+			});
+		});
+
+		await pi.commands.get("compare")!.handler("bug", ctx);
+		assert.equal(phase, 3);
+		const expectedRepoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: repoRoot, encoding: "utf8" }).trimEnd();
+		const commitAsk = pi.customMessages.at(-1)!;
+		assert.equal(commitAsk.details.compareCwd, expectedRepoRoot);
+		const approvalText = commitAsk.details.approvalText;
+		assert.match(approvalText, new RegExp(`- Compare cwd: ${expectedRepoRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+		assert.match(approvalText, new RegExp(`git -C '${expectedRepoRoot.replace(/'/g, `'"'"'`).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}' add --patch`));
+		assert.match(approvalText, /^\?\? sibling\.md$/m);
+	});
+});
+
+test("compare prompt commit ask warns if final applier staged or committed", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, "README.md"), "before\n");
+		execFileSync("git", ["init"], { cwd });
+		execFileSync("git", ["config", "user.email", "test@example.com"], { cwd });
+		execFileSync("git", ["config", "user.name", "Test User"], { cwd });
+		execFileSync("git", ["add", "README.md"], { cwd });
+		execFileSync("git", ["commit", "-m", "initial"], { cwd });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "compare.md"),
+			[
+				"---",
+				"bestOfN:",
+				"  workers:",
+				"    - agent: delegate",
+				"  reviewers:",
+				"    - agent: reviewer",
+				"  finalApplier:",
+				"    agent: reviewer",
+				"  worktree: true",
+				"  commit: ask",
+				"---",
+				"Fix: $@",
+			].join("\n"),
+		);
+
+		const pi = new FakePi();
+		const { ctx } = createContext(cwd, pi);
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+
+		let phase = 0;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+			const request = payload as any;
+			phase++;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			if (phase === 1 || phase === 2) {
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [],
+					parallelResults: [
+						{ agent: phase === 1 ? "delegate" : "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: phase === 1 ? "worker output" : "reviewer output" }] }], isError: false },
+					],
+					isError: false,
+				});
+				return;
+			}
+
+			assert.match(request.task ?? "", /Do not run `git add`, `git commit`/);
+			writeFileSync(join(cwd, "README.md"), "after\n");
+			execFileSync("git", ["add", "README.md"], { cwd });
+			execFileSync("git", ["commit", "-m", "final applier commit"], { cwd });
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [{ role: "assistant", content: [{ type: "text", text: "Committed final patch." }] }],
+				isError: false,
+			});
+		});
+
+		await pi.commands.get("compare")!.handler("bug", ctx);
+		assert.equal(phase, 3);
+		const commitAsk = pi.customMessages.at(-1)!;
+		const approvalText = commitAsk.details.approvalText;
+		assert.match(approvalText, /Approval guard warnings:/);
+		assert.match(approvalText, /HEAD changed during the final applier run/);
+		assert.match(approvalText, /final applier may have committed already/);
 	});
 });
 
