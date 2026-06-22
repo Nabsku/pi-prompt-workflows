@@ -693,8 +693,12 @@ test("compare prompt expands count, applies taskSuffix, and runs a final applier
 		assert.match(report, /Final apply: combined worker 2 with worker 1 tests\./);
 		const lineup = JSON.parse(readFileSync(join(runDir, "lineup.json"), "utf8"));
 		assert.equal(lineup.workers.length, 3);
+		assert.equal(lineup.workers[0].taskSuffix, "Save findings to `.compare-findings/w1.md`.");
+		assert.equal(lineup.workers[1].agent, "delegate");
 		assert.equal(lineup.reviewers.length, 2);
+		assert.equal(lineup.reviewers[0].taskSuffix, "Mention `.compare-findings/w1.md` in the recommendation.");
 		assert.equal(lineup.finalApplier.agent, "reviewer");
+		assert.equal(lineup.finalApplier.taskSuffix, "Apply the best patch and report verification.");
 		assert.equal(existsSync(join(runDir, "worker-1.md")), true);
 		assert.equal(existsSync(join(runDir, "reviewer-2.md")), true);
 		assert.equal(existsSync(join(runDir, "final-applier.md")), true);

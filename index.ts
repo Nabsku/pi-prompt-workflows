@@ -755,6 +755,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			agent: slot.agent,
 			...(slot.model ? { model: slot.model } : {}),
 			...(slot.cwd ? { cwd: slot.cwd } : {}),
+			...(slot.task ? { task: slot.task } : {}),
+			...(slot.taskSuffix ? { taskSuffix: slot.taskSuffix } : {}),
 		};
 	}
 
