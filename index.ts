@@ -932,8 +932,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		const beforeBlocks = splitGitDiffByPath(beforePatch);
 		const afterBlocks = splitGitDiffByPath(afterPatch);
 		const changed = new Set<string>();
-		for (const [path, afterBlock] of afterBlocks) {
-			if (beforeBlocks.get(path) !== afterBlock) changed.add(path);
+		const paths = new Set([...beforeBlocks.keys(), ...afterBlocks.keys()]);
+		for (const path of paths) {
+			if (beforeBlocks.get(path) !== afterBlocks.get(path)) changed.add(path);
 		}
 		return changed;
 	}
@@ -945,24 +946,60 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		]);
 	}
 
+	function unquoteGitPath(path: string): string {
+		if (!path.startsWith('"') || !path.endsWith('"')) return path;
+		let result = "";
+		for (let i = 1; i < path.length - 1; i++) {
+			const char = path[i]!;
+			if (char !== "\\") {
+				result += char;
+				continue;
+			}
+			const next = path[++i];
+			if (next === undefined) break;
+			if (next >= "0" && next <= "7") {
+				let octal = next;
+				for (let count = 0; count < 2 && i + 1 < path.length - 1 && path[i + 1]! >= "0" && path[i + 1]! <= "7"; count++) {
+					octal += path[++i]!;
+				}
+				result += String.fromCharCode(Number.parseInt(octal, 8));
+				continue;
+			}
+			const escapes: Record<string, string> = { a: "\x07", b: "\b", f: "\f", n: "\n", r: "\r", t: "	", v: "\v", "\\": "\\", '"': '"' };
+			result += escapes[next] ?? next;
+		}
+		return result;
+	}
+
 	function statusLinePath(line: string): string | undefined {
 		if (line.length < 4) return undefined;
 		const raw = line.slice(3);
 		const renameIndex = raw.indexOf(" -> ");
-		return renameIndex >= 0 ? raw.slice(renameIndex + 4) : raw;
+		return unquoteGitPath(renameIndex >= 0 ? raw.slice(renameIndex + 4) : raw);
 	}
 
 	function statusLinesChangedAfter(before: GitSnapshot, after: GitSnapshot): string {
 		if (!after.status) return "(git status unavailable or no changes detected)";
-		const beforeLines = new Set((before.status || "").split("\n").filter(Boolean));
+		const beforeLines = (before.status || "").split("\n").filter(Boolean);
+		const afterLines = after.status.split("\n").filter(Boolean);
+		const beforeLineSet = new Set(beforeLines);
+		const afterLineSet = new Set(afterLines);
 		const dirtyPathsWithDiffChanges = diffChangedPaths(before, after);
-		const changed = after.status.split("\n").filter((line) => {
-			if (!line) return false;
-			if (!beforeLines.has(line)) return true;
+		const changed = afterLines.filter((line) => {
+			if (!beforeLineSet.has(line)) return true;
 			const path = statusLinePath(line);
 			return path ? dirtyPathsWithDiffChanges.has(path) : false;
 		});
+		for (const line of beforeLines) {
+			if (afterLineSet.has(line)) continue;
+			const path = statusLinePath(line);
+			if (path && dirtyPathsWithDiffChanges.has(path)) changed.push(`${line} (pre-existing status entry removed or cleaned by final applier)`);
+		}
 		return changed.length > 0 ? changed.join("\n") : "(no new status entries since final applier started; inspect full diff if pre-existing files were modified)";
+	}
+
+	function preExistingUntrackedLines(snapshot: GitSnapshot): string[] {
+		return (snapshot.status || "").split("\n").filter((line) => line.startsWith("?? "));
 	}
 
 	function formatApprovalGuardWarnings(before: GitSnapshot, after: GitSnapshot): string | undefined {
@@ -972,6 +1009,10 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 		if ((after.stagedNameStatus || "") !== (before.stagedNameStatus || "") || (after.stagedPatch || "") !== (before.stagedPatch || "")) {
 			warnings.push("Staged changes changed during the final applier run. Review `git diff --cached` and unstage anything that should remain under manual approval.");
+		}
+		const preExistingUntracked = preExistingUntrackedLines(before);
+		if (preExistingUntracked.length > 0) {
+			warnings.push(`Pre-existing untracked entries were present before the final applier ran. Git cannot diff their prior contents, so review them manually: ${preExistingUntracked.join(", ")}`);
 		}
 		return warnings.length > 0 ? warnings.join("\n") : undefined;
 	}
