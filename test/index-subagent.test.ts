@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import promptModelExtension from "../index.js";
@@ -674,11 +674,30 @@ test("compare prompt expands count, applies taskSuffix, and runs a final applier
 			});
 		});
 
-		await pi.commands.get("compare")!.handler("fix bug", ctx);
+		await pi.commands.get("compare")!.handler("--keep-artifacts fix bug", ctx);
 		assert.equal(phase, 3);
 		assert.equal(pi.userMessages.length, 1);
 		assert.match(pi.userMessages[0]!, /\[Compare apply complete: compare\]/);
+		assert.match(pi.userMessages[0]!, /Report: .*\.pi\/runs\/best-of-n\/.*\/report\.md/);
 		assert.match(pi.userMessages[0]!, /Final apply: combined worker 2 with worker 1 tests\./);
+		const runRoot = join(cwd, ".pi", "runs", "best-of-n");
+		const runDirs = readdirSync(runRoot);
+		assert.equal(runDirs.length, 1);
+		const runDir = join(runRoot, runDirs[0]!);
+		const report = readFileSync(join(runDir, "report.md"), "utf8");
+		assert.match(report, /# Best-of-N run: compare/);
+		assert.match(report, /- Status: apply-complete/);
+		assert.match(report, /- Raw artifacts retained: yes/);
+		assert.match(report, /=== Worker 1 \(delegate, anthropic\/claude-sonnet-4-20250514\) ===\nw1/);
+		assert.match(report, /Winner: worker 2/);
+		assert.match(report, /Final apply: combined worker 2 with worker 1 tests\./);
+		const lineup = JSON.parse(readFileSync(join(runDir, "lineup.json"), "utf8"));
+		assert.equal(lineup.workers.length, 3);
+		assert.equal(lineup.reviewers.length, 2);
+		assert.equal(lineup.finalApplier.agent, "reviewer");
+		assert.equal(existsSync(join(runDir, "worker-1.md")), true);
+		assert.equal(existsSync(join(runDir, "reviewer-2.md")), true);
+		assert.equal(existsSync(join(runDir, "final-applier.md")), true);
 	});
 });
 
