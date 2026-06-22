@@ -73,6 +73,13 @@ This package is an enhanced fork of [`pi-prompt-template-model`](https://github.
 pi install npm:pi-prompt-workflows
 ```
 
+If you previously installed the package under its old name, remove it before installing the renamed package to avoid duplicate commands and tool conflicts:
+
+```bash
+pi remove npm:pi-prompt-template-model-enhanced
+pi install npm:pi-prompt-workflows
+```
+
 Restart pi to load the extension.
 
 For delegated subagent execution (`subagent` and `inheritContext` frontmatter), install [pi-subagents](https://github.com/nicobailon/pi-subagents/) separately:
