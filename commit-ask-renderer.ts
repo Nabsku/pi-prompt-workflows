@@ -12,8 +12,15 @@ interface CommitAskMessage {
 
 const PREVIEW_LINES = 24;
 
+function sanitizeApprovalLine(line: string): string {
+	return Array.from(line).map((char) => {
+		const code = char.charCodeAt(0);
+		return code < 32 || code === 127 ? `\\u${code.toString(16).padStart(4, "0")}` : char;
+	}).join("");
+}
+
 function sanitizeApprovalText(value: string): string {
-	return value.split("\n").map((line) => JSON.stringify(line).slice(1, -1)).join("\n");
+	return value.split("\n").map(sanitizeApprovalLine).join("\n");
 }
 
 export function renderCommitAskMessage(message: CommitAskMessage, options: MessageRenderOptions, theme: Theme) {

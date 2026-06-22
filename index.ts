@@ -87,6 +87,7 @@ interface GitSnapshot {
 	stagedPatch?: string;
 	diffRaw?: string;
 	stagedRaw?: string;
+	diffFingerprint?: string;
 	stagedNameStatus?: string;
 }
 
@@ -895,6 +896,17 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		return runGitCapture(cwd, ["rev-parse", "--show-toplevel"]);
 	}
 
+	function captureDiffFingerprint(cwd: string): string | undefined {
+		const names = runGitCapture(cwd, ["diff", "--no-ext-diff", "--name-only", "-z", "HEAD"]);
+		if (names === undefined) return undefined;
+		const fingerprints: string[] = [];
+		for (const path of names.split("\0").filter(Boolean).sort()) {
+			const hash = existsSync(join(cwd, path)) ? runGitCapture(cwd, ["hash-object", "--", path]) : "(deleted)";
+			fingerprints.push(`${path}\0${hash ?? "(unavailable)"}`);
+		}
+		return fingerprints.join("\0");
+	}
+
 	function captureGitSnapshot(cwd: string): GitSnapshot {
 		return {
 			head: runGitCapture(cwd, ["rev-parse", "HEAD"]),
@@ -905,6 +917,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			stagedPatch: runGitCapture(cwd, ["diff", "--no-ext-diff", "--cached", "HEAD"]),
 			diffRaw: runGitCapture(cwd, ["diff", "--no-ext-diff", "--raw", "-z", "HEAD"]),
 			stagedRaw: runGitCapture(cwd, ["diff", "--no-ext-diff", "--cached", "--raw", "-z", "HEAD"]),
+			diffFingerprint: captureDiffFingerprint(cwd),
 			stagedNameStatus: runGitCapture(cwd, ["diff", "--no-ext-diff", "--cached", "--name-status", "HEAD"]),
 		};
 	}
@@ -914,6 +927,14 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		if (!diff) return blocks;
 		if (diff.includes("\0")) {
 			const tokens = diff.split("\0").filter(Boolean);
+			if (!tokens[0]?.startsWith(":")) {
+				for (let i = 0; i < tokens.length; i += 2) {
+					const path = tokens[i];
+					if (!path) continue;
+					blocks.set(path, `${path}\0${tokens[i + 1] ?? ""}`);
+				}
+				return blocks;
+			}
 			for (let i = 0; i < tokens.length;) {
 				const header = tokens[i++];
 				if (!header?.startsWith(":")) continue;
@@ -959,7 +980,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 	function diffChangedPaths(before: GitSnapshot, after: GitSnapshot): Set<string> {
 		return new Set([
-			...diffPatchChangedPaths(before.diffRaw, after.diffRaw),
+			...diffPatchChangedPaths(before.diffFingerprint, after.diffFingerprint),
 			...diffPatchChangedPaths(before.stagedRaw, after.stagedRaw),
 		]);
 	}
@@ -1033,7 +1054,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		for (const line of beforeLines) {
 			if (afterLineSet.has(line)) continue;
 			const path = statusLinePath(line);
-			if (path && dirtyPathsWithDiffChanges.has(path)) changed.push(`${line} (pre-existing status entry removed or cleaned by final applier)`);
+			if (line.startsWith("?? ") || (path && dirtyPathsWithDiffChanges.has(path))) changed.push(`${line} (pre-existing status entry removed or cleaned by final applier)`);
 		}
 		return changed.length > 0 ? changed.join("\n") : "(no new status entries since final applier started; inspect full diff if pre-existing files were modified)";
 	}
