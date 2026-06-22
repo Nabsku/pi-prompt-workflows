@@ -48,6 +48,24 @@ function isValidModelSelectionSpec(spec: string): boolean {
 	return true;
 }
 
+function rejectUnsupportedKeys(
+	value: Record<string, unknown>,
+	allowedKeys: Set<string>,
+	presetName: string,
+	filePath: string,
+	source: PromptSource,
+	diagnostics: PromptLoaderDiagnostic[],
+	context: string,
+): boolean {
+	const unsupportedKeys = Object.keys(value).filter((key) => !allowedKeys.has(key));
+	if (unsupportedKeys.length === 0) return false;
+	diagnostics.push(createPresetDiagnostic("invalid-best-of-n-preset", filePath, source, `Ignoring preset ${JSON.stringify(presetName)} in ${filePath}: ${context} has unsupported field(s): ${unsupportedKeys.join(", ")}.`));
+	return true;
+}
+
+const PRESET_KEYS = new Set(["description", "defaultModel", "maxModelCalls", "workers", "reviewers"]);
+const PRESET_SLOT_KEYS = new Set(["agent", "subagent", "model", "count"]);
+
 function normalizePresetSlot(
 	value: unknown,
 	field: "workers" | "reviewers",
@@ -59,6 +77,9 @@ function normalizePresetSlot(
 ): DelegationLineupSlot | undefined {
 	if (!isRecord(value)) {
 		diagnostics.push(createPresetDiagnostic("invalid-best-of-n-preset", filePath, source, `Ignoring preset ${JSON.stringify(presetName)} in ${filePath}: ${field} slot ${index + 1} must be an object.`));
+		return undefined;
+	}
+	if (rejectUnsupportedKeys(value, PRESET_SLOT_KEYS, presetName, filePath, source, diagnostics, `${field} slot ${index + 1}`)) {
 		return undefined;
 	}
 	if (value.agent !== undefined && value.subagent !== undefined) {
@@ -135,6 +156,9 @@ function normalizePreset(name: string, value: unknown, filePath: string, source:
 	}
 	if (!isRecord(value)) {
 		diagnostics.push(createPresetDiagnostic("invalid-best-of-n-preset", filePath, source, `Ignoring preset ${JSON.stringify(name)} in ${filePath}: preset must be an object.`));
+		return undefined;
+	}
+	if (rejectUnsupportedKeys(value, PRESET_KEYS, name, filePath, source, diagnostics, "preset")) {
 		return undefined;
 	}
 	const preset: BestOfNPreset = {};
