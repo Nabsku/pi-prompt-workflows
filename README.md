@@ -1,10 +1,10 @@
 <p>
-  <img src="banner.png" alt="pi-prompt-template-model-enhanced" width="1100">
+  <img src="banner.png" alt="pi-prompt-workflows" width="1100">
 </p>
 
-# Prompt Template Model Extension
+# Pi Prompt Workflows
 
-> This package is an enhanced fork of [`pi-prompt-template-model`](https://github.com/nicobailon/pi-prompt-template-model). It builds on the original extension's solid prompt-template foundation, stays close to upstream, and publishes the additional features under the separate package name `pi-prompt-template-model-enhanced`.
+> This package is an enhanced fork of [`pi-prompt-template-model`](https://github.com/nicobailon/pi-prompt-template-model). It builds on the original extension's solid prompt-template foundation, stays close to upstream, and publishes the additional features under the separate package name `pi-prompt-workflows`.
 
 Adds model selection, thinking levels, reusable prompt partials, and one-or-many skill injection to pi prompt templates. Define slash commands that switch to the right model, include shared instructions, load the exact skills needed, and auto-restore your session when done.
 
@@ -70,7 +70,7 @@ This package is an enhanced fork of [`pi-prompt-template-model`](https://github.
 ## Installation
 
 ```bash
-pi install npm:pi-prompt-template-model-enhanced
+pi install npm:pi-prompt-workflows
 ```
 
 Restart pi to load the extension.
@@ -123,7 +123,7 @@ Validation also reports an include graph for prompts that declare frontmatter in
 A clean library reports success:
 
 ```text
-[pi-prompt-template-model-enhanced] Prompt validation passed: 4 prompt template(s) loaded.
+[pi-prompt-workflows] Prompt validation passed: 4 prompt template(s) loaded.
 Include graph:
 - review [ok] /repo/.pi/prompts/review.md
   - review -> /repo/.pi/prompts/shared/rules.md (frontmatter shared/rules.md) [ok]
@@ -132,7 +132,7 @@ Include graph:
 Invalid libraries fail with explicit diagnostics:
 
 ```text
-[pi-prompt-template-model-enhanced] Prompt validation failed: 2 issue(s) found across 3 loaded prompt template(s).
+[pi-prompt-workflows] Prompt validation failed: 2 issue(s) found across 3 loaded prompt template(s).
 - include-not-found (project) /repo/.pi/prompts/review.md: Prompt include "shared/rules.md" was not found ...
 - skill-not-found (project) /repo/.pi/prompts/debug.md: Prompt template ... references skill "tmux", but it was not found ...
 Include graph:
@@ -640,7 +640,7 @@ This repo ships one example compare prompt under `examples/`:
 Install it manually from this repo checkout (or from the installed package directory):
 
 ```bash
-PTM_DIR=/path/to/pi-prompt-template-model-enhanced
+PTM_DIR=/path/to/pi-prompt-workflows
 mkdir -p ~/.pi/agent/prompts
 cp "$PTM_DIR/examples/best-of-n.md" ~/.pi/agent/prompts/best-of-n.md
 ```

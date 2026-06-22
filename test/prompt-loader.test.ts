@@ -7,7 +7,7 @@ import { buildPromptCommandDescription, collectPromptSourceRecords, loadPromptsW
 import { loadBestOfNPresetCatalog } from "../best-of-n-presets.js";
 
 function withTempHome(run: (root: string) => void) {
-	const root = mkdtempSync(join(tmpdir(), "pi-prompt-template-model-enhanced-"));
+	const root = mkdtempSync(join(tmpdir(), "pi-prompt-workflows-"));
 	const previousHome = process.env.HOME;
 	process.env.HOME = root;
 	try {

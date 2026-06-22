@@ -654,7 +654,7 @@ export function formatPromptValidationReport(result: PromptValidationResult): st
 	const sourceSummaryLine = formatSourceSummary(result.sourceSummary);
 	if (result.ok) {
 		return [
-			`[pi-prompt-template-model-enhanced] Prompt validation passed: ${result.promptCount} prompt template(s) loaded.`,
+			`[pi-prompt-workflows] Prompt validation passed: ${result.promptCount} prompt template(s) loaded.`,
 			sourceSummaryLine,
 			...includeGraphLines,
 		].join("\n");
@@ -663,7 +663,7 @@ export function formatPromptValidationReport(result: PromptValidationResult): st
 	const diagnostics = sortDiagnostics(result.diagnostics);
 	const lines = diagnostics.map((diagnostic) => `- ${sanitizeReportValue(diagnostic.code)} (${sanitizeReportValue(diagnostic.source)}) ${sanitizeReportValue(diagnostic.filePath)}: ${sanitizeReportValue(diagnostic.message)}`);
 	return [
-		`[pi-prompt-template-model-enhanced] Prompt validation failed: ${diagnostics.length} issue(s) found across ${result.promptCount} loaded prompt template(s).`,
+		`[pi-prompt-workflows] Prompt validation failed: ${diagnostics.length} issue(s) found across ${result.promptCount} loaded prompt template(s).`,
 		sourceSummaryLine,
 		...lines,
 		...includeGraphLines,

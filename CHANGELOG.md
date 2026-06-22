@@ -1,98 +1,98 @@
 # Changelog
 
-## [0.14.0](https://github.com/Nabsku/pi-prompt-template-model-enhanced/compare/v0.13.1...v0.14.0) (2026-06-22)
+## [0.14.0](https://github.com/Nabsku/pi-prompt-workflows/compare/v0.13.1...v0.14.0) (2026-06-22)
 
 
 ### Features
 
-* add best-of-n preset resolution ([e0f45e6](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/e0f45e64490e6874e6693e7b6450954d7f9dde64))
+* add best-of-n preset resolution ([e0f45e6](https://github.com/Nabsku/pi-prompt-workflows/commit/e0f45e64490e6874e6693e7b6450954d7f9dde64))
 
 
 ### Bug Fixes
 
-* address best-of-n preset review comments ([0dfdf80](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/0dfdf8065c0a241f0786f7271800b1c877b117cc))
-* close preset review edge cases ([df85bf3](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/df85bf3d86c2f43bcbec8d9fdb150e2fde37e61f))
-* close preset validation review gaps ([1822061](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/1822061ae90ee9b5ee2d7ea222ce9cabc9698e79))
-* harden best-of-n preset overrides ([caa0981](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/caa0981936d5e264f5e2dd334d9f0e1abe59aa59))
-* harden project preset resolution ([04cddc9](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/04cddc919256b0c40b28a51b67c185a592f899fb))
-* prevent invalid project presets from falling through ([8b0f589](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/8b0f5899ca5ebd1350218cd0d87d24af891a9656))
-* validate presets from prompt cwd ([ce97729](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/ce9772947bf31abbc1fc4481bdc13bf51385da62))
+* address best-of-n preset review comments ([0dfdf80](https://github.com/Nabsku/pi-prompt-workflows/commit/0dfdf8065c0a241f0786f7271800b1c877b117cc))
+* close preset review edge cases ([df85bf3](https://github.com/Nabsku/pi-prompt-workflows/commit/df85bf3d86c2f43bcbec8d9fdb150e2fde37e61f))
+* close preset validation review gaps ([1822061](https://github.com/Nabsku/pi-prompt-workflows/commit/1822061ae90ee9b5ee2d7ea222ce9cabc9698e79))
+* harden best-of-n preset overrides ([caa0981](https://github.com/Nabsku/pi-prompt-workflows/commit/caa0981936d5e264f5e2dd334d9f0e1abe59aa59))
+* harden project preset resolution ([04cddc9](https://github.com/Nabsku/pi-prompt-workflows/commit/04cddc919256b0c40b28a51b67c185a592f899fb))
+* prevent invalid project presets from falling through ([8b0f589](https://github.com/Nabsku/pi-prompt-workflows/commit/8b0f5899ca5ebd1350218cd0d87d24af891a9656))
+* validate presets from prompt cwd ([ce97729](https://github.com/Nabsku/pi-prompt-workflows/commit/ce9772947bf31abbc1fc4481bdc13bf51385da62))
 
-## [0.13.1](https://github.com/Nabsku/pi-prompt-template-model-enhanced/compare/v0.13.0...v0.13.1) (2026-06-21)
+## [0.13.1](https://github.com/Nabsku/pi-prompt-workflows/compare/v0.13.0...v0.13.1) (2026-06-21)
 
 
 ### Bug Fixes
 
-* harden prompt-library parity coverage ([1666691](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/16666916eff1757cefa4b743cdbb18ea704b95a5))
+* harden prompt-library parity coverage ([1666691](https://github.com/Nabsku/pi-prompt-workflows/commit/16666916eff1757cefa4b743cdbb18ea704b95a5))
 
-## [0.13.0](https://github.com/Nabsku/pi-prompt-template-model-enhanced/compare/v0.12.0...v0.13.0) (2026-06-21)
+## [0.13.0](https://github.com/Nabsku/pi-prompt-workflows/compare/v0.12.0...v0.13.0) (2026-06-21)
 
 ### Prompt library
 
-* Added `.pi/prompt-library` and `~/.pi/agent/prompt-library` roots for reusable prompt commands, chain steps, and include fragments ([b5e235b](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/b5e235b099df3a4089b196a3e482c64e545f5bbb), [4eba6b3](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/4eba6b3c98b83d50ab167e66eb26c782ade00d99)).
-* Prompt-library commands now support validation, source summaries, dry-run/TUI labels, and includes from library-local fragments ([7dec4c8](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/7dec4c8bc2f774fa6451c842f9ee12cc875de648), [5468b16](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/5468b16e19ac1e556980f9a5416fc574be055aeb), [ceda208](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/ceda208e9f027d7a45c600bf2bcfb36d4552f55e)).
-* Added `hidden: true` for internal prompt-library commands: hidden commands stay out of slash-command discovery and pickers, but remain addressable by exact dry-run/print lookup and chain references ([413ef55](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/413ef55ac8c3bafe61c8b1a3d560eb644e7e7d15)).
+* Added `.pi/prompt-library` and `~/.pi/agent/prompt-library` roots for reusable prompt commands, chain steps, and include fragments ([b5e235b](https://github.com/Nabsku/pi-prompt-workflows/commit/b5e235b099df3a4089b196a3e482c64e545f5bbb), [4eba6b3](https://github.com/Nabsku/pi-prompt-workflows/commit/4eba6b3c98b83d50ab167e66eb26c782ade00d99)).
+* Prompt-library commands now support validation, source summaries, dry-run/TUI labels, and includes from library-local fragments ([7dec4c8](https://github.com/Nabsku/pi-prompt-workflows/commit/7dec4c8bc2f774fa6451c842f9ee12cc875de648), [5468b16](https://github.com/Nabsku/pi-prompt-workflows/commit/5468b16e19ac1e556980f9a5416fc574be055aeb), [ceda208](https://github.com/Nabsku/pi-prompt-workflows/commit/ceda208e9f027d7a45c600bf2bcfb36d4552f55e)).
+* Added `hidden: true` for internal prompt-library commands: hidden commands stay out of slash-command discovery and pickers, but remain addressable by exact dry-run/print lookup and chain references ([413ef55](https://github.com/Nabsku/pi-prompt-workflows/commit/413ef55ac8c3bafe61c8b1a3d560eb644e7e7d15)).
 
 ### Hardening and compatibility
 
-* Tightened project prompt-library trust boundaries, including chain preflight approval and safer handling of project library includes ([c1198cf](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/c1198cf918045db38d2d7c8f767e1be82843f634), [40c4458](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/40c44587ff8a94e2f6d6d94f13a9c2894503d35b)).
-* Hardened prompt-library loading around symlinks, dot-prefixed entries, invalid metadata, include-only fragments, and stale hidden command handlers ([94c8bdd](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/94c8bddcba1d16502676d34f47fccbeb3235fd05), [b62cbec](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/b62cbecbeaf25ecef66abf14c6e71bca03c40c3c), [ace7651](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/ace76519fcea80a20b217ce82e62a201ad0afa06)).
-* Plain prompt-library fragments now stay quiet unless included, while valid thinking-only and model-conditional library commands still load normally ([c353e1e](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/c353e1e0d10377e94bae763084efd1f9ac398260), [f2e8850](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/f2e8850ea2c5be080d7c73764303f5fabdcd1c44), [8808b05](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/8808b05eeafd226adfb5a57a07c195d0550fe4e8), [dea05fc](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/dea05fc9b27755f9407976e4028f77704e27e044)).
-* Validation source summaries now count broken, skipped, duplicate, empty-model, invalid-marker, and shadowed library commands consistently instead of misreporting them as fragments or dropping them ([354bea9](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/354bea956a13e0845167246f4ba68778db5ce6b8), [126ab9b](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/126ab9bbe2149f1c6c78967ded308f56f933a6e7), [fd028ca](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/fd028ca1ad78f329ef1d9325158d66a2541701e4), [0fc6877](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/0fc6877dca2b16385d7a95e6d01a7a3f94d2ce07), [e8a91d1](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/e8a91d14be0430894cdc3716f28754ad561edd68), [73c91c1](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/73c91c1b2d41792528dc32c5e9798b7bb213c09e)).
+* Tightened project prompt-library trust boundaries, including chain preflight approval and safer handling of project library includes ([c1198cf](https://github.com/Nabsku/pi-prompt-workflows/commit/c1198cf918045db38d2d7c8f767e1be82843f634), [40c4458](https://github.com/Nabsku/pi-prompt-workflows/commit/40c44587ff8a94e2f6d6d94f13a9c2894503d35b)).
+* Hardened prompt-library loading around symlinks, dot-prefixed entries, invalid metadata, include-only fragments, and stale hidden command handlers ([94c8bdd](https://github.com/Nabsku/pi-prompt-workflows/commit/94c8bddcba1d16502676d34f47fccbeb3235fd05), [b62cbec](https://github.com/Nabsku/pi-prompt-workflows/commit/b62cbecbeaf25ecef66abf14c6e71bca03c40c3c), [ace7651](https://github.com/Nabsku/pi-prompt-workflows/commit/ace76519fcea80a20b217ce82e62a201ad0afa06)).
+* Plain prompt-library fragments now stay quiet unless included, while valid thinking-only and model-conditional library commands still load normally ([c353e1e](https://github.com/Nabsku/pi-prompt-workflows/commit/c353e1e0d10377e94bae763084efd1f9ac398260), [f2e8850](https://github.com/Nabsku/pi-prompt-workflows/commit/f2e8850ea2c5be080d7c73764303f5fabdcd1c44), [8808b05](https://github.com/Nabsku/pi-prompt-workflows/commit/8808b05eeafd226adfb5a57a07c195d0550fe4e8), [dea05fc](https://github.com/Nabsku/pi-prompt-workflows/commit/dea05fc9b27755f9407976e4028f77704e27e044)).
+* Validation source summaries now count broken, skipped, duplicate, empty-model, invalid-marker, and shadowed library commands consistently instead of misreporting them as fragments or dropping them ([354bea9](https://github.com/Nabsku/pi-prompt-workflows/commit/354bea956a13e0845167246f4ba68778db5ce6b8), [126ab9b](https://github.com/Nabsku/pi-prompt-workflows/commit/126ab9bbe2149f1c6c78967ded308f56f933a6e7), [fd028ca](https://github.com/Nabsku/pi-prompt-workflows/commit/fd028ca1ad78f329ef1d9325158d66a2541701e4), [0fc6877](https://github.com/Nabsku/pi-prompt-workflows/commit/0fc6877dca2b16385d7a95e6d01a7a3f94d2ce07), [e8a91d1](https://github.com/Nabsku/pi-prompt-workflows/commit/e8a91d14be0430894cdc3716f28754ad561edd68), [73c91c1](https://github.com/Nabsku/pi-prompt-workflows/commit/73c91c1b2d41792528dc32c5e9798b7bb213c09e)).
 
-## [0.12.0](https://github.com/Nabsku/pi-prompt-template-model-enhanced/compare/v0.11.2...v0.12.0) (2026-06-20)
-
-
-### Features
-
-* add includes pane to dry-run TUI ([50624a4](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/50624a46a5722d2ca74ebcb0423e5e99f75dbad1))
-* attach include graphs to dry runs ([a1d7eba](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/a1d7eba676158faed0c4e9cf889e5525cf5e5923))
-* attach include graphs to validation ([d694724](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/d69472452a6af1b7f94f75df3002b65d5bdc62c8))
-* collect prompt include graphs ([be7c726](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/be7c726fb17a43524068ef8da819306304e79091))
-* collect prompt source records ([0d0df7a](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/0d0df7a38a460fb1d890596e8f334a9be5772892))
-* expose prompt include parsing helpers ([3e784a6](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/3e784a672304100e70ae3a6603a05be6c2744e5e))
-* report prompt include graphs ([5332c8e](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/5332c8e8c49925aec20ebe2ba913e6b6a13f814f))
-
-
-### Bug Fixes
-
-* avoid duplicate include graph diagnostics ([adb6c97](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/adb6c971fa3e1faea902aead4493fd47cf4121a6))
-* preserve skipped include graphs for overrides ([2b0e69f](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/2b0e69f3f158c8e5e8ef3bae45053cdd267a19e7))
-
-## [0.11.2](https://github.com/Nabsku/pi-prompt-template-model-enhanced/compare/v0.11.1...v0.11.2) (2026-06-19)
-
-
-### Bug Fixes
-
-* publish after release-please releases ([7949c6c](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/7949c6cb313f62f2dc8cc5ab707b90413e3095ac))
-
-## [0.11.1](https://github.com/Nabsku/pi-prompt-template-model-enhanced/compare/v0.11.0...v0.11.1) (2026-06-19)
-
-
-### Bug Fixes
-
-* allow skills in delegated prompts ([d7c0e0e](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/d7c0e0e1c8a8e2b728aa2fa20c9e5037002b761e))
-
-## [0.11.0](https://github.com/Nabsku/pi-prompt-template-model-enhanced/compare/v0.10.0...v0.11.0) (2026-06-19)
+## [0.12.0](https://github.com/Nabsku/pi-prompt-workflows/compare/v0.11.2...v0.12.0) (2026-06-20)
 
 
 ### Features
 
-* add prompt dry-run commands ([80548b3](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/80548b34471aa1ae98436c61f5a202d9734f831c))
-* add prompt dry-run core ([3edc51a](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/3edc51aace8eccac557bec4d0e83c859a6baa4a8))
-* add prompt dry-run TUI ([d99e7da](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/d99e7da3e62f70ecda9fcaebcf5ce1b84e306a73))
-* add prompt validation command ([a82a029](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/a82a029e56e51a29295f0b98379acaa643721a24))
-* render prompt dry-run output ([8c0cdb5](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/8c0cdb5bcc622ca38f215a146a59f9e3dca55e0a))
+* add includes pane to dry-run TUI ([50624a4](https://github.com/Nabsku/pi-prompt-workflows/commit/50624a46a5722d2ca74ebcb0423e5e99f75dbad1))
+* attach include graphs to dry runs ([a1d7eba](https://github.com/Nabsku/pi-prompt-workflows/commit/a1d7eba676158faed0c4e9cf889e5525cf5e5923))
+* attach include graphs to validation ([d694724](https://github.com/Nabsku/pi-prompt-workflows/commit/d69472452a6af1b7f94f75df3002b65d5bdc62c8))
+* collect prompt include graphs ([be7c726](https://github.com/Nabsku/pi-prompt-workflows/commit/be7c726fb17a43524068ef8da819306304e79091))
+* collect prompt source records ([0d0df7a](https://github.com/Nabsku/pi-prompt-workflows/commit/0d0df7a38a460fb1d890596e8f334a9be5772892))
+* expose prompt include parsing helpers ([3e784a6](https://github.com/Nabsku/pi-prompt-workflows/commit/3e784a672304100e70ae3a6603a05be6c2744e5e))
+* report prompt include graphs ([5332c8e](https://github.com/Nabsku/pi-prompt-workflows/commit/5332c8e8c49925aec20ebe2ba913e6b6a13f814f))
 
 
 ### Bug Fixes
 
-* address dry-run TUI review feedback ([af3b6b0](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/af3b6b0f30ad779b79f5548aea51ac22c3fde4be))
-* align prompt dry-run loop metadata ([bd9f9ea](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/bd9f9eae3841a515b848a7b73c83b86711b6b456))
-* keep prompt dry-run out of history ([86e31b8](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/86e31b8a895a8579ec0a8d40b800c6dd6faa827b))
-* polish TUI rendering edge cases ([d5c5c77](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/d5c5c776d0ad34c75e67f147f35cb72a39e14b1e))
-* support Kitty inspector controls ([f09904c](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/f09904c5359e75e2cbf4a784bdcddc487d6ad8c7))
-* support Kitty picker input ([2679c62](https://github.com/Nabsku/pi-prompt-template-model-enhanced/commit/2679c6237d85d455a34ff87a76eb463843010b1c))
+* avoid duplicate include graph diagnostics ([adb6c97](https://github.com/Nabsku/pi-prompt-workflows/commit/adb6c971fa3e1faea902aead4493fd47cf4121a6))
+* preserve skipped include graphs for overrides ([2b0e69f](https://github.com/Nabsku/pi-prompt-workflows/commit/2b0e69f3f158c8e5e8ef3bae45053cdd267a19e7))
+
+## [0.11.2](https://github.com/Nabsku/pi-prompt-workflows/compare/v0.11.1...v0.11.2) (2026-06-19)
+
+
+### Bug Fixes
+
+* publish after release-please releases ([7949c6c](https://github.com/Nabsku/pi-prompt-workflows/commit/7949c6cb313f62f2dc8cc5ab707b90413e3095ac))
+
+## [0.11.1](https://github.com/Nabsku/pi-prompt-workflows/compare/v0.11.0...v0.11.1) (2026-06-19)
+
+
+### Bug Fixes
+
+* allow skills in delegated prompts ([d7c0e0e](https://github.com/Nabsku/pi-prompt-workflows/commit/d7c0e0e1c8a8e2b728aa2fa20c9e5037002b761e))
+
+## [0.11.0](https://github.com/Nabsku/pi-prompt-workflows/compare/v0.10.0...v0.11.0) (2026-06-19)
+
+
+### Features
+
+* add prompt dry-run commands ([80548b3](https://github.com/Nabsku/pi-prompt-workflows/commit/80548b34471aa1ae98436c61f5a202d9734f831c))
+* add prompt dry-run core ([3edc51a](https://github.com/Nabsku/pi-prompt-workflows/commit/3edc51aace8eccac557bec4d0e83c859a6baa4a8))
+* add prompt dry-run TUI ([d99e7da](https://github.com/Nabsku/pi-prompt-workflows/commit/d99e7da3e62f70ecda9fcaebcf5ce1b84e306a73))
+* add prompt validation command ([a82a029](https://github.com/Nabsku/pi-prompt-workflows/commit/a82a029e56e51a29295f0b98379acaa643721a24))
+* render prompt dry-run output ([8c0cdb5](https://github.com/Nabsku/pi-prompt-workflows/commit/8c0cdb5bcc622ca38f215a146a59f9e3dca55e0a))
+
+
+### Bug Fixes
+
+* address dry-run TUI review feedback ([af3b6b0](https://github.com/Nabsku/pi-prompt-workflows/commit/af3b6b0f30ad779b79f5548aea51ac22c3fde4be))
+* align prompt dry-run loop metadata ([bd9f9ea](https://github.com/Nabsku/pi-prompt-workflows/commit/bd9f9eae3841a515b848a7b73c83b86711b6b456))
+* keep prompt dry-run out of history ([86e31b8](https://github.com/Nabsku/pi-prompt-workflows/commit/86e31b8a895a8579ec0a8d40b800c6dd6faa827b))
+* polish TUI rendering edge cases ([d5c5c77](https://github.com/Nabsku/pi-prompt-workflows/commit/d5c5c776d0ad34c75e67f147f35cb72a39e14b1e))
+* support Kitty inspector controls ([f09904c](https://github.com/Nabsku/pi-prompt-workflows/commit/f09904c5359e75e2cbf4a784bdcddc487d6ad8c7))
+* support Kitty picker input ([2679c62](https://github.com/Nabsku/pi-prompt-workflows/commit/2679c6237d85d455a34ff87a76eb463843010b1c))
 
 ## [Unreleased]
 
@@ -115,7 +115,7 @@
 ## [0.10.0] - 2026-06-18
 
 ### Added
-- Published under the separate package name `pi-prompt-template-model-enhanced` for the enhanced fork line.
+- Published under the separate package name `pi-prompt-workflows` for the enhanced fork line.
 - Added plural `skills` frontmatter for prompt templates, including ordered multi-skill injection and constrained suffix-wildcard selectors such as `golang-*`.
 
 ### Changed

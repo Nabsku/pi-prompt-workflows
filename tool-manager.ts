@@ -34,7 +34,7 @@ export function createToolManager(pi: ExtensionAPI, deps: ToolManagerDeps) {
 		const err = error as NodeJS.ErrnoException;
 		if (err.code !== "ENOENT") {
 			process.stderr.write(
-				`[pi-prompt-template-model-enhanced] Failed to read ${configPath}: ${error instanceof Error ? error.message : String(error)}\n`,
+				`[pi-prompt-workflows] Failed to read ${configPath}: ${error instanceof Error ? error.message : String(error)}\n`,
 			);
 		}
 	}
@@ -45,7 +45,7 @@ export function createToolManager(pi: ExtensionAPI, deps: ToolManagerDeps) {
 			writeFileSync(configPath, JSON.stringify({ toolEnabled, toolGuidance }, null, 2));
 		} catch (error) {
 			process.stderr.write(
-				`[pi-prompt-template-model-enhanced] Failed to write ${configPath}: ${error instanceof Error ? error.message : String(error)}\n`,
+				`[pi-prompt-workflows] Failed to write ${configPath}: ${error instanceof Error ? error.message : String(error)}\n`,
 			);
 		}
 	}

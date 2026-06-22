@@ -1,8 +1,8 @@
 {
-  "name": "pi-prompt-template-model-enhanced",
+  "name": "pi-prompt-workflows",
   "version": "0.14.0",
   "type": "module",
-  "description": "Prompt template model selector extension for pi coding agent",
+  "description": "Prompt workflow extension for Pi coding agent",
   "author": "Nico Bailon",
   "contributors": [
     "Nabsku <thenabsku@gmail.com>"
@@ -10,19 +10,21 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Nabsku/pi-prompt-template-model-enhanced.git"
+    "url": "git+https://github.com/Nabsku/pi-prompt-workflows.git"
   },
   "bugs": {
-    "url": "https://github.com/Nabsku/pi-prompt-template-model-enhanced/issues"
+    "url": "https://github.com/Nabsku/pi-prompt-workflows/issues"
   },
-  "homepage": "https://github.com/Nabsku/pi-prompt-template-model-enhanced#readme",
+  "homepage": "https://github.com/Nabsku/pi-prompt-workflows#readme",
   "keywords": [
     "pi-package",
     "pi",
     "pi-coding-agent",
     "prompt-template",
     "model-selector",
-    "extension"
+    "extension",
+    "prompt-workflow",
+    "workflows"
   ],
   "files": [
     "index.ts",

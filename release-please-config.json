@@ -2,7 +2,7 @@
   "packages": {
     ".": {
       "release-type": "node",
-      "package-name": "pi-prompt-template-model-enhanced",
+      "package-name": "pi-prompt-workflows",
       "changelog-path": "CHANGELOG.md",
       "include-component-in-tag": false
     }

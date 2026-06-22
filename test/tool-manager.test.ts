@@ -29,7 +29,7 @@ class FakePi {
 }
 
 async function withTempHome(run: (root: string) => Promise<void>) {
-	const root = mkdtempSync(join(tmpdir(), "pi-prompt-template-model-enhanced-tool-manager-"));
+	const root = mkdtempSync(join(tmpdir(), "pi-prompt-workflows-tool-manager-"));
 	const previousHome = process.env.HOME;
 	process.env.HOME = root;
 	try {
