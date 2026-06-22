@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -723,6 +724,86 @@ test("compare prompt expands count, applies taskSuffix, and runs a final applier
 		assert.match(failedReviewerArtifact, /Error: quota/);
 		assert.match(failedReviewerArtifact, /Assistant output:\nPartial reviewer draft/);
 		assert.equal(existsSync(join(runDir, "final-applier.md")), true);
+	});
+});
+
+test("compare prompt commit ask mode reports changed files without committing", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, "README.md"), "before\n");
+		execFileSync("git", ["init"], { cwd });
+		execFileSync("git", ["config", "user.email", "test@example.com"], { cwd });
+		execFileSync("git", ["config", "user.name", "Test User"], { cwd });
+		execFileSync("git", ["add", "README.md"], { cwd });
+		execFileSync("git", ["commit", "-m", "initial"], { cwd });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "compare.md"),
+			[
+				"---",
+				"bestOfN:",
+				"  workers:",
+				"    - agent: delegate",
+				"  reviewers:",
+				"    - agent: reviewer",
+				"  finalApplier:",
+				"    agent: reviewer",
+				"  worktree: true",
+				"  commit: ask",
+				"---",
+				"Fix: $@",
+			].join("\n"),
+		);
+
+		const pi = new FakePi();
+		const { ctx } = createContext(cwd, pi);
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+
+		let phase = 0;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+			const request = payload as any;
+			phase++;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			if (phase === 1 || phase === 2) {
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					...request,
+					messages: [],
+					parallelResults: [
+						{ agent: phase === 1 ? "delegate" : "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: phase === 1 ? "worker output" : "reviewer output" }] }], isError: false },
+					],
+					isError: false,
+				});
+				return;
+			}
+
+			assert.equal(phase, 3);
+			writeFileSync(join(cwd, "README.md"), "after\n");
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [{ role: "assistant", content: [{ type: "text", text: "Applied final patch." }] }],
+				isError: false,
+			});
+		});
+
+		await pi.commands.get("compare")!.handler('bug $(touch nope)', ctx);
+		assert.equal(phase, 3);
+		assert.equal(pi.userMessages.length, 1);
+		assert.match(pi.userMessages[0]!, /\[Compare apply complete: compare\]/);
+		assert.match(pi.userMessages[0]!, /## Commit approval/);
+		assert.match(pi.userMessages[0]!, /`bestOfN\.commit: ask` is enabled/);
+		assert.match(pi.userMessages[0]!, /New status entries since final applier started:/);
+		assert.match(pi.userMessages[0]!, /Pre-existing status before final applier:/);
+		assert.match(pi.userMessages[0]!, /M README\.md/);
+		assert.match(pi.userMessages[0]!, /README\.md/);
+		assert.doesNotMatch(pi.userMessages[0]!, /New status entries since final applier started:[\s\S]*\.pi\/runs[\s\S]*Pre-existing status/);
+		assert.match(pi.userMessages[0]!, /git add --patch/);
+		assert.doesNotMatch(pi.userMessages[0]!, /git add -A/);
+		assert.match(pi.userMessages[0]!, /git commit -m 'feat: apply compare best-of-n result: bug \$\(touch nope\)'/);
+		const runRoot = join(cwd, ".pi", "runs", "best-of-n");
+		const runDir = join(runRoot, readdirSync(runRoot)[0]!);
+		assert.match(readFileSync(join(runDir, "lineup.json"), "utf8"), /"commit": "ask"/);
+		assert.match(execFileSync("git", ["status", "--short"], { cwd, encoding: "utf8" }), / M README\.md/);
 	});
 });
 

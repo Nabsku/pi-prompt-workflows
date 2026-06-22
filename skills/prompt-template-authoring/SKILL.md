@@ -168,7 +168,7 @@ Run multiple workers, aggregate with reviewers, optionally apply final changes. 
 }
 ```
 
-Preset files live at `~/.pi/agent/best-of-n-presets.json` and `<compare-cwd>/.pi/best-of-n-presets.json`. Project presets override user presets after approval. Preset slots only support `agent`/`subagent`, `model`, and `count`; keep `task`, `taskSuffix`, `cwd`, `finalApplier`, `worktree`, and dirty/report/commit policy in prompt templates. Successful compare runs write `.pi/runs/best-of-n/<timestamp>-<prompt>-<id>/report.md` plus `lineup.json`; add `--keep-artifacts` when you also need raw worker/reviewer/final-applier outputs.
+Preset files live at `~/.pi/agent/best-of-n-presets.json` and `<compare-cwd>/.pi/best-of-n-presets.json`. Project presets override user presets after approval. Preset slots only support `agent`/`subagent`, `model`, and `count`; keep `task`, `taskSuffix`, `cwd`, `finalApplier`, `worktree`, and dirty/report/commit policy in prompt templates. Successful compare runs write `.pi/runs/best-of-n/<timestamp>-<prompt>-<id>/report.md` plus `lineup.json`; add `--keep-artifacts` when you also need raw worker/reviewer/final-applier outputs. Use `bestOfN.commit: ask` with a `finalApplier` when you want the completion message to show changed files, diff summary, report path, suggested commit message, and a safe manual `git add --patch` / `git commit -m ...` flow without auto-committing.
 
 ```yaml
 ---
@@ -179,6 +179,7 @@ bestOfN:
   finalApplier:
     agent: delegate
     model: anthropic/claude-sonnet-4-20250514:high
+  commit: ask              # manual commit approval block after finalApplier
 ---
 $@
 ```

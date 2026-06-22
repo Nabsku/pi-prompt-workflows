@@ -2468,6 +2468,7 @@ test("loadPromptsWithModel validates bestOfN compare lineups and cutover diagnos
 					"  finalApplier:",
 					"    model: openai-codex/gpt-5.4:low",
 					"    taskSuffix: Prefer merge plans over narrow wins when the diffs justify it.",
+					"  commit: ask",
 					"  worktree: true",
 					"---",
 					"$@",
@@ -2489,10 +2490,12 @@ test("loadPromptsWithModel validates bestOfN compare lineups and cutover diagnos
 					assert.equal(prompt.finalApplier?.agent, "delegate");
 					assert.equal(prompt.finalApplier?.model, "openai-codex/gpt-5.4:low");
 					assert.equal(prompt.finalApplier?.taskSuffix, "Prefer merge plans over narrow wins when the diffs justify it.");
+					assert.equal(prompt.commit, "ask");
 					assert.equal(prompt.worktree, true);
 					assert.match(buildPromptCommandDescription(prompt), /workers:4/);
 					assert.match(buildPromptCommandDescription(prompt), /reviewers:2/);
 					assert.match(buildPromptCommandDescription(prompt), /final-applier/);
+					assert.match(buildPromptCommandDescription(prompt), /commit:ask/);
 				},
 			},
 			{
@@ -2635,6 +2638,44 @@ test("loadPromptsWithModel validates bestOfN compare lineups and cutover diagnos
 					assert.ok(prompt);
 					assert.equal(prompt.finalApplier, undefined);
 					assert.ok(result.diagnostics.some((d) => d.message.includes("finalApplier") && d.message.includes("count") && d.message.includes("not supported")));
+				},
+			},
+			{
+				name: "bad-commit-without-final-applier",
+				content: [
+					"---",
+					"bestOfN:",
+					"  workers:",
+					"    - model: openai/gpt-5.4",
+					"  commit: ask",
+					"---",
+					"$@",
+				].join("\n"),
+				check(result: ReturnType<typeof loadPromptsWithModel>) {
+					const prompt = result.prompts.get("bad-commit-without-final-applier");
+					assert.ok(prompt);
+					assert.equal(prompt.commit, undefined);
+					assert.ok(result.diagnostics.some((d) => d.code === "invalid-best-of-n-commit" && d.message.includes("requires bestOfN.finalApplier")));
+				},
+			},
+			{
+				name: "bad-commit-value",
+				content: [
+					"---",
+					"bestOfN:",
+					"  workers:",
+					"    - model: openai/gpt-5.4",
+					"  finalApplier:",
+					"    model: openai/gpt-5.4",
+					"  commit: auto",
+					"---",
+					"$@",
+				].join("\n"),
+				check(result: ReturnType<typeof loadPromptsWithModel>) {
+					const prompt = result.prompts.get("bad-commit-value");
+					assert.ok(prompt);
+					assert.equal(prompt.commit, undefined);
+					assert.ok(result.diagnostics.some((d) => d.code === "invalid-best-of-n-commit" && d.message.includes('expected "ask"')));
 				},
 			},
 			{
