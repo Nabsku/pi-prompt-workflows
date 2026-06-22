@@ -30,6 +30,8 @@
     "index.ts",
     "args.ts",
     "best-of-n-presets.ts",
+    "best-of-n-run-history.ts",
+    "best-of-n-run-history-renderer.ts",
     "chain-parser.ts",
     "loop-utils.ts",
     "model-selection.ts",

@@ -52,6 +52,8 @@ import {
 } from "./deterministic-step.js";
 import { renderDeterministicCompletion, renderDeterministicResult } from "./deterministic-renderer.js";
 import { PROMPT_TEMPLATE_COMMIT_ASK_MESSAGE_TYPE, renderCommitAskMessage } from "./commit-ask-renderer.js";
+import { collectBestOfNRunHistory, parseBestOfNRunHistoryArgs } from "./best-of-n-run-history.js";
+import { formatBestOfNRunHistory } from "./best-of-n-run-history-renderer.js";
 import { formatPromptValidationReport, validatePromptTemplates, type RegisteredPromptSkill } from "./prompt-validation.js";
 import {
 	DRY_RUN_CHAIN_UNSUPPORTED,
@@ -2526,6 +2528,18 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		);
 	}
 
+	async function runCompareRunsCommand(args: string, ctx: ExtensionCommandContext) {
+		storedCommandCtx = ctx;
+		const options = parseBestOfNRunHistoryArgs(args);
+		const history = collectBestOfNRunHistory(ctx.cwd, options);
+		const output = formatBestOfNRunHistory(history);
+		if (options.plain) {
+			process.stdout.write(output);
+			return;
+		}
+		notify(ctx, output, "info");
+	}
+
 	refreshPrompts(process.cwd());
 	if (toolManager.isEnabled()) toolManager.ensureRegistered();
 
@@ -2540,6 +2554,18 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			const validation = validatePromptTemplates(ctx.cwd, { registeredSkills: collectRegisteredPromptSkills() });
 			notify(ctx, formatPromptValidationReport(validation), validation.ok ? "info" : "error");
+		},
+	});
+	pi.registerCommand("compare-runs", {
+		description: "List recent best-of-N compare run reports and retained artifacts",
+		handler: async (args, ctx) => {
+			await runCompareRunsCommand(args, ctx);
+		},
+	});
+	pi.registerCommand("best-of-n-runs", {
+		description: "Alias for /compare-runs",
+		handler: async (args, ctx) => {
+			await runCompareRunsCommand(args, ctx);
 		},
 	});
 	pi.registerCommand("print-prompt", {
