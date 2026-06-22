@@ -375,6 +375,22 @@ test("TUI picker unsupported selection surfaces dry-run diagnostic without execu
 	});
 });
 
+test("TUI picker marks preset-only compare prompts unsupported", async () => {
+	await setup("tui", async (cwd, pi, ctx) => {
+		writePrompt(cwd, "compare-preset", "---\nbestOfN:\n  preset: quick\n---\n$@");
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("dry-run-prompt")!.handler!("", ctx);
+
+		assert.equal(pi.customCalls.length, 1);
+		const picker = pi.customComponents.at(-1) as { render(width: number): string[] };
+		const rendered = picker.render(1000).join("\n");
+		assert.match(rendered, /compare-preset\s+project/);
+		assert.match(rendered, /compare-preset[\s\S]*unsupported|unsupported[\s\S]*compare-preset/);
+		assertNoExecutionSideEffects(pi);
+	});
+});
+
 test("TUI picker includes command-capable prompt-library prompts and excludes plain fragments", async () => {
 	await setup("tui", async (cwd, pi, ctx) => {
 		writeLibraryPrompt(cwd, "review-lib", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nLibrary review");

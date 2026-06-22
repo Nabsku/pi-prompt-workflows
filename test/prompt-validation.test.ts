@@ -591,6 +591,22 @@ test("validatePromptTemplates validates best-of-N preset references and preset f
 	});
 });
 
+test("validatePromptTemplates rejects best-of-N preset references that exceed maxModelCalls", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "compare.md"), "---\nbestOfN:\n  preset: capped\n---\n$@");
+		writeFileSync(join(cwd, ".pi", "best-of-n-presets.json"), JSON.stringify({ presets: { capped: { maxModelCalls: 2, workers: [{ agent: "delegate", count: 2 }] } } }));
+
+		const result = validatePromptTemplates(cwd);
+
+		assert.equal(result.ok, false);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "best-of-n-preset-cap-exceeded"), true);
+		assert.match(result.diagnostics.find((diagnostic) => diagnostic.code === "best-of-n-preset-cap-exceeded")?.message ?? "", /expanded worker\/reviewer calls \(3\) exceed maxModelCalls \(2\)/);
+	});
+});
+
 test("validatePromptTemplates ignores invalid preset files when no prompt references a preset", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");

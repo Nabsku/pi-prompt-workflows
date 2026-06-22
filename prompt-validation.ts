@@ -1,8 +1,8 @@
 import { resolve as resolvePath } from "node:path";
-import { loadBestOfNPresetCatalog } from "./best-of-n-presets.js";
+import { loadBestOfNPresetCatalog, type ResolvedBestOfNPreset } from "./best-of-n-presets.js";
 import { parseChainDeclaration, type ChainStep, type ChainStepOrParallel } from "./chain-parser.js";
 import { collectPromptIncludeGraphs, type PromptIncludeGraph, type PromptIncludeGraphEdge, type PromptIncludeGraphNode } from "./prompt-includes.js";
-import { collectPromptSourceRecords, discoverFilesystemSkills, loadPromptsWithModel, readSkillContent, resolveSkillPath, type PromptLoaderDiagnostic, type PromptSource, type PromptSourceRecord } from "./prompt-loader.js";
+import { collectPromptSourceRecords, discoverFilesystemSkills, loadPromptsWithModel, readSkillContent, resolveSkillPath, type PromptLoaderDiagnostic, type PromptSource, type PromptSourceRecord, type PromptWithModel } from "./prompt-loader.js";
 
 export interface RegisteredPromptSkill {
 	skillName: string;
@@ -316,6 +316,17 @@ function validatePromptChains(cwd: string, result: PromptValidationResult, promp
 	}
 }
 
+function expandedSlotCount(slots: Array<{ count?: number }> | undefined): number {
+	return (slots ?? []).reduce((total, slot) => total + (slot.count ?? 1), 0);
+}
+
+function presetExpandedCallCount(preset: ResolvedBestOfNPreset, prompt: PromptWithModel): number {
+	const workerSlots = preset.workers ?? prompt.workers;
+	const reviewerSlots = preset.reviewers ?? prompt.reviewers;
+	return (workerSlots && workerSlots.length > 0 ? expandedSlotCount(workerSlots) : 1)
+		+ (reviewerSlots && reviewerSlots.length > 0 ? expandedSlotCount(reviewerSlots) : 1);
+}
+
 function validateComparePrompts(cwd: string, result: PromptValidationResult, prompts: ReturnType<typeof loadPromptsWithModel>["prompts"]) {
 	const catalogByCwd = new Map<string, ReturnType<typeof loadBestOfNPresetCatalog>>();
 	function catalogFor(catalogCwd: string) {
@@ -331,7 +342,8 @@ function validateComparePrompts(cwd: string, result: PromptValidationResult, pro
 	for (const prompt of prompts.values()) {
 		if (prompt.preset) {
 			const presetCatalog = catalogFor(prompt.cwd ?? cwd);
-			if (!presetCatalog.presets.has(prompt.preset)) {
+			const preset = presetCatalog.presets.get(prompt.preset);
+			if (!preset) {
 				result.diagnostics.push(
 					createValidationDiagnostic(
 						"best-of-n-preset-not-found",
@@ -340,6 +352,18 @@ function validateComparePrompts(cwd: string, result: PromptValidationResult, pro
 						`Prompt template ${prompt.filePath} references missing best-of-N preset ${JSON.stringify(prompt.preset)}.`,
 					),
 				);
+			} else if (preset.maxModelCalls !== undefined) {
+				const modelCalls = presetExpandedCallCount(preset, prompt);
+				if (modelCalls > preset.maxModelCalls) {
+					result.diagnostics.push(
+						createValidationDiagnostic(
+							"best-of-n-preset-cap-exceeded",
+							prompt.filePath,
+							prompt.source,
+							`Prompt template ${prompt.filePath} references best-of-N preset ${JSON.stringify(prompt.preset)}, but its expanded worker/reviewer calls (${modelCalls}) exceed maxModelCalls (${preset.maxModelCalls}).`,
+						),
+					);
+				}
 			}
 		}
 

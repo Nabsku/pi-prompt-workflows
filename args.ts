@@ -241,6 +241,60 @@ export function extractWorktreeFlag(argsString: string): { args: string; worktre
 	return { args, worktree: found };
 }
 
+const LINEUP_OVERRIDE_VALUE_PREFIXES = [
+	"--workers=",
+	"--workers-append=",
+	"--reviewers=",
+	"--reviewers-append=",
+	"--final-applier=",
+] as const;
+
+function readJsonLikeFlagTokenEnd(argsString: string, tokenStart: number): number {
+	const plainEnd = () => {
+		let end = tokenStart;
+		while (end < argsString.length && !/\s/.test(argsString[end])) end++;
+		return end;
+	};
+	const prefix = LINEUP_OVERRIDE_VALUE_PREFIXES.find((candidate) => argsString.startsWith(candidate, tokenStart));
+	if (!prefix) return plainEnd();
+	let i = tokenStart + prefix.length;
+	if (argsString[i] === '"' || argsString[i] === "'") {
+		const quote = argsString[i++];
+		while (i < argsString.length) {
+			if (argsString[i] === "\\") {
+				i += 2;
+				continue;
+			}
+			if (argsString[i] === quote) return i + 1;
+			i++;
+		}
+		return i;
+	}
+	const opener = argsString[i];
+	const closer = opener === "[" ? "]" : opener === "{" ? "}" : undefined;
+	if (!closer) return plainEnd();
+	let depth = 0;
+	let inString = false;
+	for (; i < argsString.length; i++) {
+		const char = argsString[i];
+		if (inString) {
+			if (char === "\\") i++;
+			else if (char === '"') inString = false;
+			continue;
+		}
+		if (char === '"') {
+			inString = true;
+			continue;
+		}
+		if (char === opener) depth++;
+		else if (char === closer) {
+			depth--;
+			if (depth === 0) return i + 1;
+		}
+	}
+	return i;
+}
+
 export function extractSubagentOverride(argsString: string): SubagentOverrideExtraction {
 	let override: SubagentOverride | undefined;
 	let cwdRaw: string | undefined;
@@ -267,7 +321,7 @@ export function extractSubagentOverride(argsString: string): SubagentOverrideExt
 		}
 
 		const tokenStart = i;
-		while (i < argsString.length && !/\s/.test(argsString[i])) i++;
+		i = readJsonLikeFlagTokenEnd(argsString, tokenStart);
 		const token = argsString.slice(tokenStart, i);
 
 		if (token === "--subagent") {

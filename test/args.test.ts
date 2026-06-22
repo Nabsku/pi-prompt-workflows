@@ -314,6 +314,9 @@ test("extractSubagentOverride extracts --preset and strips it from args", () => 
 		override: { enabled: true },
 		fork: true,
 	});
+	assert.deepEqual(extractSubagentOverride('task --workers=[{"agent":"delegate","taskSuffix":"do not use --preset quick"}]'), {
+		args: 'task --workers=[{"agent":"delegate","taskSuffix":"do not use --preset quick"}]',
+	});
 });
 
 test("extractSubagentOverride extracts --fork and implies --subagent", () => {

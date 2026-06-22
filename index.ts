@@ -1556,7 +1556,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 	function getDryRunUnsupportedReason(prompt: PromptWithModel): string | undefined {
 		if (prompt.chain) return DRY_RUN_CHAIN_UNSUPPORTED;
-		if (prompt.workers !== undefined || prompt.reviewers !== undefined || prompt.finalApplier !== undefined) return DRY_RUN_COMPARE_UNSUPPORTED;
+		if (prompt.workers !== undefined || prompt.reviewers !== undefined || prompt.finalApplier !== undefined || prompt.preset !== undefined) return DRY_RUN_COMPARE_UNSUPPORTED;
 		if (prompt.deterministic) return DRY_RUN_DETERMINISTIC_UNSUPPORTED;
 		return undefined;
 	}
