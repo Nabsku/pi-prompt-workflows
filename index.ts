@@ -74,7 +74,7 @@ interface LoopState {
 	rotationLabel?: string;
 }
 
-type ReportLineupSlot = DelegationLineupSlot & { effectiveModel: string };
+type ReportLineupSlot = DelegationLineupSlot & { effectiveModel: string; effectiveTask: string };
 
 interface FreshCollapse {
 	targetId: string;
@@ -756,14 +756,14 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		return `${model.provider}/${model.id}`;
 	}
 
-	async function resolveReportLineupSlot(slot: DelegationLineupSlot, inheritedModel: Model<any>, ctx: ExtensionCommandContext): Promise<ReportLineupSlot> {
-		if (!slot.model) return { ...slot, effectiveModel: formatModelRef(inheritedModel) };
+	async function resolveReportLineupSlot(slot: DelegationLineupSlot, inheritedModel: Model<any>, ctx: ExtensionCommandContext, effectiveTask: string): Promise<ReportLineupSlot> {
+		if (!slot.model) return { ...slot, effectiveModel: formatModelRef(inheritedModel), effectiveTask };
 		const selected = await selectModelCandidate([slot.model], inheritedModel, ctx.modelRegistry);
-		return { ...slot, effectiveModel: selected ? formatModelRef(selected.model) : slot.model };
+		return { ...slot, effectiveModel: selected ? formatModelRef(selected.model) : slot.model, effectiveTask };
 	}
 
-	async function resolveReportLineupSlots(slots: DelegationLineupSlot[], inheritedModel: Model<any>, ctx: ExtensionCommandContext): Promise<ReportLineupSlot[]> {
-		return Promise.all(slots.map((slot) => resolveReportLineupSlot(slot, inheritedModel, ctx)));
+	async function resolveReportLineupSlots(slots: DelegationLineupSlot[], inheritedModel: Model<any>, ctx: ExtensionCommandContext, effectiveTaskForSlot: (slot: DelegationLineupSlot) => string): Promise<ReportLineupSlot[]> {
+		return Promise.all(slots.map((slot) => resolveReportLineupSlot(slot, inheritedModel, ctx, effectiveTaskForSlot(slot))));
 	}
 
 	function serializeLineupSlot(slot: ReportLineupSlot): Record<string, unknown> {
@@ -771,6 +771,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			agent: slot.agent,
 			...(slot.model ? { model: slot.model } : {}),
 			effectiveModel: slot.effectiveModel,
+			effectiveTask: slot.effectiveTask,
 			...(slot.cwd ? { cwd: slot.cwd } : {}),
 			...(slot.task ? { task: slot.task } : {}),
 			...(slot.taskSuffix ? { taskSuffix: slot.taskSuffix } : {}),
@@ -1041,10 +1042,10 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 
 		try {
-			const reportWorkers = await resolveReportLineupSlots(normalizedWorkers, baseModel, ctx);
-			const reportReviewers = await resolveReportLineupSlots(normalizedReviewers, baseModel, ctx);
+			const reportWorkers = await resolveReportLineupSlots(normalizedWorkers, baseModel, ctx, (slot) => buildLineupSlotTask(sharedTask, slot, taskArgs));
+			const reportReviewers = await resolveReportLineupSlots(normalizedReviewers, baseModel, ctx, (slot) => buildLineupSlotTask(DEFAULT_COMPARE_REVIEWER_TASK, slot, taskArgs));
 			const reportFinalApplier = normalizedFinalApplier
-				? await resolveReportLineupSlot(normalizedFinalApplier, baseModel, ctx)
+				? await resolveReportLineupSlot(normalizedFinalApplier, baseModel, ctx, buildLineupSlotTask(DEFAULT_COMPARE_FINAL_APPLIER_TASK, normalizedFinalApplier, taskArgs))
 				: undefined;
 
 			const workerResult = await executeSubagentPromptStep({
