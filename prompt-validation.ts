@@ -1,3 +1,4 @@
+import { loadBestOfNPresetCatalog } from "./best-of-n-presets.js";
 import { parseChainDeclaration, type ChainStep, type ChainStepOrParallel } from "./chain-parser.js";
 import { collectPromptIncludeGraphs, type PromptIncludeGraph, type PromptIncludeGraphEdge, type PromptIncludeGraphNode } from "./prompt-includes.js";
 import { collectPromptSourceRecords, discoverFilesystemSkills, loadPromptsWithModel, readSkillContent, resolveSkillPath, type PromptLoaderDiagnostic, type PromptSource, type PromptSourceRecord } from "./prompt-loader.js";
@@ -315,7 +316,20 @@ function validatePromptChains(cwd: string, result: PromptValidationResult, promp
 }
 
 function validateComparePrompts(cwd: string, result: PromptValidationResult, prompts: ReturnType<typeof loadPromptsWithModel>["prompts"]) {
+	const presetCatalog = loadBestOfNPresetCatalog(cwd);
+	result.diagnostics.push(...presetCatalog.diagnostics);
 	for (const prompt of prompts.values()) {
+		if (prompt.preset && !presetCatalog.presets.has(prompt.preset)) {
+			result.diagnostics.push(
+				createValidationDiagnostic(
+					"best-of-n-preset-not-found",
+					prompt.filePath,
+					prompt.source,
+					`Prompt template ${prompt.filePath} references missing best-of-N preset ${JSON.stringify(prompt.preset)}.`,
+				),
+			);
+		}
+
 		if (prompt.finalApplier && prompt.worktree !== true) {
 			result.diagnostics.push(
 				createValidationDiagnostic(

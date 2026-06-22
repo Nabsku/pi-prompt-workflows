@@ -104,6 +104,7 @@ export interface PromptWithModel {
 	workers?: DelegationLineupSlot[];
 	reviewers?: DelegationLineupSlot[];
 	finalApplier?: DelegationLineupSlot;
+	preset?: string;
 	source: PromptSource;
 	rootKind: PromptRootKind;
 	subdir?: string;
@@ -1884,9 +1885,11 @@ function loadPromptsWithModelFromDir(
 				const workers = normalizeLineup(hasBestOfN ? bestOfN?.workers : undefined, "workers", fullPath, source, diagnostics);
 				const reviewers = normalizeLineup(hasBestOfN ? bestOfN?.reviewers : undefined, "reviewers", fullPath, source, diagnostics);
 				const finalApplier = normalizeFinalApplier(hasBestOfN ? bestOfN?.finalApplier : undefined, fullPath, source, diagnostics);
+				const preset = normalizeStringField("best-of-n-preset", hasBestOfN ? bestOfN?.preset : undefined, fullPath, source, diagnostics);
 				let safeWorkers = workers;
 				let safeReviewers = reviewers;
 				let safeFinalApplier = finalApplier;
+				let safePreset = preset;
 				if (chain && subagent !== undefined) {
 					diagnostics.push(
 						createDiagnostic(
@@ -1909,7 +1912,7 @@ function loadPromptsWithModelFromDir(
 					);
 					deterministic = undefined;
 				}
-				if (chain && (safeWorkers !== undefined || safeReviewers !== undefined || safeFinalApplier !== undefined)) {
+				if (chain && (safeWorkers !== undefined || safeReviewers !== undefined || safeFinalApplier !== undefined || safePreset !== undefined)) {
 					diagnostics.push(
 						createDiagnostic(
 							"invalid-lineup-chain",
@@ -1921,8 +1924,9 @@ function loadPromptsWithModelFromDir(
 					safeWorkers = undefined;
 					safeReviewers = undefined;
 					safeFinalApplier = undefined;
+					safePreset = undefined;
 				}
-				if (subagent !== undefined && (safeWorkers !== undefined || safeReviewers !== undefined || safeFinalApplier !== undefined)) {
+				if (subagent !== undefined && (safeWorkers !== undefined || safeReviewers !== undefined || safeFinalApplier !== undefined || safePreset !== undefined)) {
 					diagnostics.push(
 						createDiagnostic(
 							"invalid-lineup-subagent",
@@ -1934,6 +1938,7 @@ function loadPromptsWithModelFromDir(
 					safeWorkers = undefined;
 					safeReviewers = undefined;
 					safeFinalApplier = undefined;
+					safePreset = undefined;
 				}
 				if (subagent !== undefined && deterministic !== undefined) {
 					diagnostics.push(
@@ -1979,7 +1984,7 @@ function loadPromptsWithModelFromDir(
 					);
 					safeParallel = undefined;
 				}
-				if (safeParallel !== undefined && (safeWorkers !== undefined || safeReviewers !== undefined || safeFinalApplier !== undefined)) {
+				if (safeParallel !== undefined && (safeWorkers !== undefined || safeReviewers !== undefined || safeFinalApplier !== undefined || safePreset !== undefined)) {
 					diagnostics.push(
 						createDiagnostic(
 							"invalid-lineup-parallel",
@@ -1991,6 +1996,7 @@ function loadPromptsWithModelFromDir(
 					safeWorkers = undefined;
 					safeReviewers = undefined;
 					safeFinalApplier = undefined;
+					safePreset = undefined;
 				}
 				if (safeParallel !== undefined && deterministic !== undefined) {
 					diagnostics.push(
@@ -2003,7 +2009,7 @@ function loadPromptsWithModelFromDir(
 					);
 					deterministic = undefined;
 				}
-				const hasLineup = safeWorkers !== undefined || safeReviewers !== undefined || safeFinalApplier !== undefined;
+				const hasLineup = safeWorkers !== undefined || safeReviewers !== undefined || safeFinalApplier !== undefined || safePreset !== undefined;
 				if (!hasBestOfN && hasLegacyCompareFields) {
 					diagnostics.push(
 						createDiagnostic(
@@ -2223,6 +2229,7 @@ function loadPromptsWithModelFromDir(
 					workers: safeWorkers,
 					reviewers: safeReviewers,
 					finalApplier: safeFinalApplier,
+					preset: safePreset,
 					source,
 					rootKind,
 					subdir: subdir || undefined,
