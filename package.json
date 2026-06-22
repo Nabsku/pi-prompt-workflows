@@ -42,6 +42,7 @@
     "prompt-validation.ts",
     "deterministic-step.ts",
     "deterministic-renderer.ts",
+    "commit-ask-renderer.ts",
     "subagent-renderer.ts",
     "subagent-runtime.ts",
     "subagent-step.ts",

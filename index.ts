@@ -51,6 +51,7 @@ import {
 	shouldHandoffToLlm,
 } from "./deterministic-step.js";
 import { renderDeterministicCompletion, renderDeterministicResult } from "./deterministic-renderer.js";
+import { PROMPT_TEMPLATE_COMMIT_ASK_MESSAGE_TYPE, renderCommitAskMessage } from "./commit-ask-renderer.js";
 import { formatPromptValidationReport, validatePromptTemplates, type RegisteredPromptSkill } from "./prompt-validation.js";
 import {
 	DRY_RUN_CHAIN_UNSUPPORTED,
@@ -253,6 +254,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	pi.registerMessageRenderer(PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE, renderDelegatedSubagentResult);
 	pi.registerMessageRenderer(PROMPT_TEMPLATE_DETERMINISTIC_MESSAGE_TYPE, renderDeterministicResult);
 	pi.registerMessageRenderer(PROMPT_TEMPLATE_DETERMINISTIC_COMPLETION_MESSAGE_TYPE, renderDeterministicCompletion);
+	pi.registerMessageRenderer(PROMPT_TEMPLATE_COMMIT_ASK_MESSAGE_TYPE, renderCommitAskMessage);
 
 	function registerPromptCommand(name: string) {
 		pi.registerCommand(name, {
@@ -917,7 +919,10 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		afterFinalApplier: GitSnapshot;
 	}): string {
 		const suggestedMessage = buildSuggestedBestOfNCommitMessage(options.promptName, options.taskArgs);
-		const command = `git commit -m ${shellQuote(suggestedMessage)}`;
+		const gitBase = `git -C ${shellQuote(options.compareCwd)}`;
+		const addPatchCommand = `${gitBase} add --patch`;
+		const addIntentCommand = `${gitBase} add -N -- ${shellQuote("<path>")}`;
+		const command = `${gitBase} commit -m ${shellQuote(suggestedMessage)}`;
 		const changedStatus = statusLinesChangedAfter(options.beforeFinalApplier.status, options.afterFinalApplier.status);
 		return [
 			"## Commit approval",
@@ -946,9 +951,13 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			"```",
 			[options.beforeFinalApplier.diffStat, options.beforeFinalApplier.shortStat].filter((value): value is string => Boolean(value)).join("\n") || "(empty)",
 			"```",
-			"Stage only the intended files, for example:",
+			"Stage only the intended tracked-file hunks, for example:",
 			"```bash",
-			"git add --patch",
+			addPatchCommand,
+			"```",
+			"For intended new files shown as `??`, first mark the path for patch selection (or explicitly stage the file):",
+			"```bash",
+			addIntentCommand,
 			"```",
 			"Then commit the staged changes:",
 			"```bash",
@@ -1291,9 +1300,23 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				finalText: finalResult.text,
 			}, ctx);
 			const commitAsk = prompt.commit === "ask" && beforeFinalApplierSnapshot && afterFinalApplierSnapshot
-				? `\n\n${renderBestOfNCommitAsk({ compareCwd, promptName: name, taskArgs, reportPath, beforeFinalApplier: beforeFinalApplierSnapshot, afterFinalApplier: afterFinalApplierSnapshot })}`
+				? renderBestOfNCommitAsk({ compareCwd, promptName: name, taskArgs, reportPath, beforeFinalApplier: beforeFinalApplierSnapshot, afterFinalApplier: afterFinalApplierSnapshot })
 				: "";
-			pi.sendUserMessage(`[Compare apply complete: ${name}]\n\n${formatRunReportCompletionLine(reportPath)}\n\n${finalResult.text}${commitAsk}`);
+			pi.sendUserMessage(`[Compare apply complete: ${name}]\n\n${formatRunReportCompletionLine(reportPath)}\n\n${finalResult.text}`);
+			if (commitAsk) {
+				pi.sendMessage({
+					customType: PROMPT_TEMPLATE_COMMIT_ASK_MESSAGE_TYPE,
+					content: `[Commit approval: ${name}]`,
+					display: true,
+					details: {
+						approvalText: commitAsk,
+						promptName: name,
+						compareCwd,
+						reportPath,
+						commit: "ask",
+					},
+				});
+			}
 			await waitForTurnStart(ctx);
 			await ctx.waitForIdle();
 		} catch (error) {
