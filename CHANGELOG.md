@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.15.0](https://github.com/Nabsku/pi-prompt-workflows/compare/v0.14.0...v0.15.0) (2026-06-22)
+
+
+### Features
+
+* add best-of-n commit ask mode ([4bed638](https://github.com/Nabsku/pi-prompt-workflows/commit/4bed638ea9acc23b69d6c21bae8fe53b91362840))
+* add best-of-n run reports ([0059555](https://github.com/Nabsku/pi-prompt-workflows/commit/0059555afb8a95cde0b688a4ac6779800b48259c))
+
+
+### Bug Fixes
+
+* close commit approval review gaps ([bf41003](https://github.com/Nabsku/pi-prompt-workflows/commit/bf410030ac62c82f711357d00d221cb5e56f08bf))
+* cover dirty approval edge cases ([dc42b42](https://github.com/Nabsku/pi-prompt-workflows/commit/dc42b42e31238ae06b0a14e8dae4d8c120b86360))
+* detect dirty approval changes precisely ([fe3c9fb](https://github.com/Nabsku/pi-prompt-workflows/commit/fe3c9fb6fbeb3131c39b143e65b0de1ed46090a9))
+* handle approval review edge cases ([66b68c2](https://github.com/Nabsku/pi-prompt-workflows/commit/66b68c2cb05b822050e320d4f233032e3e8dcb7f))
+* harden best-of-n commit approval ([670d88a](https://github.com/Nabsku/pi-prompt-workflows/commit/670d88a80170ebcba220f7e92b857dfed034c692))
+* harden best-of-n commit ask handoff ([a667078](https://github.com/Nabsku/pi-prompt-workflows/commit/a6670789ac4351e1b20091b00c0b45f8a13d7df5))
+* harden best-of-n report artifacts ([0f7df3d](https://github.com/Nabsku/pi-prompt-workflows/commit/0f7df3d22d44cffd6037fca83f20cbf3ac714105))
+* preserve best-of-n lineup task metadata ([0d1159a](https://github.com/Nabsku/pi-prompt-workflows/commit/0d1159a41996ab4dfccf57bda1f042ac7d8e69ef))
+* preserve commit ask git status columns ([145ed0e](https://github.com/Nabsku/pi-prompt-workflows/commit/145ed0efbe55ecb3eb3bb0c5be26bba9b68d1f27))
+* record actual best-of-n delegated tasks ([5c175d9](https://github.com/Nabsku/pi-prompt-workflows/commit/5c175d9b21b028ee80b4eac9d8731d447aa8c20f))
+* record effective best-of-n tasks ([e9d14d1](https://github.com/Nabsku/pi-prompt-workflows/commit/e9d14d1dda64be91468aa5d9071fbe069bcf9328))
+* use raw git diff capture for approval ([be1d06b](https://github.com/Nabsku/pi-prompt-workflows/commit/be1d06b4436bffbdcdfe1bca4a49abdbebabde1a))
+
 ## [0.14.0](https://github.com/Nabsku/pi-prompt-workflows/compare/v0.13.1...v0.14.0) (2026-06-22)
 
 
