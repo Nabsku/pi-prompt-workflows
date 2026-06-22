@@ -32,6 +32,41 @@ No more manually switching models, copying standard instructions between prompts
 - **Pi-native TUI**: browse templates and inspect dry-run output interactively in Pi TUI mode without typing template names.
 - **Execution control**: loops, model rotation, fresh context, boomerang collapse, delegated subagents, chains, and best-of-N compare prompts.
 
+## Differences from upstream
+
+This package is an enhanced fork of [`pi-prompt-template-model`](https://github.com/nicobailon/pi-prompt-template-model), with compatibility preserved where practical and new workflow features kept opt-in where possible.
+
+### Additions
+
+- Prompt includes from shared Markdown partials and prompt-library roots.
+- Multiple skill injection via `skills`, plus constrained wildcard skill selectors.
+- Dry-run previews and a Pi-native TUI picker/inspector for prompt templates.
+- Loop controls, model rotation, fresh context, and boomerang context collapse.
+- Chain templates, deterministic prompt steps, delegated subagents, and parallel delegation helpers.
+- Best-of-N compare prompts with reusable preset catalogs.
+- Richer `/validate-prompts` diagnostics, include graphs, and source summaries.
+
+### Behavior changes and stricter validation
+
+- Invalid prompt config is reported and skipped more consistently instead of running with silently degraded behavior.
+- Prompt-library commands have extra trust checks because they can come from project-local reusable libraries.
+- Duplicate prompt and prompt-library precedence is deterministic and reported with diagnostics.
+- Runtime flags are scoped to prompt types that support them; for example, `--preset` only affects compare prompts.
+- Project best-of-N presets require session approval and invalid project presets fail closed instead of falling back to same-named user presets.
+
+### Breaking or migration notes
+
+- Compare prompt templates must use nested `bestOfN:` frontmatter. Top-level `workers`, `reviewers`, and `finalApplier` fields are rejected with migration diagnostics.
+- `skills:` must be a list. Use `skill: name` for a single skill.
+- Some fields that upstream accepted loosely are now type-checked before registration, including prompt includes, chain declarations, loop values, cwd paths, compare lineups, and preset catalogs.
+- Best-of-N presets intentionally cannot set execution-policy fields such as `task`, `taskSuffix`, `cwd`, `finalApplier`, `worktree`, dirty/report/commit policy, or other prompt-owned behavior.
+
+### Small tweaks
+
+- Better command descriptions and runtime warnings for ignored or unsupported flags.
+- More deterministic model/thinking fallback behavior in dry-run and execution paths.
+- Packaged examples, authoring skill docs, and validation output are kept aligned with shipped behavior.
+
 ## Installation
 
 ```bash
