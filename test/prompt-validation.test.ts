@@ -592,6 +592,22 @@ test("validatePromptTemplates validates best-of-N preset references and preset f
 	});
 });
 
+test("validatePromptTemplates resolves best-of-N presets from prompt cwd", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const target = join(root, "target");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(target, ".pi"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "compare.md"), `---\ncwd: ${target}\nbestOfN:\n  preset: targetQuick\n---\n$@`);
+		writeFileSync(join(target, ".pi", "best-of-n-presets.json"), JSON.stringify({ presets: { targetQuick: { workers: [{ agent: "delegate" }] } } }));
+
+		const result = validatePromptTemplates(cwd);
+
+		assert.equal(result.ok, true);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "best-of-n-preset-not-found"), false);
+	});
+});
+
 test("validatePromptTemplates rejects worktree parallel steps with mixed effective cwd values", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");

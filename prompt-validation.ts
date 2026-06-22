@@ -1,3 +1,4 @@
+import { resolve as resolvePath } from "node:path";
 import { loadBestOfNPresetCatalog } from "./best-of-n-presets.js";
 import { parseChainDeclaration, type ChainStep, type ChainStepOrParallel } from "./chain-parser.js";
 import { collectPromptIncludeGraphs, type PromptIncludeGraph, type PromptIncludeGraphEdge, type PromptIncludeGraphNode } from "./prompt-includes.js";
@@ -316,9 +317,19 @@ function validatePromptChains(cwd: string, result: PromptValidationResult, promp
 }
 
 function validateComparePrompts(cwd: string, result: PromptValidationResult, prompts: ReturnType<typeof loadPromptsWithModel>["prompts"]) {
-	const presetCatalog = loadBestOfNPresetCatalog(cwd);
-	result.diagnostics.push(...presetCatalog.diagnostics);
+	const catalogByCwd = new Map<string, ReturnType<typeof loadBestOfNPresetCatalog>>();
+	function catalogFor(catalogCwd: string) {
+		const key = resolvePath(catalogCwd);
+		let catalog = catalogByCwd.get(key);
+		if (!catalog) {
+			catalog = loadBestOfNPresetCatalog(catalogCwd);
+			catalogByCwd.set(key, catalog);
+			result.diagnostics.push(...catalog.diagnostics);
+		}
+		return catalog;
+	}
 	for (const prompt of prompts.values()) {
+		const presetCatalog = catalogFor(prompt.cwd ?? cwd);
 		if (prompt.preset && !presetCatalog.presets.has(prompt.preset)) {
 			result.diagnostics.push(
 				createValidationDiagnostic(
