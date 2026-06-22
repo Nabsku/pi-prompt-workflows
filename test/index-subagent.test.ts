@@ -1154,3 +1154,54 @@ test("project best-of-N presets resolve from compare cwd", async () => {
 		assert.equal(firstTaskCount, 2);
 	});
 });
+
+test("best-of-N preset maxModelCalls aborts before delegation", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(root, ".pi", "agent"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "compare.md"), "---\nbestOfN:\n  preset: capped\n---\n$@");
+		writeFileSync(
+			join(root, ".pi", "agent", "best-of-n-presets.json"),
+			JSON.stringify({ presets: { capped: { maxModelCalls: 2, workers: [{ agent: "delegate", count: 3 }], reviewers: [{ agent: "reviewer" }] } } }),
+		);
+
+		const pi = new FakePi();
+		const { ctx } = createContext(cwd, pi);
+		promptModelExtension(pi as never);
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, () => {
+			assert.fail("maxModelCalls should reject before delegated execution");
+		});
+
+		await pi.emit("session_start", {}, ctx);
+		await pi.commands.get("compare")!.handler("fix it", ctx);
+		assert.equal(pi.userMessages.length, 0);
+	});
+});
+
+test("runtime --preset is ignored for non-compare prompts", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "plain.md"),
+			[
+				"---",
+				"model: anthropic/claude-sonnet-4-20250514",
+				"---",
+				"plain $@",
+			].join("\n"),
+		);
+
+		const pi = new FakePi();
+		const { ctx } = createContext(cwd, pi);
+		promptModelExtension(pi as never);
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, () => {
+			assert.fail("plain prompt should not route to compare delegation");
+		});
+
+		await pi.emit("session_start", {}, ctx);
+		await pi.commands.get("plain")!.handler("--preset quick task", ctx);
+		assert.deepEqual(pi.userMessages, ["plain task"]);
+	});
+});
