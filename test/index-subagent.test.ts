@@ -563,7 +563,7 @@ test("compare prompt expands count, applies taskSuffix, and runs a final applier
 				"  workers:",
 				"    - subagent: true",
 				"      model: anthropic/claude-sonnet-4-20250514",
-				"      taskSuffix: Save findings to `.compare-findings/w1.md`.",
+				"      taskSuffix: Save findings to `.compare-findings/w1.md`. <if-model is=\"anthropic/claude-sonnet-4-20250514\">MODEL MATCH<else>MODEL MISS</if-model>",
 				"      count: 2",
 				"    - subagent: delegate",
 				"      task: Implement alternate path for $1",
@@ -602,8 +602,8 @@ test("compare prompt expands count, applies taskSuffix, and runs a final applier
 						"anthropic/claude-sonnet-4-20250514",
 					],
 				);
-				assert.match(request.tasks?.[0]?.task ?? "", /^Implement: fix bug\n\nSave findings to `\.compare-findings\/w1\.md`\.$/);
-				assert.match(request.tasks?.[1]?.task ?? "", /^Implement: fix bug\n\nSave findings to `\.compare-findings\/w1\.md`\.$/);
+				assert.match(request.tasks?.[0]?.task ?? "", /^Implement: fix bug\n\nSave findings to `\.compare-findings\/w1\.md`\. MODEL MATCH$/);
+				assert.match(request.tasks?.[1]?.task ?? "", /^Implement: fix bug\n\nSave findings to `\.compare-findings\/w1\.md`\. MODEL MATCH$/);
 				assert.match(request.tasks?.[2]?.task ?? "", /^Implement alternate path for fix$/);
 				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
 					...request,
@@ -695,21 +695,26 @@ test("compare prompt expands count, applies taskSuffix, and runs a final applier
 		const lineup = JSON.parse(readFileSync(join(runDir, "lineup.json"), "utf8"));
 		assert.equal(lineup.workers.length, 3);
 		assert.equal(lineup.workers[0].effectiveModel, "anthropic/claude-sonnet-4-20250514");
-		assert.equal(lineup.workers[0].taskSuffix, "Save findings to `.compare-findings/w1.md`.");
-		assert.equal(lineup.workers[0].effectiveTask, "Implement: fix bug\n\nSave findings to `.compare-findings/w1.md`.");
+		assert.equal(lineup.workers[0].taskSuffix, "Save findings to `.compare-findings/w1.md`. <if-model is=\"anthropic/claude-sonnet-4-20250514\">MODEL MATCH<else>MODEL MISS</if-model>");
+		assert.equal(lineup.workers[0].effectiveTask, "Implement: fix bug\n\nSave findings to `.compare-findings/w1.md`. MODEL MATCH");
 		assert.equal(lineup.workers[1].agent, "delegate");
-		assert.equal(lineup.workers[1].effectiveTask, "Implement: fix bug\n\nSave findings to `.compare-findings/w1.md`.");
+		assert.equal(lineup.workers[1].effectiveTask, "Implement: fix bug\n\nSave findings to `.compare-findings/w1.md`. MODEL MATCH");
 		assert.equal(lineup.workers[2].effectiveModel, "anthropic/claude-sonnet-4-20250514");
 		assert.equal(lineup.workers[2].task, "Implement alternate path for $1");
 		assert.equal(lineup.workers[2].effectiveTask, "Implement alternate path for fix");
 		assert.equal(lineup.reviewers.length, 2);
 		assert.equal(lineup.reviewers[0].effectiveModel, "anthropic/claude-sonnet-4-20250514");
 		assert.equal(lineup.reviewers[0].taskSuffix, "Mention `.compare-findings/w1.md` in the recommendation.");
+		assert.match(lineup.reviewers[0].effectiveTask, /\[Original implementation task\]/);
+		assert.match(lineup.reviewers[0].effectiveTask, /\[Worker outputs and worktree summaries\]/);
 		assert.match(lineup.reviewers[0].effectiveTask, /Review the worker variants/);
 		assert.match(lineup.reviewers[0].effectiveTask, /Mention `\.compare-findings\/w1\.md` in the recommendation\./);
 		assert.equal(lineup.finalApplier.agent, "reviewer");
 		assert.equal(lineup.finalApplier.effectiveModel, "anthropic/claude-sonnet-4-20250514");
 		assert.equal(lineup.finalApplier.taskSuffix, "Apply the best patch and report verification.");
+		assert.match(lineup.finalApplier.effectiveTask, /\[Original implementation task\]/);
+		assert.match(lineup.finalApplier.effectiveTask, /\[Worker outputs and worktree summaries\]/);
+		assert.match(lineup.finalApplier.effectiveTask, /\[Reviewer findings\]/);
 		assert.match(lineup.finalApplier.effectiveTask, /Apply the final implementation directly/);
 		assert.match(lineup.finalApplier.effectiveTask, /Apply the best patch and report verification\./);
 		assert.equal(existsSync(join(runDir, "worker-1.md")), true);

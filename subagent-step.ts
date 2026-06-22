@@ -76,6 +76,7 @@ export interface DelegatedPromptOutcome {
 	changed: boolean;
 	text: string;
 	agent: string;
+	preparedTasks: PreparedDelegatedTask[];
 	parallelResults?: DelegatedPromptParallelResult[];
 }
 
@@ -154,7 +155,7 @@ function resolveDelegationName(prompt: PromptWithModel, override?: SubagentOverr
 	return undefined;
 }
 
-interface PreparedDelegatedTask {
+export interface PreparedDelegatedTask {
 	promptName: string;
 	agent: string;
 	task: string;
@@ -657,6 +658,7 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 				changed,
 				text,
 				agent: request.agent,
+				preparedTasks,
 				parallelResults,
 			};
 		}
@@ -690,6 +692,7 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 			changed,
 			text,
 			agent: preparedTasks[0]!.agent,
+			preparedTasks,
 		};
 	} catch (error) {
 		const cause = error instanceof Error ? error : new Error(String(error));
