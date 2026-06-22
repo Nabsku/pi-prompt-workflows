@@ -19,6 +19,7 @@ export interface ResolvedBestOfNPreset extends BestOfNPreset {
 
 export interface BestOfNPresetCatalog {
 	presets: Map<string, ResolvedBestOfNPreset>;
+	invalidPresetNames: Set<string>;
 	diagnostics: PromptLoaderDiagnostic[];
 }
 
@@ -173,25 +174,29 @@ function normalizePreset(name: string, value: unknown, filePath: string, source:
 
 function readPresetFile(filePath: string, source: PromptSource): BestOfNPresetCatalog {
 	const presets = new Map<string, ResolvedBestOfNPreset>();
+	const invalidPresetNames = new Set<string>();
 	const diagnostics: PromptLoaderDiagnostic[] = [];
-	if (!existsSync(filePath)) return { presets, diagnostics };
+	if (!existsSync(filePath)) return { presets, invalidPresetNames, diagnostics };
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(readFileSync(filePath, "utf-8"));
 	} catch (error) {
 		diagnostics.push(createPresetDiagnostic("invalid-best-of-n-presets-file", filePath, source, `Skipping best-of-N presets file ${filePath}: ${error instanceof Error ? error.message : String(error)}.`));
-		return { presets, diagnostics };
+		return { presets, invalidPresetNames, diagnostics };
 	}
 	if (!isRecord(parsed) || !isRecord(parsed.presets)) {
 		diagnostics.push(createPresetDiagnostic("invalid-best-of-n-presets-file", filePath, source, `Skipping best-of-N presets file ${filePath}: expected top-level object with a "presets" object.`));
-		return { presets, diagnostics };
+		return { presets, invalidPresetNames, diagnostics };
 	}
 	for (const [name, rawPreset] of Object.entries(parsed.presets)) {
 		const preset = normalizePreset(name, rawPreset, filePath, source, diagnostics);
-		if (!preset) continue;
+		if (!preset) {
+			invalidPresetNames.add(name);
+			continue;
+		}
 		presets.set(name, { name, source, filePath, ...preset });
 	}
-	return { presets, diagnostics };
+	return { presets, invalidPresetNames, diagnostics };
 }
 
 export function getBestOfNPresetPaths(cwd: string): { user: string; project: string } {
@@ -205,8 +210,11 @@ export function loadBestOfNPresetCatalog(cwd: string): BestOfNPresetCatalog {
 	const paths = getBestOfNPresetPaths(cwd);
 	const user = readPresetFile(paths.user, "user");
 	const project = readPresetFile(paths.project, "project");
+	const presets = new Map([...user.presets, ...project.presets]);
+	for (const name of project.invalidPresetNames) presets.delete(name);
 	return {
-		presets: new Map([...user.presets, ...project.presets]),
+		presets,
+		invalidPresetNames: new Set([...user.invalidPresetNames, ...project.invalidPresetNames]),
 		diagnostics: [...user.diagnostics, ...project.diagnostics],
 	};
 }

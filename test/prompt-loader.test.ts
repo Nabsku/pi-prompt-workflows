@@ -2400,7 +2400,12 @@ test("loadPromptsWithModel accepts bestOfN preset-only commands and preset catal
 test("loadBestOfNPresetCatalog rejects invalid preset files and presets", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
+		mkdirSync(join(root, ".pi", "agent"), { recursive: true });
 		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(
+			join(root, ".pi", "agent", "best-of-n-presets.json"),
+			JSON.stringify({ presets: { badEmpty: { workers: [{ agent: "delegate" }] } } }),
+		);
 		writeFileSync(
 			join(cwd, ".pi", "best-of-n-presets.json"),
 			JSON.stringify({
@@ -2415,6 +2420,7 @@ test("loadBestOfNPresetCatalog rejects invalid preset files and presets", () => 
 
 		const catalog = loadBestOfNPresetCatalog(cwd);
 		assert.deepEqual([...catalog.presets.keys()], ["good"]);
+		assert.deepEqual([...catalog.invalidPresetNames].sort(), ["badCap", "badEmpty", "badModel"]);
 		assert.equal(catalog.presets.get("good")?.workers?.[0]?.agent, "delegate");
 		assert.equal(catalog.presets.get("good")?.workers?.[0]?.count, 2);
 		assert.equal(catalog.diagnostics.filter((diagnostic) => diagnostic.code === "invalid-best-of-n-preset").length, 3);
