@@ -168,7 +168,7 @@ Run multiple workers, aggregate with reviewers, optionally apply final changes. 
 }
 ```
 
-Preset files live at `~/.pi/agent/best-of-n-presets.json` and `<compare-cwd>/.pi/best-of-n-presets.json`. Project presets override user presets after approval. Preset slots only support `agent`/`subagent`, `model`, and `count`; keep `task`, `taskSuffix`, `cwd`, `finalApplier`, `worktree`, and dirty/report/commit policy in prompt templates.
+Preset files live at `~/.pi/agent/best-of-n-presets.json` and `<compare-cwd>/.pi/best-of-n-presets.json`. Project presets override user presets after approval. Preset slots only support `agent`/`subagent`, `model`, and `count`; keep `task`, `taskSuffix`, `cwd`, `finalApplier`, `worktree`, and dirty/report/commit policy in prompt templates. Successful compare runs write `.pi/runs/best-of-n/<timestamp>-<prompt>-<id>/report.md` plus `lineup.json`; add `--keep-artifacts` when you also need raw worker/reviewer/final-applier outputs.
 
 ```yaml
 ---
@@ -197,5 +197,6 @@ Override frontmatter at invocation:
 - `--chain-context` — pass summaries to later delegated chain steps
 - `--worktree` — use git worktrees for parallel delegated work
 - `--preset=<name>` / `--preset <name>` — select a best-of-N preset for compare prompts only
+- `--keep-artifacts` — retain raw best-of-N worker/reviewer/final-applier artifacts next to the generated report
 
 When stuck, check `README.md` and `examples/best-of-n.md` in this extension.

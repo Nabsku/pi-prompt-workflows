@@ -1,5 +1,6 @@
-import { existsSync } from "node:fs";
-import { resolve as resolvePath } from "node:path";
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { join, resolve as resolvePath } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
@@ -700,6 +701,125 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		return `${marker}\n\n${sections.join("\n\n")}`;
 	}
 
+	function slugifyRunSegment(value: string): string {
+		const slug = value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+		return (slug || "compare").slice(0, 48);
+	}
+
+	function formatRunTimestamp(date = new Date()): string {
+		return date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+	}
+
+	function extractKeepArtifactsFlag(argsString: string): { args: string; keepArtifacts: boolean } {
+		let keepArtifacts = false;
+		const ranges: Array<{ start: number; end: number }> = [];
+		let i = 0;
+		while (i < argsString.length) {
+			const char = argsString[i];
+			if (char === '"' || char === "'") {
+				const quote = char;
+				i++;
+				while (i < argsString.length) {
+					if (argsString[i] === "\\") {
+						i += 2;
+						continue;
+					}
+					if (argsString[i] === quote) {
+						i++;
+						break;
+					}
+					i++;
+				}
+				continue;
+			}
+			if (/\s/.test(char)) {
+				i++;
+				continue;
+			}
+			const start = i;
+			while (i < argsString.length && !/\s/.test(argsString[i])) i++;
+			if (argsString.slice(start, i) === "--keep-artifacts") {
+				keepArtifacts = true;
+				ranges.push({ start, end: i });
+			}
+		}
+		let cleaned = argsString;
+		for (const range of ranges.sort((a, b) => b.start - a.start)) {
+			cleaned = cleaned.slice(0, range.start) + cleaned.slice(range.end);
+		}
+		return { args: cleaned.trim(), keepArtifacts };
+	}
+
+	function serializeLineupSlot(slot: DelegationLineupSlot): Record<string, unknown> {
+		return {
+			agent: slot.agent,
+			...(slot.model ? { model: slot.model } : {}),
+			...(slot.cwd ? { cwd: slot.cwd } : {}),
+		};
+	}
+
+	function renderRunReportSection(title: string, body?: string): string[] {
+		return [`## ${title}`, "", body?.trim() || "(none)", ""];
+	}
+
+	function writeBestOfNRunReport(options: {
+		compareCwd: string;
+		promptName: string;
+		status: "review-complete" | "apply-complete";
+		sharedTask: string;
+		taskArgs: string[];
+		presetName?: string;
+		keepArtifacts: boolean;
+		workers: DelegationLineupSlot[];
+		reviewers: DelegationLineupSlot[];
+		finalApplier?: DelegationLineupSlot;
+		workerPairs: Array<{ index: number; slot: DelegationLineupSlot; result: DelegatedPromptParallelResult }>;
+		reviewerPairs: Array<{ index: number; slot: DelegationLineupSlot; result: DelegatedPromptParallelResult }>;
+		workerSummary: string;
+		workerFailures?: string;
+		reviewerSummary?: string;
+		reviewerFailures?: string;
+		finalText?: string;
+	}): string {
+		const runDir = join(options.compareCwd, ".pi", "runs", "best-of-n", `${formatRunTimestamp()}-${slugifyRunSegment(options.promptName)}-${randomUUID().slice(0, 8)}`);
+		mkdirSync(runDir, { recursive: true });
+		writeFileSync(join(runDir, "lineup.json"), `${JSON.stringify({
+			prompt: options.promptName,
+			status: options.status,
+			preset: options.presetName,
+			keepArtifacts: options.keepArtifacts,
+			args: options.taskArgs,
+			workers: options.workers.map(serializeLineupSlot),
+			reviewers: options.reviewers.map(serializeLineupSlot),
+			finalApplier: options.finalApplier ? serializeLineupSlot(options.finalApplier) : undefined,
+		}, null, 2)}\n`);
+		if (options.keepArtifacts) {
+			for (const { index, result } of options.workerPairs) writeFileSync(join(runDir, `worker-${index + 1}.md`), `${result.isError ? result.errorText || "(error)" : result.text || "(no assistant text)"}\n`);
+			for (const { index, result } of options.reviewerPairs) writeFileSync(join(runDir, `reviewer-${index + 1}.md`), `${result.isError ? result.errorText || "(error)" : result.text || "(no assistant text)"}\n`);
+			if (options.finalText) writeFileSync(join(runDir, "final-applier.md"), `${options.finalText}\n`);
+		}
+		const report = [
+			`# Best-of-N run: ${options.promptName}`,
+			"",
+			`- Status: ${options.status}`,
+			`- Compare cwd: ${options.compareCwd}`,
+			...(options.presetName ? [`- Preset: ${options.presetName}`] : []),
+			`- Worker calls: ${options.workers.length}`,
+			`- Reviewer calls: ${options.reviewers.length}`,
+			`- Final applier: ${options.finalApplier ? "yes" : "no"}`,
+			`- Raw artifacts retained: ${options.keepArtifacts ? "yes" : "no"}`,
+			"",
+			...renderRunReportSection("Task", options.sharedTask),
+			...renderRunReportSection("Workers", options.workerSummary),
+			...renderRunReportSection("Worker failures", options.workerFailures),
+			...renderRunReportSection("Reviewers", options.reviewerSummary),
+			...renderRunReportSection("Reviewer failures", options.reviewerFailures),
+			...renderRunReportSection("Final applier", options.finalText),
+		].join("\n");
+		writeFileSync(join(runDir, "report.md"), report);
+		return join(runDir, "report.md");
+	}
+
 	function buildReviewerPreamble(sharedTask: string, workerAggregation: string, workerFailureSummary?: string): string {
 		return [
 			"[Original implementation task]",
@@ -799,7 +919,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			return;
 		}
 
-		let taskArgs = parseCommandArgs(lineupExtraction.args);
+		const keepArtifactsExtraction = extractKeepArtifactsFlag(lineupExtraction.args);
+		const keepArtifacts = keepArtifactsExtraction.keepArtifacts;
+		let taskArgs = parseCommandArgs(keepArtifactsExtraction.args);
 		let compareCwd = runtime.cwd ?? prompt.cwd ?? ctx.cwd;
 		if (name === "parallel-patch-compare-at-path") {
 			if (taskArgs.length === 0) {
@@ -958,7 +1080,25 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				const finalText = reviewerFailureSummary
 					? `${successfulReviewerText}\n\n${reviewerFailureSummary}`
 					: successfulReviewerText;
-				pi.sendUserMessage(`[Compare review complete: ${name}]\n\n${finalText}`);
+				const reportPath = writeBestOfNRunReport({
+					compareCwd,
+					promptName: name,
+					status: "review-complete",
+					sharedTask,
+					taskArgs,
+					presetName: runtime.preset ?? prompt.preset,
+					keepArtifacts,
+					workers: normalizedWorkers,
+					reviewers: normalizedReviewers,
+					finalApplier: normalizedFinalApplier,
+					workerPairs,
+					reviewerPairs,
+					workerSummary: successfulWorkerText,
+					workerFailures: workerFailureSummary,
+					reviewerSummary: successfulReviewerText,
+					reviewerFailures: reviewerFailureSummary,
+				});
+				pi.sendUserMessage(`[Compare review complete: ${name}]\n\nReport: ${reportPath}\n\n${finalText}`);
 				await waitForTurnStart(ctx);
 				await ctx.waitForIdle();
 				return;
@@ -987,7 +1127,26 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				args: [],
 			});
 			if (!finalResult?.text) return;
-			pi.sendUserMessage(`[Compare apply complete: ${name}]\n\n${finalResult.text}`);
+			const reportPath = writeBestOfNRunReport({
+				compareCwd,
+				promptName: name,
+				status: "apply-complete",
+				sharedTask,
+				taskArgs,
+				presetName: runtime.preset ?? prompt.preset,
+				keepArtifacts,
+				workers: normalizedWorkers,
+				reviewers: normalizedReviewers,
+				finalApplier: normalizedFinalApplier,
+				workerPairs,
+				reviewerPairs,
+				workerSummary: successfulWorkerText,
+				workerFailures: workerFailureSummary,
+				reviewerSummary: successfulReviewerText,
+				reviewerFailures: reviewerFailureSummary,
+				finalText: finalResult.text,
+			});
+			pi.sendUserMessage(`[Compare apply complete: ${name}]\n\nReport: ${reportPath}\n\n${finalResult.text}`);
 			await waitForTurnStart(ctx);
 			await ctx.waitForIdle();
 		} catch (error) {

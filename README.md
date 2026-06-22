@@ -625,6 +625,7 @@ Prompt-template frontmatter authoring uses `bestOfN:`. Runtime overrides stay on
 - `--workers-append=<json-array>` / `--reviewers-append=<json-array>` append to the corresponding lineup.
 - `--final-applier=<json-object-or-one-element-array>` replaces the optional final apply slot.
 - `--preset=<name>` / `--preset <name>` selects a best-of-N preset for compare prompts only; it is ignored on non-compare prompts.
+- `--keep-artifacts` retains raw worker, reviewer, and final-applier outputs next to the generated run report.
 
 Each worker/reviewer JSON array entry must be an object with either `subagent` or `agent`, plus optional `model`, `task`, `taskSuffix`, `cwd`, and `count`. In worker slots, `"subagent": true` maps to `delegate`. In reviewer slots, `"subagent": true` maps to `reviewer`. `--final-applier=` accepts one slot object (or a one-element array) with `subagent`/`agent`, optional `model`, optional `task`, and optional `taskSuffix`; for this final slot, `"subagent": true` maps to `delegate`, and both `count` and `cwd` are not supported.
 
@@ -651,6 +652,7 @@ Compare prompt templates are authored under `bestOfN:`. Top-level `workers`, `re
 2. Continue as long as at least one worker succeeds. Reviewer slots receive successful worker outputs plus worker/worktree summaries and produce findings only.
 3. Optional final apply phase: if `finalApplier` is configured, run one delegated apply step on the real compare repo (`compareCwd`) to pick a winner or synthesize/cherry-pick and apply the final patch.
 4. If all reviewers fail but `finalApplier` exists, the final apply step still runs with fallback context from workers plus reviewer failure summaries.
+5. Every successful compare run writes `.pi/runs/best-of-n/<timestamp>-<prompt>-<id>/report.md` plus `lineup.json`; pass `--keep-artifacts` to also retain raw worker/reviewer/final-applier outputs as separate Markdown files.
 
 Worker/reviewer lineups are fully configurable from `bestOfN` frontmatter, presets, or runtime overrides, so there is no fixed three-model worker assumption. If a compare prompt omits `bestOfN.workers`, it falls back to one `delegate` worker using the current/main model. If it omits `bestOfN.reviewers`, it falls back to one `reviewer` slot. `bestOfN.finalApplier` is optional, and compare runs reject an effective final applier unless `bestOfN.worktree: true` is set.
 
