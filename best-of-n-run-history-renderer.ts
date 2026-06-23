@@ -15,6 +15,19 @@ function formatArtifactStatus(status: string): string {
 	return status.replace(/-/g, " ");
 }
 
+function runInspectCommand(run: BestOfNRunHistoryEntry): string {
+	return `/compare-runs --id ${run.name}`;
+}
+
+function runPlainDetailCommand(run: BestOfNRunHistoryEntry): string {
+	return `/compare-runs --plain --id ${run.name}`;
+}
+
+function rawArtifactGuidance(run: BestOfNRunHistoryEntry): string | undefined {
+	if (run.keepArtifacts === false) return "not retained; rerun the compare command with --keep-artifacts to keep raw worker/reviewer outputs.";
+	return undefined;
+}
+
 export function formatBestOfNRunHistory(result: BestOfNRunHistoryResult): string {
 	const lines: string[] = ["# Compare run history", "", `Root: ${sanitizeInline(result.root)}`, ""];
 	for (const diagnostic of result.diagnostics) lines.push(`Warning: ${sanitizeInline(diagnostic)}`);
@@ -26,8 +39,11 @@ export function formatBestOfNRunHistory(result: BestOfNRunHistoryResult): string
 
 	for (const [index, run] of result.entries.entries()) {
 		lines.push(`## ${index + 1}. ${sanitizeInline(run.name)}`);
+		lines.push(`- Run id: ${sanitizeInline(run.name)}`);
 		lines.push(`- Path: ${sanitizeInline(run.path)}`);
 		lines.push(`- Report: ${sanitizeInline(run.reportPath)}`);
+		lines.push(`- Inspect: ${sanitizeInline(runInspectCommand(run))}`);
+		lines.push(`- Plain detail: ${sanitizeInline(runPlainDetailCommand(run))}`);
 		lines.push(`- Status: ${formatMaybe(run.status)}`);
 		lines.push(`- Prompt: ${formatMaybe(run.prompt)}`);
 		lines.push(`- Preset: ${formatMaybe(run.preset)}`);
@@ -36,6 +52,8 @@ export function formatBestOfNRunHistory(result: BestOfNRunHistoryResult): string
 		lines.push(`- Reviewer calls: ${formatMaybe(run.reviewerCalls)}`);
 		lines.push(`- Final applier: ${formatMaybe(run.finalApplier)}`);
 		lines.push(`- Raw artifacts retained: ${formatMaybe(run.keepArtifacts)}`);
+		const artifactGuidance = rawArtifactGuidance(run);
+		if (artifactGuidance) lines.push(`- Raw artifact guidance: ${sanitizeInline(artifactGuidance)}`);
 		if (run.reportPreview) lines.push(`- Preview: ${sanitizeInline(run.reportPreview)}`);
 		if (run.artifacts.length > 0) {
 			lines.push("- Artifacts:");
@@ -59,8 +77,12 @@ export function formatBestOfNRunDetail(result: BestOfNRunHistoryResult, run: Bes
 	for (const diagnostic of run.diagnostics) lines.push(`Warning: ${sanitizeInline(diagnostic)}`);
 	if (result.diagnostics.length > 0 || run.diagnostics.length > 0) lines.push("");
 	lines.push("## Summary");
+	lines.push(`- Run id: ${sanitizeInline(run.name)}`);
 	lines.push(`- Path: ${sanitizeInline(run.path)}`);
 	lines.push(`- Report: ${sanitizeInline(run.reportPath)}`);
+	lines.push(`- Inspect: ${sanitizeInline(runInspectCommand(run))}`);
+	lines.push(`- Plain detail: ${sanitizeInline(runPlainDetailCommand(run))}`);
+	lines.push("- Browse recent: /compare-runs");
 	lines.push(`- Status: ${formatMaybe(run.status)}`);
 	lines.push(`- Prompt: ${formatMaybe(run.prompt)}`);
 	lines.push(`- Preset: ${formatMaybe(run.preset)}`);
@@ -69,6 +91,8 @@ export function formatBestOfNRunDetail(result: BestOfNRunHistoryResult, run: Bes
 	lines.push(`- Reviewer calls: ${formatMaybe(run.reviewerCalls)}`);
 	lines.push(`- Final applier: ${formatMaybe(run.finalApplier)}`);
 	lines.push(`- Raw artifacts retained: ${formatMaybe(run.keepArtifacts)}`);
+	const artifactGuidance = rawArtifactGuidance(run);
+	if (artifactGuidance) lines.push(`- Raw artifact guidance: ${sanitizeInline(artifactGuidance)}`);
 	lines.push("", "## Lineup", run.lineupText ? sanitizeForTerminal(run.lineupText, { preserveLineBreaks: true }) : "lineup.json is unavailable or invalid. See diagnostics.");
 	lines.push("", "## Report", run.reportText ? sanitizeForTerminal(run.reportText, { preserveLineBreaks: true }) : "report.md is unavailable. See diagnostics.");
 	lines.push("", "## Artifacts");

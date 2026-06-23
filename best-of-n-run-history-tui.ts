@@ -168,7 +168,7 @@ export class CompareRunPicker implements Component {
 
 	handleInput(data: string): void {
 		const items = this.filteredCatalog();
-		if (matchesKey(data, "q") || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
+		if ((this.search.length === 0 && matchesKey(data, "q")) || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
 			this.done?.({ action: "closed" });
 			return;
 		}

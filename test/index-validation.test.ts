@@ -62,6 +62,18 @@ function createContext(cwd: string, pi: FakePi) {
 	};
 }
 
+function captureStdout(run: () => Promise<void>) {
+	let output = "";
+	const original = process.stdout.write;
+	(process.stdout.write as unknown as (chunk: unknown) => boolean) = (chunk: unknown) => {
+		output += String(chunk);
+		return true;
+	};
+	return run().then(() => output).finally(() => {
+		process.stdout.write = original;
+	});
+}
+
 test("validate-prompts command reports success", async () => {
 	await withTempHome(async (root) => {
 		const cwd = join(root, "project");
@@ -97,6 +109,24 @@ test("validate-prompts command reports errors", async () => {
 		assert.equal(pi.notifications[0]!.type, "error");
 		assert.match(pi.notifications[0]!.message, /Prompt validation failed/);
 		assert.match(pi.notifications[0]!.message, /skill-not-found/);
+	});
+});
+
+test("validate-prompts --plain writes complete report to stdout without notification", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "bad.md"), "---\nmodel: claude-sonnet-4-20250514\nskills: [missing-skill]\n---\nHello");
+
+		const pi = new FakePi();
+		const ctx = createContext(cwd, pi);
+		promptModelExtension(pi as never);
+
+		const output = await captureStdout(() => pi.commands.get("validate-prompts")!.handler("--plain", ctx));
+
+		assert.equal(pi.notifications.length, 0);
+		assert.match(output, /Prompt validation failed/);
+		assert.match(output, /skill-not-found/);
 	});
 });
 

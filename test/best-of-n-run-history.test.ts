@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import promptModelExtension from "../index.js";
-import { collectBestOfNRunHistory } from "../best-of-n-run-history.js";
+import { collectBestOfNRunHistory, parseBestOfNRunHistoryArgs } from "../best-of-n-run-history.js";
 import { formatBestOfNRunDetail, formatBestOfNRunHistory } from "../best-of-n-run-history-renderer.js";
 import { CompareRunDetailInspector, CompareRunPicker, buildCompareRunCatalog, createCompareRunDetailViewModel } from "../best-of-n-run-history-tui.js";
 import {
@@ -95,6 +95,10 @@ test("collectBestOfNRunHistory summarizes lineup, report path, and not-retained 
 		const output = formatBestOfNRunHistory(result);
 		assert.match(output, /Prompt: compare/);
 		assert.match(output, /Preset: strict-oracle/);
+		assert.match(output, /Run id: 2026-06-22-compare-abcdef12/);
+		assert.match(output, /Inspect: \/compare-runs --id 2026-06-22-compare-abcdef12/);
+		assert.match(output, /Plain detail: \/compare-runs --plain --id 2026-06-22-compare-abcdef12/);
+		assert.match(output, /Raw artifact guidance: not retained; rerun the compare command with --keep-artifacts/);
 		assert.match(output, /worker-1\.md: not retained/);
 	});
 });
@@ -322,8 +326,47 @@ test("compare-runs --plain writes to stdout", async () => {
 		};
 		const output = await captureStdout(() => pi.commands.get("compare-runs")!.handler("--limit 1 --plain", ctx));
 		assert.match(output, /# Compare run history/);
+		assert.match(output, /Run id: 2026-06-22-compare-plain-abcdef12/);
+		assert.match(output, /Inspect: \/compare-runs --id 2026-06-22-compare-plain-abcdef12/);
+		assert.match(output, /Plain detail: \/compare-runs --plain --id 2026-06-22-compare-plain-abcdef12/);
 		assert.match(output, /worker-1\.md: retained/);
 		assert.equal(pi.customMessages.length, 0);
+	});
+});
+
+test("parseBestOfNRunHistoryArgs reports unknown and malformed args", () => {
+	assert.deepEqual(parseBestOfNRunHistoryArgs("--plain --id --limit nope --mystery stray"), {
+		limit: Number.NaN,
+		plain: true,
+		runId: undefined,
+		tui: false,
+		errors: [
+			"Missing value for --id.",
+			"Invalid --limit \"nope\": expected a positive integer.",
+			"Unknown /compare-runs option \"--mystery\".",
+			"Unexpected /compare-runs argument \"stray\".",
+		],
+	});
+});
+
+test("compare-runs --plain reports malformed args instead of silent fallback", async () => {
+	await withAdversarialFixtureDir(async (root) => {
+		writeCompareRun(root, "2026-06-22-compare-plain-abcdef12", { keepArtifacts: true });
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const ctx = {
+			cwd: root,
+			hasUI: true,
+			model: { provider: "anthropic", id: "claude" },
+			ui: { notify(message: string, type: string) { pi.customMessages.push({ message, type }); } },
+			isIdle() { return false; },
+			async waitForIdle() {},
+			modelRegistry: { getAll() { return []; }, getAvailable() { return []; } },
+		};
+		const output = await captureStdout(() => pi.commands.get("compare-runs")!.handler("--plain --unknown", ctx));
+		assert.match(output, /Invalid \/compare-runs arguments/);
+		assert.match(output, /Unknown \/compare-runs option "--unknown"/);
+		assert.doesNotMatch(output, /# Compare run history/);
 	});
 });
 
@@ -343,6 +386,10 @@ test("compare-runs --plain reports explicit missing run IDs", async () => {
 		};
 		const output = await captureStdout(() => pi.commands.get("compare-runs")!.handler("--plain --id missing-run", ctx));
 		assert.match(output, /Compare run "missing-run" was not found/);
+		assert.match(output, new RegExp(`Searched root: ${join(root, ".pi", "runs", "best-of-n").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+		assert.match(output, new RegExp(`Command cwd: ${root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+		assert.match(output, /Recovery: run \/compare-runs to browse recent runs/);
+		assert.match(output, /--keep-artifacts/);
 		assert.doesNotMatch(output, /# Compare run history/);
 	});
 });
@@ -379,6 +426,8 @@ test("formatBestOfNRunDetail exposes read-only summary, lineup, report, artifact
 
 		assert.match(output, /# Compare run detail/);
 		assert.match(output, /## Summary/);
+		assert.match(output, /Run id: 2026-06-22-detail-abcdef12/);
+		assert.match(output, /Browse recent: \/compare-runs/);
 		assert.match(output, /## Lineup/);
 		assert.match(output, /## Report/);
 		assert.match(output, /## Artifacts/);
@@ -453,6 +502,10 @@ test("compare run TUI components filter runs, sanitize chrome, and expose read-o
 
 		for (const ch of "beta") picker.handleInput(ch);
 		assert.match(picker.render(90).join("\n"), /2026-06-23-beta-abcdef12/);
+		picker.handleInput("q");
+		assert.match(picker.render(90).join("\n"), /search: betaq/);
+		assert.equal(doneValues.length, 0);
+		picker.handleInput("\u007f");
 		picker.handleInput("\n");
 		assert.deepEqual(doneValues.at(-1), { action: "selected", runId: "2026-06-23-beta-abcdef12" });
 
