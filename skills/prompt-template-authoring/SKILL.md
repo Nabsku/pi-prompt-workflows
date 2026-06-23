@@ -206,4 +206,4 @@ Override frontmatter at invocation:
 - `--preset=<name>` / `--preset <name>` — select a best-of-N preset for compare prompts only
 - `--keep-artifacts` — retain raw best-of-N worker/reviewer/final-applier artifacts next to the generated report
 
-When stuck, check `README.md` and `examples/best-of-n.md` in this extension.
+When stuck, check `README.md` and the packaged examples: start with `examples/hello.md` or `examples/review.md`, then use `examples/best-of-n-smoke.md` before the advanced `examples/best-of-n.md` compare prompt.
