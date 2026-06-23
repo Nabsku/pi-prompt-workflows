@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.16.0](https://github.com/Nabsku/pi-prompt-workflows/compare/v0.15.0...v0.16.0) (2026-06-23)
+
+
+### Features
+
+* add compare dry-run and inspection UI ([670af6c](https://github.com/Nabsku/pi-prompt-workflows/commit/670af6c036e749ba5d9ff2310824a5ab1ca8ef54))
+* add compare operability foundation ([f430fc1](https://github.com/Nabsku/pi-prompt-workflows/commit/f430fc1409a019a7b63ecd1ce1bc8737cbc6169a))
+* add compare preflight and preset discovery ([8934fea](https://github.com/Nabsku/pi-prompt-workflows/commit/8934feaf1276dd6340ad96e5b3dfd6439148ab42))
+* add compare run history command ([3515182](https://github.com/Nabsku/pi-prompt-workflows/commit/351518273d89192200b4826c7ac86711f872249f))
+
+
+### Bug Fixes
+
+* align compare dry-run preflight parity ([9180dff](https://github.com/Nabsku/pi-prompt-workflows/commit/9180dff4931561b6ffa6213f7b8732cf610d41cd))
+* align compare preflight with runtime ([ef18d66](https://github.com/Nabsku/pi-prompt-workflows/commit/ef18d6602b793f4051972e8806e53ad35d3f5286))
+* harden compare preset and run lookups ([7fd204e](https://github.com/Nabsku/pi-prompt-workflows/commit/7fd204eae2aa2952c4d38d713d0ae57fc00c5377))
+
 ## [0.15.0](https://github.com/Nabsku/pi-prompt-workflows/compare/v0.14.0...v0.15.0) (2026-06-22)
 
 
