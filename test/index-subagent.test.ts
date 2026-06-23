@@ -688,7 +688,12 @@ test("compare prompt expands count, applies taskSuffix, and runs a final applier
 		assert.equal(phase, 3);
 		assert.equal(pi.userMessages.length, 1);
 		assert.match(pi.userMessages[0]!, /\[Compare apply complete: compare\]/);
+		assert.match(pi.userMessages[0]!, /Run id: .+/);
 		assert.match(pi.userMessages[0]!, /Report: .*\.pi\/runs\/best-of-n\/.*\/report\.md/);
+		assert.match(pi.userMessages[0]!, /Inspect: \/compare-runs --id .+/);
+		assert.match(pi.userMessages[0]!, /Plain detail: \/compare-runs --plain --id .+/);
+		assert.match(pi.userMessages[0]!, /Browse recent: \/compare-runs/);
+		assert.doesNotMatch(pi.userMessages[0]!, /Rerun with --keep-artifacts/);
 		assert.match(pi.userMessages[0]!, /Final apply: combined worker 2 with worker 1 tests\./);
 		const runRoot = join(cwd, ".pi", "runs", "best-of-n");
 		const runDirs = readdirSync(runRoot);
@@ -1109,6 +1114,63 @@ test("compare prompt commit ask warns if final applier staged or committed", asy
 		assert.match(approvalText, /HEAD changed during the final applier run/);
 		assert.match(approvalText, /Pre-existing staged changes were present before the final applier ran/);
 		assert.match(approvalText, /final applier may have committed already/);
+	});
+});
+
+test("compare review completion includes run id, next commands, and no-artifact rerun guidance", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "compare.md"),
+			[
+				"---",
+				"bestOfN:",
+				"  workers:",
+				"    - agent: delegate",
+				"  reviewers:",
+				"    - agent: reviewer",
+				"---",
+				"Fix: $@",
+			].join("\n"),
+		);
+
+		const pi = new FakePi();
+		const { ctx } = createContext(cwd, pi);
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+
+		let phase = 0;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+			const request = payload as any;
+			phase++;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [],
+				parallelResults: [
+					{ agent: phase === 1 ? "delegate" : "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: phase === 1 ? "worker output" : "reviewer output" }] }], isError: false },
+				],
+				isError: false,
+			});
+		});
+
+		await pi.commands.get("compare")!.handler("bug", ctx);
+		assert.equal(phase, 2);
+		assert.equal(pi.userMessages.length, 1);
+		const completion = pi.userMessages[0]!;
+		assert.match(completion, /\[Compare review complete: compare\]/);
+		assert.match(completion, /Run id: .+/);
+		assert.match(completion, /Report: .*\.pi\/runs\/best-of-n\/.*\/report\.md/);
+		assert.match(completion, /Inspect: \/compare-runs --id .+/);
+		assert.match(completion, /Plain detail: \/compare-runs --plain --id .+/);
+		assert.match(completion, /Browse recent: \/compare-runs/);
+		assert.match(completion, /Raw artifacts: not retained\. Rerun with --keep-artifacts/);
+		assert.match(completion, /reviewer output/);
+
+		const runRoot = join(cwd, ".pi", "runs", "best-of-n");
+		const runDir = join(runRoot, readdirSync(runRoot)[0]!);
+		assert.equal(existsSync(join(runDir, "worker-1.md")), false);
 	});
 });
 

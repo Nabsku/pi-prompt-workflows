@@ -928,10 +928,17 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 	}
 
-	function formatRunReportCompletionLine(reportPath: string | undefined): string {
+	function formatRunReportCompletionLine(reportPath: string | undefined, options: { keepArtifacts?: boolean } = {}): string {
 		if (!reportPath) return "Report: unavailable (failed to write run artifacts)";
 		const runId = basename(dirname(reportPath));
-		return [`Run id: ${runId}`, `Report: ${reportPath}`, `Inspect: /compare-runs --id ${runId}`].join("\n");
+		return [
+			`Run id: ${runId}`,
+			`Report: ${reportPath}`,
+			`Inspect: /compare-runs --id ${runId}`,
+			`Plain detail: /compare-runs --plain --id ${runId}`,
+			"Browse recent: /compare-runs",
+			...(options.keepArtifacts === false ? ["Raw artifacts: not retained. Rerun with --keep-artifacts to keep raw worker/reviewer outputs."] : []),
+		].join("\n");
 	}
 
 	function writeCompareFailureHistory(options: {
@@ -977,7 +984,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			finalText: options.finalText,
 			failureSummary: options.failureSummary,
 		}, options.ctx);
-		notify(options.ctx, `Compare failed (${options.status}): ${options.failureSummary}\n${formatRunReportCompletionLine(reportPath)}`, "error");
+		notify(options.ctx, `Compare failed (${options.status}): ${options.failureSummary}\n${formatRunReportCompletionLine(reportPath, { keepArtifacts: options.keepArtifacts })}`, "error");
 		return reportPath;
 	}
 
@@ -1694,7 +1701,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					reviewerSummary: successfulReviewerText,
 					reviewerFailures: reviewerFailureSummary,
 				}, ctx);
-				pi.sendUserMessage(`[Compare review complete: ${name}]\n\n${formatRunReportCompletionLine(reportPath)}\n\n${finalText}`);
+				pi.sendUserMessage(`[Compare review complete: ${name}]\n\n${formatRunReportCompletionLine(reportPath, { keepArtifacts })}\n\n${finalText}`);
 				await waitForTurnStart(ctx);
 				await ctx.waitForIdle();
 				return;
@@ -1800,7 +1807,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			const commitAsk = prompt.commit === "ask" && beforeFinalApplierSnapshot && afterFinalApplierSnapshot
 				? renderBestOfNCommitAsk({ compareCwd: approvalCwd, promptName: name, taskArgs, reportPath, beforeFinalApplier: beforeFinalApplierSnapshot, afterFinalApplier: afterFinalApplierSnapshot })
 				: "";
-			pi.sendUserMessage(`[Compare apply complete: ${name}]\n\n${formatRunReportCompletionLine(reportPath)}\n\n${finalResult.text}`);
+			pi.sendUserMessage(`[Compare apply complete: ${name}]\n\n${formatRunReportCompletionLine(reportPath, { keepArtifacts })}\n\n${finalResult.text}`);
 			if (commitAsk) {
 				pi.sendMessage({
 					customType: PROMPT_TEMPLATE_COMMIT_ASK_MESSAGE_TYPE,
@@ -2527,6 +2534,10 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 		if (result.status === "error") {
 			for (const warning of result.warnings) notify(ctx, warning, "warning");
+			if (parsed.plain || !ctx.hasUI) {
+				process.stdout.write(plainReport);
+				return;
+			}
 			notify(ctx, result.error, "error");
 			return;
 		}
@@ -2897,14 +2908,26 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	async function runCompareRunsCommand(args: string, ctx: ExtensionCommandContext) {
 		storedCommandCtx = ctx;
 		const options = parseBestOfNRunHistoryArgs(args);
+		if (options.errors?.length) {
+			const message = [`Invalid /compare-runs arguments:`, ...options.errors.map((error) => `- ${error}`), "Usage: /compare-runs [--plain] [--tui] [--id <run-id>] [--limit <positive-integer>]."].join("\n");
+			if (options.plain || !ctx.hasUI) process.stdout.write(`${message}\n`);
+			else notify(ctx, message, "error");
+			return;
+		}
 		const history = collectBestOfNRunHistory(ctx.cwd, options);
 		const selectedRun = options.runId ? history.entries.find((entry) => entry.name === options.runId) : undefined;
-		const missingRunMessage = options.runId && !selectedRun ? history.diagnostics[0] ?? `Compare run ${JSON.stringify(options.runId)} was not found in the current run history.` : undefined;
+		const missingRunMessage = options.runId && !selectedRun ? [
+			history.diagnostics[0] ?? `Compare run ${JSON.stringify(options.runId)} was not found in the current run history.`,
+			`Searched root: ${history.root}`,
+			`Command cwd: ${ctx.cwd}`,
+			"Recovery: run /compare-runs to browse recent runs, copy the exact Run id, or rerun the compare prompt from the same cwd.",
+			"If you need raw worker/reviewer outputs, rerun with --keep-artifacts.",
+		].join("\n") : undefined;
 		if (options.plain) {
 			process.stdout.write(selectedRun ? formatBestOfNRunDetail(history, selectedRun) : missingRunMessage ?? formatBestOfNRunHistory(history));
 			return;
 		}
-		if (isTuiMode(ctx) && hasCustomUi(ctx)) {
+		if ((options.tui || isTuiMode(ctx)) && hasCustomUi(ctx)) {
 			if (options.runId) {
 				if (selectedRun) await inspectCompareRunInTui(ctx, history, selectedRun.name);
 				else notify(ctx, missingRunMessage ?? "Compare run was not found in the current run history.", "error");
@@ -2913,6 +2936,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			const selection = await openCompareRunPicker(ctx, history);
 			if (selection?.action === "selected") await inspectCompareRunInTui(ctx, history, selection.runId);
 			return;
+		}
+		if (options.tui) {
+			notify(ctx, "--tui compare run history is not available without Pi TUI custom UI; showing a notification report instead.", "warning");
 		}
 		notify(ctx, selectedRun ? formatBestOfNRunDetail(history, selectedRun) : missingRunMessage ?? formatBestOfNRunHistory(history), selectedRun || !options.runId ? "info" : "error");
 	}
@@ -2944,9 +2970,15 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	});
 	pi.registerCommand("validate-prompts", {
 		description: "Validate prompt templates, includes, frontmatter, and skill references",
-		handler: async (_args, ctx) => {
+		handler: async (args, ctx) => {
 			const validation = validatePromptTemplates(ctx.cwd, { registeredSkills: collectRegisteredPromptSkills() });
-			notify(ctx, formatPromptValidationReport(validation), validation.ok ? "info" : "error");
+			const output = formatPromptValidationReport(validation);
+			const plain = args.split(/\s+/).some((arg) => arg === "--plain");
+			if (plain) {
+				process.stdout.write(output);
+				return;
+			}
+			notify(ctx, output, validation.ok ? "info" : "error");
 		},
 	});
 	pi.registerCommand("compare-runs", {
