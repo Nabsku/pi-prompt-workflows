@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import promptModelExtension from "../index.js";
 import { collectBestOfNRunHistory } from "../best-of-n-run-history.js";
-import { formatBestOfNRunHistory } from "../best-of-n-run-history-renderer.js";
+import { formatBestOfNRunDetail, formatBestOfNRunHistory } from "../best-of-n-run-history-renderer.js";
+import { CompareRunDetailInspector, CompareRunPicker, buildCompareRunCatalog, createCompareRunDetailViewModel } from "../best-of-n-run-history-tui.js";
 import {
 	compareRunRoot,
 	createSymlinkedArtifact,
@@ -23,6 +24,8 @@ class FakePi {
 	setModelCalls: string[] = [];
 	userMessages: string[] = [];
 	customMessages: any[] = [];
+	customResults: unknown[] = [];
+	customComponents: unknown[] = [];
 	registerMessageRenderer() {}
 	registerCommand(name: string, command: { description: string; handler: (args: string, ctx: any) => Promise<void> }) { this.commands.set(name, command); }
 	registerTool() {}
@@ -295,6 +298,130 @@ test("compare-runs --plain writes to stdout", async () => {
 		assert.match(output, /# Compare run history/);
 		assert.match(output, /worker-1\.md: retained/);
 		assert.equal(pi.customMessages.length, 0);
+	});
+});
+
+function createCompareRunTuiContext(root: string, pi: FakePi) {
+	return {
+		cwd: root,
+		mode: "tui",
+		hasUI: true,
+		model: { provider: "anthropic", id: "claude" },
+		ui: {
+			notify(message: string, type: string) { pi.customMessages.push({ message, type }); },
+			async custom(factory: (...args: any[]) => unknown) {
+				const component = factory({}, {}, {}, (value: unknown) => value);
+				pi.customComponents.push(component);
+				return pi.customResults.length ? pi.customResults.shift() : component;
+			},
+		},
+		isIdle() { return false; },
+		async waitForIdle() {},
+		modelRegistry: { getAll() { return []; }, getAvailable() { return []; } },
+	};
+}
+
+test("formatBestOfNRunDetail exposes read-only summary, lineup, report, artifacts, and diagnostics", async () => {
+	await withAdversarialFixtureDir((root) => {
+		writeCompareRun(root, "2026-06-22-detail-abcdef12", {
+			keepArtifacts: true,
+			workerArtifactText: `worker output ${terminalControlPayload}\n`,
+			reportText: `# Detail report\n\n- Status: review-complete\n\n${terminalControlPayload}\n`,
+		});
+		const result = collectBestOfNRunHistory(root);
+		const output = formatBestOfNRunDetail(result, result.entries[0]!);
+
+		assert.match(output, /# Compare run detail/);
+		assert.match(output, /## Summary/);
+		assert.match(output, /## Lineup/);
+		assert.match(output, /## Report/);
+		assert.match(output, /## Artifacts/);
+		assert.match(output, /## Diagnostics/);
+		assert.match(output, /worker output bad-name\\u0007-c1/);
+		assert.doesNotMatch(output, /[\u001b\u0007\u009b]/);
+	});
+});
+
+test("compare-runs TUI mode opens searchable picker and selected run detail inspector without execution side effects", async () => {
+	await withAdversarialFixtureDir(async (root) => {
+		writeCompareRun(root, "2026-06-22-first-abcdef12", { keepArtifacts: true });
+		writeCompareRun(root, "2026-06-23-second-abcdef12", { keepArtifacts: true, reportText: "# Second report\n\n- Status: complete\n" });
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		pi.customResults.push({ action: "selected", runId: "2026-06-23-second-abcdef12" });
+
+		const output = await captureStdout(() => pi.commands.get("compare-runs")!.handler("", createCompareRunTuiContext(root, pi)));
+
+		assert.equal(output, "");
+		assert.equal(pi.customComponents.length, 2);
+		assert.ok(pi.customComponents[0] instanceof CompareRunPicker);
+		assert.ok(pi.customComponents[1] instanceof CompareRunDetailInspector);
+		const rendered = (pi.customComponents[1] as CompareRunDetailInspector).render(120).join("\n");
+		assert.match(rendered, /Compare run: 2026-06-23-second-abcdef12/);
+		assert.match(rendered, /Summary\s+Lineup\s+Report\s+Artifacts\s+Diagnostics|\[Summary\]/);
+		assert.doesNotMatch(rendered, /execute button|apply button|commit button/i);
+		assert.equal(pi.setModelCalls.length, 0);
+		assert.equal(pi.userMessages.length, 0);
+		assert.equal(pi.customMessages.length, 0);
+	});
+});
+
+test("compare-runs TUI picker ignores malformed and non-catalog UI return values", async () => {
+	const inheritedSelection = Object.create({ action: "selected", runId: "2026-06-22-real-abcdef12" });
+	for (const maliciousReturn of [
+		"/tmp/owned.md",
+		{ action: "selected", runId: "/tmp/owned.md" },
+		{ action: "selected", runId: "2026-06-22-stale-abcdef12" },
+		{ action: "selected", runId: "x".repeat(200_000) },
+		{ action: "selected", runId: "2026-06-22-real-abcdef12", get path() { throw new Error("unexpected path getter should not be read"); } },
+		inheritedSelection,
+	]) {
+		await withAdversarialFixtureDir(async (root) => {
+			writeCompareRun(root, "2026-06-22-real-abcdef12", { keepArtifacts: true });
+			const pi = new FakePi();
+			promptModelExtension(pi as never);
+			pi.customResults.push(maliciousReturn);
+
+			await pi.commands.get("compare-runs")!.handler("", createCompareRunTuiContext(root, pi));
+
+			const shouldInspect = maliciousReturn && typeof maliciousReturn === "object" && Object.getOwnPropertyDescriptor(maliciousReturn, "runId")?.value === "2026-06-22-real-abcdef12";
+			assert.equal(pi.customComponents.length, shouldInspect ? 2 : 1);
+			assert.equal(pi.setModelCalls.length, 0);
+			assert.equal(pi.userMessages.length, 0);
+		});
+	}
+});
+
+test("compare run TUI components filter runs and expose read-only detail panes", async () => {
+	await withAdversarialFixtureDir((root) => {
+		writeCompareRun(root, "2026-06-22-alpha-abcdef12", { keepArtifacts: true });
+		writeCompareRun(root, "2026-06-23-beta-abcdef12", { keepArtifacts: true, reportText: "# Beta\n\n- Status: complete\n" });
+		const result = collectBestOfNRunHistory(root);
+		const doneValues: unknown[] = [];
+		const picker = new CompareRunPicker(buildCompareRunCatalog(result), undefined, undefined, undefined, (value) => doneValues.push(value));
+
+		for (const ch of "beta") picker.handleInput(ch);
+		assert.match(picker.render(90).join("\n"), /2026-06-23-beta-abcdef12/);
+		picker.handleInput("\n");
+		assert.deepEqual(doneValues.at(-1), { action: "selected", runId: "2026-06-23-beta-abcdef12" });
+
+		const inspector = new CompareRunDetailInspector(createCompareRunDetailViewModel(result, result.entries.find((entry) => entry.name.includes("beta"))!));
+		let rendered = inspector.render(120).join("\n");
+		assert.match(rendered, /\[Summary\]/);
+		inspector.handleInput("2");
+		rendered = inspector.render(120).join("\n");
+		assert.match(rendered, /\[Lineup\]/);
+		assert.match(rendered, /"workers"/);
+		inspector.handleInput("3");
+		rendered = inspector.render(120).join("\n");
+		assert.match(rendered, /\[Report\]/);
+		assert.match(rendered, /# Beta/);
+		inspector.handleInput("4");
+		rendered = inspector.render(120).join("\n");
+		assert.match(rendered, /\[Artifacts\]/);
+		inspector.handleInput("5");
+		rendered = inspector.render(120).join("\n");
+		assert.match(rendered, /\[Diagnostics\]/);
 	});
 });
 

@@ -52,12 +52,19 @@ import {
 } from "./deterministic-step.js";
 import { renderDeterministicCompletion, renderDeterministicResult } from "./deterministic-renderer.js";
 import { PROMPT_TEMPLATE_COMMIT_ASK_MESSAGE_TYPE, renderCommitAskMessage } from "./commit-ask-renderer.js";
-import { collectBestOfNRunHistory, parseBestOfNRunHistoryArgs } from "./best-of-n-run-history.js";
-import { formatBestOfNRunHistory } from "./best-of-n-run-history-renderer.js";
+import { formatBestOfNPresetCatalog } from "./best-of-n-preset-renderer.js";
+import { collectBestOfNRunHistory, parseBestOfNRunHistoryArgs, type BestOfNRunHistoryResult } from "./best-of-n-run-history.js";
+import { formatBestOfNRunDetail, formatBestOfNRunHistory } from "./best-of-n-run-history-renderer.js";
+import {
+	CompareRunDetailInspector,
+	CompareRunPicker,
+	buildCompareRunCatalog,
+	createCompareRunDetailViewModel,
+	type CompareRunHistoryTuiResult,
+} from "./best-of-n-run-history-tui.js";
 import { formatPromptValidationReport, validatePromptTemplates, type RegisteredPromptSkill } from "./prompt-validation.js";
 import {
 	DRY_RUN_CHAIN_UNSUPPORTED,
-	DRY_RUN_COMPARE_UNSUPPORTED,
 	DRY_RUN_DETERMINISTIC_UNSUPPORTED,
 	createPromptDryRun,
 	parseDryRunCommand,
@@ -168,6 +175,12 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 	function getCurrentModel(ctx: Pick<ExtensionContext, "model">): Model<any> | undefined {
 		return runtimeModel ?? ctx.model;
+	}
+
+	function getCurrentModelLabel(ctx: Pick<ExtensionContext, "model">): string | undefined {
+		const model = getCurrentModel(ctx);
+		if (!model) return undefined;
+		return model.provider && model.id ? `${model.provider}/${model.id}` : model.id;
 	}
 
 	function isProjectPromptLibraryPrompt(prompt: PromptWithModel): boolean {
@@ -2094,7 +2107,6 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 	function getDryRunUnsupportedReason(prompt: PromptWithModel): string | undefined {
 		if (prompt.chain) return DRY_RUN_CHAIN_UNSUPPORTED;
-		if (prompt.workers !== undefined || prompt.reviewers !== undefined || prompt.finalApplier !== undefined || prompt.preset !== undefined) return DRY_RUN_COMPARE_UNSUPPORTED;
 		if (prompt.deterministic) return DRY_RUN_DETERMINISTIC_UNSUPPORTED;
 		return undefined;
 	}
@@ -2178,6 +2190,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			cwd: ctx.cwd,
 			rawArgs,
 			currentModel: getCurrentModel(ctx),
+			currentModelLabel: getCurrentModelLabel(ctx),
 			modelRegistry: ctx.modelRegistry,
 			commands: pi.getCommands() as RuntimeSkillCommand[],
 			showSkills,
@@ -2227,6 +2240,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			cwd: ctx.cwd,
 			rawArgs: parsed.remainingArgs,
 			currentModel: getCurrentModel(ctx),
+			currentModelLabel: getCurrentModelLabel(ctx),
 			modelRegistry: ctx.modelRegistry,
 			commands: pi.getCommands() as RuntimeSkillCommand[],
 			showSkills: parsed.showSkills,
@@ -2250,10 +2264,17 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			}
 			return;
 		}
-		if (parsed.tui && !parsed.plain) {
-			notify(ctx, "--tui dry-run output is not available without Pi TUI custom UI; falling back to stdout.", "warning");
+		if (parsed.plain || !ctx.hasUI) {
+			if (parsed.tui && !parsed.plain) {
+				notify(ctx, "--tui dry-run output is not available without Pi TUI custom UI; falling back to stdout.", "warning");
+			}
+			process.stdout.write(plainReport);
+			return;
 		}
-		process.stdout.write(plainReport);
+		if (parsed.tui) {
+			notify(ctx, "--tui dry-run output is not available without Pi TUI custom UI; showing a notification report instead.", "warning");
+		}
+		notify(ctx, plainReport, "info");
 	}
 
 	async function runPromptCommand(name: string, args: string, ctx: ExtensionCommandContext) {
@@ -2558,16 +2579,79 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		);
 	}
 
+	function parseCompareRunPickerAction(value: unknown, history: BestOfNRunHistoryResult): CompareRunHistoryTuiResult | undefined {
+		const action = getOwnStringProperty(value, "action");
+		if (action === "closed") return { action: "closed" };
+		if (action === "back") return { action: "back" };
+		if (action !== "selected") return undefined;
+		const runId = getOwnStringProperty(value, "runId");
+		if (!runId) return undefined;
+		if (!history.entries.some((entry) => entry.name === runId)) return undefined;
+		return { action: "selected", runId };
+	}
+
+	async function openCompareRunPicker(ctx: ExtensionCommandContext, history: BestOfNRunHistoryResult, initialRunId?: string): Promise<CompareRunHistoryTuiResult | undefined> {
+		const ui = (ctx as ExtensionCommandContext & {
+			ui: { custom: (factory: (...args: any[]) => unknown, options?: unknown) => Promise<CompareRunHistoryTuiResult | unknown> | CompareRunHistoryTuiResult | unknown };
+		}).ui;
+		const result = await ui.custom((tui, theme, _layout, done) => new CompareRunPicker(buildCompareRunCatalog(history), initialRunId, tui, theme, done));
+		return parseCompareRunPickerAction(result, history);
+	}
+
+	async function openCompareRunInspector(ctx: ExtensionCommandContext, history: BestOfNRunHistoryResult, runId: string): Promise<CompareRunHistoryTuiResult | undefined> {
+		const run = history.entries.find((entry) => entry.name === runId);
+		if (!run) return undefined;
+		const ui = (ctx as ExtensionCommandContext & {
+			ui: { custom: (factory: (...args: any[]) => unknown, options?: unknown) => Promise<CompareRunHistoryTuiResult | unknown> | CompareRunHistoryTuiResult | unknown };
+		}).ui;
+		const result = await ui.custom((tui, theme, _layout, done) => new CompareRunDetailInspector(createCompareRunDetailViewModel(history, run), tui, theme, done));
+		return parseCompareRunPickerAction(result, history);
+	}
+
+	async function inspectCompareRunInTui(ctx: ExtensionCommandContext, history: BestOfNRunHistoryResult, runId: string): Promise<void> {
+		const action = await openCompareRunInspector(ctx, history, runId);
+		if (action?.action === "back") {
+			const selection = await openCompareRunPicker(ctx, history, runId);
+			if (selection?.action === "selected") await inspectCompareRunInTui(ctx, history, selection.runId);
+		}
+	}
+
 	async function runCompareRunsCommand(args: string, ctx: ExtensionCommandContext) {
 		storedCommandCtx = ctx;
 		const options = parseBestOfNRunHistoryArgs(args);
 		const history = collectBestOfNRunHistory(ctx.cwd, options);
-		const output = formatBestOfNRunHistory(history);
+		const selectedRun = options.runId ? history.entries.find((entry) => entry.name === options.runId) : undefined;
+		if (options.plain) {
+			process.stdout.write(selectedRun ? formatBestOfNRunDetail(history, selectedRun) : formatBestOfNRunHistory(history));
+			return;
+		}
+		if (isTuiMode(ctx) && hasCustomUi(ctx)) {
+			if (options.runId) {
+				if (selectedRun) await inspectCompareRunInTui(ctx, history, selectedRun.name);
+				else notify(ctx, `Compare run "${options.runId}" was not found in the current run history.`, "error");
+				return;
+			}
+			const selection = await openCompareRunPicker(ctx, history);
+			if (selection?.action === "selected") await inspectCompareRunInTui(ctx, history, selection.runId);
+			return;
+		}
+		notify(ctx, selectedRun ? formatBestOfNRunDetail(history, selectedRun) : formatBestOfNRunHistory(history), selectedRun || !options.runId ? "info" : "error");
+	}
+
+	function parseComparePresetsArgs(args: string): { plain: boolean } {
+		return { plain: args.split(/\s+/).some((arg) => arg === "--plain") };
+	}
+
+	async function runComparePresetsCommand(args: string, ctx: ExtensionCommandContext) {
+		storedCommandCtx = ctx;
+		const options = parseComparePresetsArgs(args);
+		const catalog = loadBestOfNPresetCatalog(ctx.cwd);
+		const output = formatBestOfNPresetCatalog(catalog, ctx.cwd);
 		if (options.plain) {
 			process.stdout.write(output);
 			return;
 		}
-		notify(ctx, output, "info");
+		notify(ctx, output, catalog.diagnostics.length > 0 ? "warning" : "info");
 	}
 
 	refreshPrompts(process.cwd());
@@ -2592,10 +2676,22 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			await runCompareRunsCommand(args, ctx);
 		},
 	});
+	pi.registerCommand("compare-presets", {
+		description: "List available best-of-N compare presets without approving or running them",
+		handler: async (args, ctx) => {
+			await runComparePresetsCommand(args, ctx);
+		},
+	});
 	pi.registerCommand("best-of-n-runs", {
 		description: "Alias for /compare-runs",
 		handler: async (args, ctx) => {
 			await runCompareRunsCommand(args, ctx);
+		},
+	});
+	pi.registerCommand("best-of-n-presets", {
+		description: "Alias for /compare-presets",
+		handler: async (args, ctx) => {
+			await runComparePresetsCommand(args, ctx);
 		},
 	});
 	pi.registerCommand("print-prompt", {

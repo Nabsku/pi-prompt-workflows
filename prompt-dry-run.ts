@@ -8,6 +8,7 @@ import {
 	parseCommandArgs,
 	type SubagentOverride,
 } from "./args.js";
+import { createBestOfNPreflight, type BestOfNPreflight } from "./best-of-n-preflight.js";
 import type { RegistryLike } from "./model-selection.js";
 import { preparePromptExecution } from "./prompt-execution.js";
 import { expandCwdPath, type PromptWithModel } from "./prompt-loader.js";
@@ -62,13 +63,14 @@ export interface PromptDryRunSuccess {
 	promptName: string;
 	content: string;
 	args: string[];
-	model: Model<any>;
+	model?: Model<any>;
 	modelAlreadyActive: boolean;
 	warnings: string[];
 	skills: PromptDryRunSkillPreview[];
 	details: PromptDryRunDetails;
 	includeGraph?: PromptIncludeGraph;
 	runtime: PromptDryRunRuntimeMetadata;
+	comparePreflight?: BestOfNPreflight;
 }
 
 export interface PromptDryRunError {
@@ -92,6 +94,7 @@ export interface CreatePromptDryRunOptions {
 	/** Runtime command context cwd. Skill resolution intentionally uses this, not runtime --cwd. */
 	cwd: string;
 	showSkills?: boolean;
+	currentModelLabel?: string;
 }
 
 export interface ParsedDryRunCommand {
@@ -311,7 +314,27 @@ export async function createPromptDryRun(
 	const warnings: string[] = [];
 
 	if (prompt.chain) return errorResult(prompt, DRY_RUN_CHAIN_UNSUPPORTED, warnings, runtime);
-	if (hasCompareLineup(prompt)) return errorResult(prompt, DRY_RUN_COMPARE_UNSUPPORTED, warnings, runtime);
+	if (hasCompareLineup(prompt)) {
+		const preflight = createBestOfNPreflight({
+			prompt,
+			args: options.rawArgs ?? (options.args ?? []).join(" "),
+			contextCwd: options.cwd,
+			currentModelLabel: options.currentModelLabel,
+		});
+		warnings.push(...preflight.diagnostics.filter((diagnostic) => diagnostic.severity === "warning").map((diagnostic) => diagnostic.message));
+		return {
+			status: "ok",
+			promptName: prompt.name,
+			content: preflight.task.renderedTask ?? "",
+			args: preflight.task.parsed,
+			modelAlreadyActive: false,
+			warnings,
+			skills: [],
+			details: { skills: [] },
+			runtime,
+			comparePreflight: preflight,
+		};
+	}
 	if (prompt.deterministic) return errorResult(prompt, DRY_RUN_DETERMINISTIC_UNSUPPORTED, warnings, runtime);
 
 	if (parsed.runtimeCwd) {

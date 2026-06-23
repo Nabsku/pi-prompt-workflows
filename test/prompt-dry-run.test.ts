@@ -37,6 +37,7 @@ function prompt(overrides: Partial<PromptWithModel> = {}): PromptWithModel {
 		models: [sonnet.id],
 		restore: false,
 		source: "project",
+		rootKind: "prompts",
 		filePath: "/tmp/demo.md",
 		...overrides,
 	};
@@ -162,20 +163,20 @@ test("renders includes + $@ args through existing loader/preparation path", asyn
 test("renders <if-model> against resolved model", async () => {
 	const result = assertOk(await createPromptDryRun(prompt({ content: '<if-model is="anthropic/*">anthropic<else>other</if-model>' }), options("/tmp")));
 	assert.equal(result.content, "anthropic");
-	assert.equal(result.model.id, sonnet.id);
+	assert.equal(result.model!.id, sonnet.id);
 });
 
 test("honors runtime --model override for model selection and conditionals", async () => {
 	const result = assertOk(await createPromptDryRun(prompt({ content: '<if-model is="openai/*">openai<else>other</if-model>' }), options("/tmp", { rawArgs: "--model=gpt-5.2" })));
 	assert.equal(result.content, "openai");
-	assert.equal(result.model.id, gpt.id);
+	assert.equal(result.model!.id, gpt.id);
 	assert.equal(result.runtime.model, "gpt-5.2");
 });
 
 test("inherits current model when prompt has no model", async () => {
 	const result = assertOk(await createPromptDryRun(prompt({ models: [], content: '<if-model is="anthropic/*">ok</if-model>' }), options("/tmp", { currentModel: sonnet as never })));
 	assert.equal(result.content, "ok");
-	assert.equal(result.model.id, sonnet.id);
+	assert.equal(result.model!.id, sonnet.id);
 });
 
 test("returns error when no model exists and no current model exists", async () => {
@@ -233,9 +234,11 @@ test("returns unsupported error for chain prompts", async () => {
 	assert.equal(result.error, "Dry-run for chain templates is not supported in v1. Use /validate-prompts for structural checks.");
 });
 
-test("returns unsupported error for compare prompts", async () => {
-	const result = assertError(await createPromptDryRun(prompt({ workers: [{ agent: "worker" }] }), options("/tmp")));
-	assert.equal(result.error, "Dry-run for compare prompts is not supported in v1.");
+test("returns compare preflight for compare prompts", async () => {
+	const result = assertOk(await createPromptDryRun(prompt({ workers: [{ agent: "worker" }] }), options("/tmp")));
+	assert.equal(result.comparePreflight?.callCount.workers, 1);
+	assert.equal(result.comparePreflight?.slots.workers[0]?.agent, "worker");
+	assert.equal(result.content, "Body ");
 });
 
 test("returns unsupported error for deterministic prompts", async () => {
@@ -312,7 +315,7 @@ test("rotating loop dry-run uses first rotated model for label and conditionals"
 		options("/tmp"),
 	));
 	assert.equal(result.content, "[Loop 1/3 · gpt-5.2 high]\n\nopenai");
-	assert.equal(result.model.id, gpt.id);
+	assert.equal(result.model!.id, gpt.id);
 	assert.equal(result.runtime.thinking, "high");
 });
 

@@ -306,7 +306,7 @@ test("TUI /dry-run-prompt carries the real include graph into the inspector Incl
 
 		assert.equal(pi.customCalls.length, 1);
 		const inspector = pi.customComponents.at(-1) as { handleInput(data: string): void; render(width: number): string[] };
-		inspector.handleInput("4");
+		inspector.handleInput("5");
 		const rendered = inspector.render(1000).join("\n");
 		assert.match(rendered, /\[Includes\]/);
 		assert.match(rendered, /- review \[ok\] .*\.pi\/prompts\/review\.md/);
@@ -325,11 +325,11 @@ test("TUI /dry-run-prompt keeps a permanent Includes pane with No includes for p
 
 		assert.equal(pi.customCalls.length, 1);
 		const inspector = pi.customComponents.at(-1) as { handleInput(data: string): void; render(width: number): string[] };
-		inspector.handleInput("4");
+		inspector.handleInput("5");
 		const rendered = inspector.render(100).join("\n");
 		assert.match(rendered, /\[Includes\]/);
 		assert.match(rendered, /No includes\./);
-		assert.match(rendered, /pane 4\/6/);
+		assert.match(rendered, /pane 5\/7/);
 		assertNoExecutionSideEffects(pi);
 	});
 });
@@ -382,9 +382,11 @@ test("non-TUI --tui with custom UI available falls back to stdout instead of ope
 		const output = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("review --tui file.ts", ctx));
 
 		assert.equal(pi.customCalls.length, 0);
-		assert.match(output, /# Prompt dry-run: review/);
-		assert.equal(pi.notifications.at(-1)?.type, "warning");
-		assert.match(pi.notifications.at(-1)?.message ?? "", /without Pi TUI custom UI.*stdout/i);
+		assert.equal(output, "");
+		assert.equal(pi.notifications.at(-2)?.type, "warning");
+		assert.match(pi.notifications.at(-2)?.message ?? "", /without Pi TUI custom UI.*notification report/i);
+		assert.equal(pi.notifications.at(-1)?.type, "info");
+		assert.match(pi.notifications.at(-1)?.message ?? "", /# Prompt dry-run: review/);
 		assertNoExecutionSideEffects(pi);
 	});
 });
@@ -418,18 +420,27 @@ test("TUI picker unsupported selection surfaces dry-run diagnostic without execu
 	});
 });
 
-test("TUI picker marks preset-only compare prompts unsupported", async () => {
+test("TUI picker and inspector support preset-only compare prompts", async () => {
 	await setup("tui", async (cwd, pi, ctx) => {
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "best-of-n-presets.json"), `${JSON.stringify({ presets: { quick: { workers: [{ agent: "worker" }], reviewers: [{ agent: "reviewer" }] } } })}\n`);
 		writePrompt(cwd, "compare-preset", "---\nbestOfN:\n  preset: quick\n---\n$@");
 		await pi.emit("session_start", {}, ctx);
+		pi.customResults.push({ action: "selected", templateName: "compare-preset" });
 
 		await pi.commands.get("dry-run-prompt")!.handler!("", ctx);
 
-		assert.equal(pi.customCalls.length, 1);
-		const picker = pi.customComponents.at(-1) as { render(width: number): string[] };
+		assert.equal(pi.customCalls.length, 2);
+		const picker = pi.customComponents.at(-2) as { render(width: number): string[] };
 		const rendered = picker.render(1000).join("\n");
 		assert.match(rendered, /compare-preset\s+project/);
-		assert.match(rendered, /compare-preset[\s\S]*unsupported|unsupported[\s\S]*compare-preset/);
+		assert.doesNotMatch(rendered, /compare-preset[\s\S]*unsupported|unsupported[\s\S]*compare-preset/);
+		const inspector = pi.customComponents.at(-1) as { handleInput(data: string): void; render(width: number): string[] };
+		inspector.handleInput("3");
+		const inspected = inspector.render(1000).join("\n");
+		assert.match(inspected, /\[Compare\]/);
+		assert.match(inspected, /Preset: quick \(project-approval-required\)/);
+		assert.match(inspected, /worker 1: agent=worker/);
 		assertNoExecutionSideEffects(pi);
 	});
 });

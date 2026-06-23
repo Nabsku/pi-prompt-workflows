@@ -22,6 +22,7 @@ export interface PromptDryRunTuiViewModel {
 	panes: {
 		prompt: string;
 		metadata: string;
+		compare: string;
 		skills: string;
 		includes: string;
 		warnings: string;
@@ -49,6 +50,29 @@ function modelLabel(result: PromptDryRunResult): string {
 	const model = result.model as { provider?: string; id?: string } | string | undefined;
 	if (typeof model === "string") return model;
 	return [model?.provider, model?.id].filter(Boolean).join("/") || "n/a";
+}
+
+function formatCompare(result: PromptDryRunResult): string {
+	if (result.status !== "ok" || !result.comparePreflight) return "No compare preflight.";
+	const preflight = result.comparePreflight;
+	const lines = [
+		"# Compare preflight",
+		`Prompt: ${preflight.prompt.name}`,
+		`Compare cwd: ${preflight.compareCwd.resolved} (${preflight.compareCwd.source})`,
+		`Preset: ${preflight.preset ? `${preflight.preset.name} (${preflight.preset.trust})` : "none"}`,
+		`Calls: workers=${preflight.callCount.workers} reviewers=${preflight.callCount.reviewers} final-applier=${preflight.callCount.finalApplier} total=${preflight.callCount.total} cap=${preflight.callCount.cap ?? "uncapped"} ${preflight.callCount.capStatus}`,
+		`Policy: worktree=${preflight.policies.worktree.enabled} final-applier=${preflight.policies.finalApplier.enabled} commit=${preflight.policies.commit.mode}`,
+		`Report root: ${preflight.artifacts.report.root ?? "n/a"}`,
+		"",
+		"## Slots",
+		...preflight.slots.workers.map((slot) => `- worker ${slot.index}: agent=${slot.agent ?? "delegate"} model=${slot.effectiveModelLabel} cwd=${slot.cwd} source=${slot.source}`),
+		...preflight.slots.reviewers.map((slot) => `- reviewer ${slot.index}: agent=${slot.agent ?? "reviewer"} model=${slot.effectiveModelLabel} cwd=${slot.cwd} source=${slot.source}`),
+		...(preflight.slots.finalApplier ? [`- final-applier 1: agent=${preflight.slots.finalApplier.agent ?? "delegate"} model=${preflight.slots.finalApplier.effectiveModelLabel} cwd=${preflight.slots.finalApplier.cwd} source=${preflight.slots.finalApplier.source}`] : []),
+		"",
+		"## Diagnostics",
+		...(preflight.diagnostics.length ? preflight.diagnostics.map((diagnostic) => `- ${diagnostic.severity} ${diagnostic.code}: ${diagnostic.message}`) : ["No compare diagnostics."]),
+	];
+	return sanitizeForTerminal(lines.join("\n"), { preserveLineBreaks: true });
 }
 
 function formatRuntime(result: PromptDryRunResult): string[] {
@@ -158,6 +182,7 @@ export function createPromptDryRunTuiViewModel(result: PromptDryRunResult, plain
 		panes: {
 			prompt,
 			metadata,
+			compare: formatCompare(result),
 			skills: formatSkills(result),
 			includes: formatIncludes(result),
 			warnings,
@@ -251,7 +276,7 @@ export class PromptDryRunPicker implements Component {
 	invalidate(): void {}
 }
 
-const PANE_NAMES = ["Prompt", "Metadata", "Skills", "Includes", "Warnings", "Raw"] as const;
+const PANE_NAMES = ["Prompt", "Metadata", "Compare", "Skills", "Includes", "Warnings", "Raw"] as const;
 type PaneName = typeof PANE_NAMES[number];
 
 export class PromptDryRunInspector implements Component {

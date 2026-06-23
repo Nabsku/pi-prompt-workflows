@@ -1,4 +1,4 @@
-import type { BestOfNRunHistoryResult } from "./best-of-n-run-history.js";
+import type { BestOfNRunHistoryEntry, BestOfNRunHistoryResult } from "./best-of-n-run-history.js";
 import { sanitizeForTerminal } from "./render-safe.js";
 
 function sanitizeInline(value: string): string {
@@ -50,5 +50,41 @@ export function formatBestOfNRunHistory(result: BestOfNRunHistoryResult): string
 		for (const diagnostic of run.diagnostics) lines.push(`- Warning: ${sanitizeInline(diagnostic)}`);
 		lines.push("");
 	}
+	return `${lines.join("\n").trimEnd()}\n`;
+}
+
+export function formatBestOfNRunDetail(result: BestOfNRunHistoryResult, run: BestOfNRunHistoryEntry): string {
+	const lines: string[] = ["# Compare run detail", "", `Root: ${sanitizeInline(result.root)}`, `Run: ${sanitizeInline(run.name)}`, ""];
+	for (const diagnostic of result.diagnostics) lines.push(`Warning: ${sanitizeInline(diagnostic)}`);
+	for (const diagnostic of run.diagnostics) lines.push(`Warning: ${sanitizeInline(diagnostic)}`);
+	if (result.diagnostics.length > 0 || run.diagnostics.length > 0) lines.push("");
+	lines.push("## Summary");
+	lines.push(`- Path: ${sanitizeInline(run.path)}`);
+	lines.push(`- Report: ${sanitizeInline(run.reportPath)}`);
+	lines.push(`- Status: ${formatMaybe(run.status)}`);
+	lines.push(`- Prompt: ${formatMaybe(run.prompt)}`);
+	lines.push(`- Preset: ${formatMaybe(run.preset)}`);
+	lines.push(`- Commit policy: ${formatMaybe(run.commit)}`);
+	lines.push(`- Worker calls: ${formatMaybe(run.workerCalls)}`);
+	lines.push(`- Reviewer calls: ${formatMaybe(run.reviewerCalls)}`);
+	lines.push(`- Final applier: ${formatMaybe(run.finalApplier)}`);
+	lines.push(`- Raw artifacts retained: ${formatMaybe(run.keepArtifacts)}`);
+	lines.push("", "## Lineup", run.lineupText ? sanitizeForTerminal(run.lineupText, { preserveLineBreaks: true }) : "lineup.json is unavailable or invalid. See diagnostics.");
+	lines.push("", "## Report", run.reportText ? sanitizeForTerminal(run.reportText, { preserveLineBreaks: true }) : "report.md is unavailable. See diagnostics.");
+	lines.push("", "## Artifacts");
+	if (run.artifacts.length === 0) {
+		lines.push("No artifacts discovered.");
+	} else {
+		for (const artifact of run.artifacts) {
+			const size = artifact.size !== undefined ? `, ${artifact.size} bytes` : "";
+			const diagnostic = artifact.diagnostic ? ` — ${sanitizeInline(artifact.diagnostic)}` : "";
+			lines.push(`### ${sanitizeInline(artifact.name)}`);
+			lines.push(`${formatArtifactStatus(artifact.status)}${size} (${sanitizeInline(artifact.path)})${diagnostic}`);
+			if (artifact.previewText) lines.push("", sanitizeForTerminal(artifact.previewText, { preserveLineBreaks: true }));
+		}
+	}
+	lines.push("", "## Diagnostics");
+	const diagnostics = [...result.diagnostics, ...run.diagnostics];
+	lines.push(...(diagnostics.length ? diagnostics.map((diagnostic) => `- ${sanitizeInline(diagnostic)}`) : ["No diagnostics."]));
 	return `${lines.join("\n").trimEnd()}\n`;
 }

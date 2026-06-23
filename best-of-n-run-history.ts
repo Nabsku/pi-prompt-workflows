@@ -5,6 +5,7 @@ export interface BestOfNRunHistoryOptions {
 	limit?: number;
 	maxBytes?: number;
 	plain?: boolean;
+	runId?: string;
 }
 
 export interface BestOfNArtifactEntry {
@@ -12,6 +13,7 @@ export interface BestOfNArtifactEntry {
 	status: "retained" | "not-retained" | "missing" | "rejected" | "truncated";
 	path: string;
 	size?: number;
+	previewText?: string;
 	diagnostic?: string;
 }
 
@@ -28,6 +30,8 @@ export interface BestOfNRunHistoryEntry {
 	finalApplier?: boolean;
 	keepArtifacts?: boolean;
 	reportPreview?: string;
+	reportText?: string;
+	lineupText?: string;
 	artifacts: BestOfNArtifactEntry[];
 	diagnostics: string[];
 	mtimeMs: number;
@@ -112,41 +116,41 @@ function validateRunRoot(cwd: string): { root: string; ok: true } | { root: stri
 	return { root, ok: true };
 }
 
-function parseLineup(filePath: string, runDir: string, diagnostics: string[]): Record<string, unknown> | undefined {
+function parseLineup(filePath: string, runDir: string, diagnostics: string[]): { lineup?: Record<string, unknown>; text?: string } {
 	const resolved = resolve(filePath);
 	if (!isInside(runDir, resolved)) {
 		diagnostics.push(`Rejected ${basename(filePath)}: path escapes run directory.`);
-		return undefined;
+		return {};
 	}
 	let text;
 	try {
 		const link = lstatSync(resolved);
 		if (link.isSymbolicLink()) {
 			diagnostics.push(`Rejected ${basename(filePath)}: symlink artifacts are not read.`);
-			return undefined;
+			return {};
 		}
 		if (!link.isFile()) {
 			diagnostics.push(`Rejected ${basename(filePath)}: expected a regular file.`);
-			return undefined;
+			return {};
 		}
 		const stat = statSync(resolved);
 		if (stat.size > MAX_LINEUP_PARSE_BYTES) {
 			diagnostics.push(`lineup.json ignored: exceeds ${MAX_LINEUP_PARSE_BYTES} byte parse limit.`);
-			return undefined;
+			return {};
 		}
 		text = readFileSync(resolved, "utf8");
 	} catch (error) {
 		diagnostics.push(`Could not read ${basename(filePath)}: ${error instanceof Error ? error.message : String(error)}.`);
-		return undefined;
+		return {};
 	}
 	try {
 		const parsed = JSON.parse(text);
 		const object = safeJsonObject(parsed);
 		if (!object) diagnostics.push("lineup.json ignored: expected a JSON object.");
-		return object;
+		return { lineup: object, text };
 	} catch (error) {
 		diagnostics.push(`lineup.json ignored: ${error instanceof Error ? error.message : String(error)}.`);
-		return undefined;
+		return { text };
 	}
 }
 
@@ -170,6 +174,7 @@ function artifactEntry(name: string, runDir: string, maxBytes: number, expectedR
 		path: artifactPath,
 		status: read.truncated ? "truncated" : "retained",
 		size: read.size,
+		previewText: read.text,
 		diagnostic: read.diagnostic,
 	};
 }
@@ -230,7 +235,8 @@ function collectRun(runDir: string, maxBytes: number): BestOfNRunHistoryEntry {
 	const reportPath = join(runDir, "report.md");
 	const report = readBoundedText(reportPath, runDir, maxBytes);
 	if (report.diagnostic) diagnostics.push(report.diagnostic);
-	const lineup = parseLineup(join(runDir, "lineup.json"), runDir, diagnostics);
+	const parsedLineup = parseLineup(join(runDir, "lineup.json"), runDir, diagnostics);
+	const lineup = parsedLineup.lineup;
 	let stat;
 	try {
 		stat = statSync(runDir);
@@ -251,6 +257,8 @@ function collectRun(runDir: string, maxBytes: number): BestOfNRunHistoryEntry {
 		finalApplier: lineup ? lineup.finalApplier !== undefined && lineup.finalApplier !== null : undefined,
 		keepArtifacts: typeof lineup?.keepArtifacts === "boolean" ? lineup.keepArtifacts : undefined,
 		reportPreview: reportPreview(report.text),
+		reportText: report.text,
+		lineupText: parsedLineup.text,
 		artifacts: artifactInventory(runDir, lineup, maxBytes, diagnostics),
 		diagnostics,
 		mtimeMs: stat.mtimeMs,
@@ -310,10 +318,18 @@ export function parseBestOfNRunHistoryArgs(args: string): BestOfNRunHistoryOptio
 	const tokens = args.trim().split(/\s+/).filter(Boolean);
 	let limit: number | undefined;
 	let plain = false;
+	let runId: string | undefined;
 	for (let index = 0; index < tokens.length; index += 1) {
 		const token = tokens[index];
 		if (token === "--plain") {
 			plain = true;
+		} else if ((token === "--run" || token === "--id") && tokens[index + 1]) {
+			runId = tokens[index + 1];
+			index += 1;
+		} else if (token.startsWith("--run=")) {
+			runId = token.slice("--run=".length);
+		} else if (token.startsWith("--id=")) {
+			runId = token.slice("--id=".length);
 		} else if (token === "--limit" && tokens[index + 1]) {
 			limit = Number.parseInt(tokens[index + 1]!, 10);
 			index += 1;
@@ -321,5 +337,5 @@ export function parseBestOfNRunHistoryArgs(args: string): BestOfNRunHistoryOptio
 			limit = Number.parseInt(token.slice("--limit=".length), 10);
 		}
 	}
-	return { limit, plain };
+	return { limit, plain, runId };
 }

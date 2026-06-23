@@ -1,3 +1,4 @@
+import type { BestOfNPreflight, BestOfNPreflightSlot } from "./best-of-n-preflight.js";
 import type { PromptDryRunResult, PromptDryRunRuntimeMetadata } from "./prompt-dry-run.js";
 import { sanitizeForTerminal } from "./render-safe.js";
 
@@ -76,6 +77,45 @@ function appendArgs(lines: string[], args: string[]): void {
 	for (const arg of args) lines.push(`- ${sanitizeInline(arg)}`);
 }
 
+function appendCompareSlots(lines: string[], title: string, slots: BestOfNPreflightSlot[]): void {
+	lines.push("", `### ${title}`);
+	if (slots.length === 0) {
+		lines.push("- (none)");
+		return;
+	}
+	for (const slot of slots) {
+		lines.push(`- ${slot.kind} ${slot.index}: agent=${formatScalar(slot.agent ?? "delegate")}, model=${formatScalar(slot.effectiveModelLabel)}, cwd=${formatScalar(slot.cwd)}, source=${formatScalar(slot.source)}`);
+		if (slot.taskSuffix) lines.push(`  - task suffix: ${formatScalar(slot.taskSuffix)}`);
+	}
+}
+
+function appendComparePreflight(lines: string[], preflight: BestOfNPreflight): void {
+	lines.push("", "## Compare preflight");
+	lines.push(`- Prompt source: ${formatScalar(preflight.prompt.source)} ${formatScalar(preflight.prompt.filePath)}`);
+	lines.push(`- Compare cwd: ${formatScalar(preflight.compareCwd.resolved)} (${formatScalar(preflight.compareCwd.source)})`);
+	if (preflight.preset) {
+		lines.push(`- Preset: ${formatScalar(preflight.preset.name)} (${formatScalar(preflight.preset.trust)})`);
+		if (preflight.preset.filePath) lines.push(`  - Path: ${formatScalar(preflight.preset.filePath)}`);
+		if (preflight.preset.defaultModel) lines.push(`  - Default model: ${formatScalar(preflight.preset.defaultModel)}`);
+		if (preflight.preset.maxModelCalls !== undefined) lines.push(`  - Max model calls: ${formatScalar(preflight.preset.maxModelCalls)}`);
+	} else {
+		lines.push("- Preset: none");
+	}
+	lines.push(`- Calls: workers=${formatScalar(preflight.callCount.workers)}, reviewers=${formatScalar(preflight.callCount.reviewers)}, final-applier=${formatScalar(preflight.callCount.finalApplier)}, total=${formatScalar(preflight.callCount.total)}, cap=${formatScalar(preflight.callCount.cap)}, status=${formatScalar(preflight.callCount.capStatus)}`);
+	lines.push(`- Worktree: ${formatScalar(preflight.policies.worktree.enabled)} (${formatScalar(preflight.policies.worktree.workerCwdPolicy)})`);
+	lines.push(`- Final applier: ${formatScalar(preflight.policies.finalApplier.enabled)}`);
+	lines.push(`- Commit policy: ${formatScalar(preflight.policies.commit.mode)}`);
+	lines.push(`- Report root: ${formatScalar(preflight.artifacts.report.root)}`);
+	lines.push(`- Raw artifacts: keep=${formatScalar(preflight.artifacts.rawArtifacts.keepArtifacts)}, files=${formatScalar(preflight.artifacts.rawArtifacts.expectedFiles.join(", ") || "none")}`);
+	appendCompareSlots(lines, "Workers", preflight.slots.workers);
+	appendCompareSlots(lines, "Reviewers", preflight.slots.reviewers);
+	if (preflight.slots.finalApplier) appendCompareSlots(lines, "Final applier", [preflight.slots.finalApplier]);
+	if (preflight.diagnostics.length) {
+		lines.push("", "### Compare diagnostics");
+		for (const diagnostic of preflight.diagnostics) lines.push(`- ${formatScalar(diagnostic.severity)} ${formatScalar(diagnostic.code)}: ${formatScalar(diagnostic.message)}`);
+	}
+}
+
 export function formatPromptDryRun(result: PromptDryRunResult): string {
 	const lines: string[] = [`# Prompt dry-run: ${sanitizeInline(result.promptName)}`];
 	lines.push(`Status: ${result.status}`);
@@ -89,9 +129,10 @@ export function formatPromptDryRun(result: PromptDryRunResult): string {
 	}
 
 	lines.push("", "## Metadata");
-	lines.push(`- Model: ${sanitizeInline(modelLabel(result.model))}`);
+	lines.push(`- Model: ${result.model !== undefined ? sanitizeInline(modelLabel(result.model)) : "compare preflight"}`);
 	lines.push(`- Model already active: ${formatScalar(result.modelAlreadyActive)}`);
 	formatRuntime(result.runtime, lines);
+	if (result.comparePreflight) appendComparePreflight(lines, result.comparePreflight);
 	appendWarnings(lines, result.warnings);
 	appendSkills(lines, result);
 	appendArgs(lines, result.args);

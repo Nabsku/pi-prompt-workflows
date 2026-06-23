@@ -181,7 +181,7 @@ test("print-prompt writes dry-run report to stdout instead of LLM history and ha
 		writePrompt(cwd, "review", "---\nmodel: anthropic/claude-sonnet-4-20250514\ninclude: review-prefix.md\n---\nReview $@ now");
 		await pi.emit("session_start", {}, ctx);
 
-		const output = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("review src/server.ts", ctx));
+		const output = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("review --plain src/server.ts", ctx));
 
 		assert.equal(pi.messages.length, 0);
 		assert.match(output, /# Prompt dry-run: review/);
@@ -196,8 +196,8 @@ test("dry-run-prompt alias produces the same stdout content as print-prompt", as
 	await setup(async (_root, cwd, pi, ctx) => {
 		writePrompt(cwd, "review", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nReview $@");
 		await pi.emit("session_start", {}, ctx);
-		const printed = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("review src/server.ts", ctx));
-		const dryRun = await captureStdout(() => pi.commands.get("dry-run-prompt")!.handler!("review src/server.ts", ctx));
+		const printed = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("review --plain src/server.ts", ctx));
+		const dryRun = await captureStdout(() => pi.commands.get("dry-run-prompt")!.handler!("review --plain src/server.ts", ctx));
 		assert.equal(dryRun, printed);
 		assertNoExecutionSideEffects(pi);
 	});
@@ -219,9 +219,10 @@ test("--tui warns and falls back to stdout outside Pi TUI custom UI unless --pla
 		writePrompt(cwd, "review", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nReview $@");
 		await pi.emit("session_start", {}, ctx);
 		const tuiOutput = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("review --tui file.ts", ctx));
-		assert.match(tuiOutput, /Review file\.ts/);
-		assert.equal(pi.notifications.at(-1)?.type, "warning");
-		assert.match(pi.notifications.at(-1)?.message ?? "", /--tui.*not available.*stdout/i);
+		assert.equal(tuiOutput, "");
+		assert.equal(pi.notifications.at(-2)?.type, "warning");
+		assert.match(pi.notifications.at(-2)?.message ?? "", /--tui.*not available.*notification report/i);
+		assert.match(pi.notifications.at(-1)?.message ?? "", /Review file\.ts/);
 
 		pi.notifications = [];
 		const plainOutput = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("review --tui --plain file.ts", ctx));
@@ -235,7 +236,7 @@ test("--model affects conditional stdout output", async () => {
 	await setup(async (_root, cwd, pi, ctx) => {
 		writePrompt(cwd, "conditional", "---\nmodel: anthropic/claude-sonnet-4-20250514, openai/gpt-5.2\n---\n<if-model is=\"openai/*\">openai<else>other</if-model>");
 		await pi.emit("session_start", {}, ctx);
-		const output = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("conditional --model=gpt-5.2", ctx));
+		const output = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("conditional --plain --model=gpt-5.2", ctx));
 		assert.match(output, /openai/);
 		assert.match(output, /Requested model override: gpt-5\.2/);
 		assertNoExecutionSideEffects(pi);
@@ -248,29 +249,56 @@ test("--show-skills includes skill content in stdout and default omits it", asyn
 		writePrompt(cwd, "skilled", "---\nmodel: anthropic/claude-sonnet-4-20250514\nskill: tmux\n---\nUse skill");
 		await pi.emit("session_start", {}, ctx);
 
-		const hidden = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("skilled", ctx));
+		const hidden = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("skilled --plain", ctx));
 		assert.doesNotMatch(hidden, /tmux skill content/);
 
-		const shown = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("skilled --show-skills", ctx));
+		const shown = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("skilled --plain --show-skills", ctx));
 		assert.match(shown, /tmux skill content/);
 		assertNoExecutionSideEffects(pi);
 	});
 });
 
-test("unsupported chain, deterministic, and compare prompts report clear errors without dry-run message", async () => {
+test("unsupported chain and deterministic prompts report clear errors without dry-run message", async () => {
 	await setup(async (_root, cwd, pi, ctx) => {
 		writePrompt(cwd, "chainy", "---\nchain: one -> two\n---\nignored");
 		writePrompt(cwd, "det", "---\nrun: printf ok\n---\nignored");
-		writePrompt(cwd, "compare", "---\nmodel: anthropic/claude-sonnet-4-20250514\nbestOfN:\n  workers:\n    - agent: worker\n---\nTask");
 		await pi.emit("session_start", {}, ctx);
 
 		await pi.commands.get("print-prompt")!.handler!("chainy", ctx);
 		assert.match(pi.notifications.at(-1)!.message, /Dry-run for chain templates is not supported/);
 		await pi.commands.get("print-prompt")!.handler!("det", ctx);
 		assert.match(pi.notifications.at(-1)!.message, /Dry-run for deterministic prompts is not supported/);
-		await pi.commands.get("print-prompt")!.handler!("compare", ctx);
-		assert.match(pi.notifications.at(-1)!.message, /Dry-run for compare prompts is not supported/);
 		assert.equal(pi.messages.length, 0);
+		assertNoExecutionSideEffects(pi);
+	});
+});
+
+test("compare prompts render a read-only preflight report with --plain", async () => {
+	await setup(async (_root, cwd, pi, ctx) => {
+		writePrompt(cwd, "compare", "---\nmodel: anthropic/claude-sonnet-4-20250514\ncommit: ask\nbestOfN:\n  workers:\n    - agent: worker\n      model: openai/gpt-5.2\n  reviewers:\n    - agent: reviewer\n  worktree: true\n---\nTask $@");
+		await pi.emit("session_start", {}, ctx);
+
+		const output = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("compare --plain src/app.ts", ctx));
+
+		assert.match(output, /# Prompt dry-run: compare/);
+		assert.match(output, /## Compare preflight/);
+		assert.match(output, /worker 1: agent=worker, model=openai\/gpt-5\.2/);
+		assert.match(output, /Worktree: true \(shared\)/);
+		assert.match(output, /Task src\/app\.ts/);
+		assertNoExecutionSideEffects(pi);
+	});
+});
+
+test("default UI dry-run routes compare preflight through notification unless --plain is explicit", async () => {
+	await setup(async (_root, cwd, pi, ctx) => {
+		writePrompt(cwd, "compare", "---\nmodel: anthropic/claude-sonnet-4-20250514\nbestOfN:\n  workers:\n    - agent: worker\n---\nTask $@");
+		await pi.emit("session_start", {}, ctx);
+
+		const output = await captureStdout(() => pi.commands.get("dry-run-prompt")!.handler!("compare src/app.ts", ctx));
+
+		assert.equal(output, "");
+		assert.equal(pi.notifications.at(-1)?.type, "info");
+		assert.match(pi.notifications.at(-1)?.message ?? "", /## Compare preflight/);
 		assertNoExecutionSideEffects(pi);
 	});
 });
@@ -287,8 +315,8 @@ test("exact plain dry-run of hidden project prompt-library commands previews wit
 		await pi.emit("session_start", {}, ctx);
 
 		assert.equal(pi.commands.has("hidden-lib"), false);
-		const printOutput = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("hidden-lib src/app.ts", ctx));
-		const dryRunOutput = await captureStdout(() => pi.commands.get("dry-run-prompt")!.handler!("hidden-lib src/app.ts", ctx));
+		const printOutput = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("hidden-lib --plain src/app.ts", ctx));
+		const dryRunOutput = await captureStdout(() => pi.commands.get("dry-run-prompt")!.handler!("hidden-lib --plain src/app.ts", ctx));
 
 		for (const output of [printOutput, dryRunOutput]) {
 			assert.match(output, /# Prompt dry-run: hidden-lib/);
@@ -305,7 +333,7 @@ test("command-capable prompt-library prompt registers as slash command and print
 		await pi.emit("session_start", {}, ctx);
 
 		assert.ok(pi.commands.has("review"));
-		const output = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("review src/lib.ts", ctx));
+		const output = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("review --plain src/lib.ts", ctx));
 
 		assert.match(output, /# Prompt dry-run: review/);
 		assert.match(output, /Library review src\/lib\.ts/);
@@ -320,7 +348,7 @@ test("scalar-skill prompt-library prompt registers and dry-run resolves requeste
 		await pi.emit("session_start", {}, ctx);
 
 		assert.ok(pi.commands.has("skilled-lib"));
-		const output = await captureStdout(() => pi.commands.get("dry-run-prompt")!.handler!("skilled-lib --show-skills", ctx));
+		const output = await captureStdout(() => pi.commands.get("dry-run-prompt")!.handler!("skilled-lib --plain --show-skills", ctx));
 
 		assert.match(output, /Status: ok/);
 		assert.match(output, /Use tmux skill/);
@@ -354,7 +382,7 @@ test("same-name .pi/prompts and prompt-library registers exactly one effective s
 		await pi.emit("session_start", {}, ctx);
 
 		assert.equal(pi.commandRegistrations.slice(before).filter((name) => name === "review").length, 1);
-		const output = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("review", ctx));
+		const output = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("review --plain", ctx));
 		assert.match(output, /Project winner/);
 		assert.doesNotMatch(output, /Library loser/);
 		assertNoExecutionSideEffects(pi);
