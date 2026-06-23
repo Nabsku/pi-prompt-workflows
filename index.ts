@@ -1495,25 +1495,46 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		const fallbackFinalApplier = normalizedFinalApplier ? fallbackReportLineupSlots([normalizedFinalApplier])[0] : undefined;
 
 		try {
-			const workerResult = await executeSubagentPromptStep({
-				pi,
-				ctx,
-				currentModel: baseModel,
-				signal: ctx.signal,
-				worktree: prompt.worktree === true,
-				allowPartialFailures: true,
-				parallel: normalizedWorkers.map((slot, index) => ({
-					prompt: buildComparePrompt(prompt, {
-						name: `${prompt.name}-worker-${index + 1}`,
-						agent: slot.agent,
-						task: buildLineupSlotTask(sharedTask, slot, taskArgs),
-						model: slot.model,
-						cwd: slot.cwd!,
-						inheritContext: true,
-					}),
-					args: [],
-				})),
-			});
+			let workerResult;
+			try {
+				workerResult = await executeSubagentPromptStep({
+					pi,
+					ctx,
+					currentModel: baseModel,
+					signal: ctx.signal,
+					worktree: prompt.worktree === true,
+					allowPartialFailures: true,
+					parallel: normalizedWorkers.map((slot, index) => ({
+						prompt: buildComparePrompt(prompt, {
+							name: `${prompt.name}-worker-${index + 1}`,
+							agent: slot.agent,
+							task: buildLineupSlotTask(sharedTask, slot, taskArgs),
+							model: slot.model,
+							cwd: slot.cwd!,
+							inheritContext: true,
+						}),
+						args: [],
+					})),
+				});
+			} catch (error) {
+				const failureSummary = `worker phase failed before returning worker pairs: ${error instanceof Error ? error.message : String(error)}`;
+				writeCompareFailureHistory({
+					ctx,
+					compareCwd,
+					promptName: name,
+					status: "worker-failed",
+					sharedTask,
+					taskArgs,
+					presetName: runtime.preset ?? prompt.preset,
+					commitMode: prompt.commit,
+					keepArtifacts,
+					workers: fallbackWorkers,
+					reviewers: fallbackReviewers,
+					finalApplier: fallbackFinalApplier,
+					failureSummary,
+				});
+				return;
+			}
 			if (!workerResult) {
 				writeCompareFailureHistory({
 					ctx,

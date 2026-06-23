@@ -95,11 +95,34 @@ export function comparePreflightVerdict(preflight: BestOfNPreflight, warnings: s
 	return "ready to run";
 }
 
+function runtimeOverrideSlot(slot: BestOfNPreflightSlot, includeCwd: boolean): Record<string, string> {
+	const value: Record<string, string> = {};
+	if (slot.agent) value.agent = slot.agent;
+	if (slot.model) value.model = slot.model;
+	if (slot.task) value.task = slot.task;
+	if (slot.taskSuffix) value.taskSuffix = slot.taskSuffix;
+	if (includeCwd && slot.cwd) value.cwd = slot.cwd;
+	return value;
+}
+
+function hasRuntimeLineupOverride(preflight: BestOfNPreflight): boolean {
+	return [
+		...preflight.slots.workers,
+		...preflight.slots.reviewers,
+		...(preflight.slots.finalApplier ? [preflight.slots.finalApplier] : []),
+	].some((slot) => slot.source === "runtime-override");
+}
+
 function compareExecuteCommand(preflight: BestOfNPreflight, runtime: Partial<PromptDryRunRuntimeMetadata> | undefined): string {
 	const parts = [`/${preflight.prompt.name}`];
 	if (runtime?.model) parts.push(`--model=${runtime.model}`);
-	if (runtime?.cwd && runtime.cwd !== preflight.compareCwd.resolved) parts.push(`--cwd=${runtime.cwd}`);
+	if (runtime?.cwd && (preflight.compareCwd.source === "runtime-cwd" || runtime.cwd !== preflight.compareCwd.resolved)) parts.push(`--cwd=${runtime.cwd}`);
 	if (preflight.preset?.name && preflight.preset.trust !== "not-found" && preflight.preset.trust !== "invalid") parts.push(`--preset ${preflight.preset.name}`);
+	if (hasRuntimeLineupOverride(preflight)) {
+		parts.push(`--workers=${JSON.stringify(preflight.slots.workers.map((slot) => runtimeOverrideSlot(slot, true)))}`);
+		parts.push(`--reviewers=${JSON.stringify(preflight.slots.reviewers.map((slot) => runtimeOverrideSlot(slot, true)))}`);
+		if (preflight.slots.finalApplier) parts.push(`--final-applier=${JSON.stringify(runtimeOverrideSlot(preflight.slots.finalApplier, false))}`);
+	}
 	if (preflight.artifacts.rawArtifacts.keepArtifacts) parts.push("--keep-artifacts");
 	if (preflight.task.raw) parts.push(preflight.task.raw);
 	return sanitizeInline(parts.join(" ").replace(/\s+/g, " ").trim());

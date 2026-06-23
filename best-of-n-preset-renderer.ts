@@ -11,11 +11,11 @@ function formatMaybe(value: unknown): string {
 	return sanitizeInline(String(value));
 }
 
-function formatUsePresetCommand(promptName: string, presetName: string, dryRun: boolean): string {
+function formatUsePresetCommand(promptName: string, presetName: string, dryRun: boolean, keepArtifacts = false): string {
 	const command = dryRun ? "dry-run-prompt" : promptName;
 	const promptArg = dryRun ? `${promptName} ` : "";
 	const plain = dryRun ? " --plain" : "";
-	const artifactRetention = dryRun ? "" : " --keep-artifacts";
+	const artifactRetention = keepArtifacts ? " --keep-artifacts" : "";
 	return `/${command} ${promptArg}--preset ${presetName}${plain}${artifactRetention} <task>`;
 }
 
@@ -56,8 +56,9 @@ function formatPreset(entry: BestOfNPresetDiscoveryEntry): string[] {
 	lines.push(`- Reviewer lineup: ${formatLineup(entry.preset.reviewers)}`);
 	lines.push(`- Final applier: ${formatMaybe(entry.hasFinalApplier)}`);
 	lines.push("- Use:");
-	lines.push(`  - ${formatUsePresetCommand("best-of-n", entry.name, true)}`);
-	lines.push(`  - ${formatUsePresetCommand("best-of-n", entry.name, false)}`);
+	lines.push(`  - Dry run (read-only): ${formatUsePresetCommand("best-of-n", entry.name, true)}`);
+	lines.push(`  - Execute (retains evidence artifacts): ${formatUsePresetCommand("best-of-n", entry.name, false, true)}`);
+	lines.push(`  - Execute (summary-only, fewer local artifacts): ${formatUsePresetCommand("best-of-n", entry.name, false)}`);
 	if (entry.description) lines.push(`- Description: ${sanitizeInline(entry.description)}`);
 	return lines;
 }
