@@ -36,6 +36,7 @@
     "best-of-n-run-history-renderer.ts",
     "best-of-n-run-history-tui.ts",
     "chain-parser.ts",
+    "compare-defaults.ts",
     "loop-utils.ts",
     "model-selection.ts",
     "notifications.ts",

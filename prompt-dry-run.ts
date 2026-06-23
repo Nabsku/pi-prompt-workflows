@@ -95,6 +95,8 @@ export interface CreatePromptDryRunOptions {
 	cwd: string;
 	showSkills?: boolean;
 	currentModelLabel?: string;
+	/** Prompt name whose first positional arg is compare cwd for path-driven compare templates. */
+	pathArgumentPromptName?: string;
 }
 
 export interface ParsedDryRunCommand {
@@ -320,6 +322,7 @@ export async function createPromptDryRun(
 			args: options.rawArgs ?? (options.args ?? []).join(" "),
 			contextCwd: options.cwd,
 			currentModelLabel: options.currentModelLabel,
+			pathArgumentPromptName: options.pathArgumentPromptName,
 		});
 		warnings.push(...preflight.diagnostics.filter((diagnostic) => diagnostic.severity === "warning").map((diagnostic) => diagnostic.message));
 		return {

@@ -22,7 +22,7 @@ const PANE_NAMES = ["Summary", "Lineup", "Report", "Artifacts", "Diagnostics"] a
 type PaneName = typeof PANE_NAMES[number];
 
 function lineSafe(line: string, width: number): string {
-	return truncateForTerminalWidth(line, Math.max(1, width), { marker: "…" });
+	return truncateForTerminalWidth(sanitizeForTerminal(line), Math.max(1, width), { marker: "…" });
 }
 
 function linesSafe(lines: string[], width: number): string[] {

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPromptDryRun, parseDryRunCommand, type PromptDryRunResult } from "../prompt-dry-run.js";
@@ -239,6 +239,20 @@ test("returns compare preflight for compare prompts", async () => {
 	assert.equal(result.comparePreflight?.callCount.workers, 1);
 	assert.equal(result.comparePreflight?.slots.workers[0]?.agent, "worker");
 	assert.equal(result.content, "Body ");
+});
+
+test("returns compare preflight for path-driven compare prompts", async () => {
+	await withTempHome(async (root) => {
+		const target = join(root, "target-repo");
+		mkdirSync(target, { recursive: true });
+		const result = assertOk(await createPromptDryRun(
+			prompt({ name: "parallel-patch-compare-at-path", workers: [{ agent: "worker" }], content: "Fix $@" }),
+			options(root, { rawArgs: `${target} bug now`, pathArgumentPromptName: "parallel-patch-compare-at-path" }),
+		));
+		assert.equal(result.comparePreflight?.compareCwd.resolved, realpathSync(target));
+		assert.deepEqual(result.args, ["bug", "now"]);
+		assert.equal(result.content, "Fix bug now");
+	});
 });
 
 test("returns unsupported error for deterministic prompts", async () => {
