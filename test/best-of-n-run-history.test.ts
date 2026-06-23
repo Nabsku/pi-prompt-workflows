@@ -230,6 +230,30 @@ test("collectBestOfNRunHistory reports run-root listing failures without throwin
 	});
 });
 
+test("collectBestOfNRunHistory reads explicit run IDs directly without scanning sibling runs", async () => {
+	await withAdversarialFixtureDir((root) => {
+		writeCompareRun(root, "2026-06-22-target-abcdef12", { keepArtifacts: true });
+		createSymlinkedRunDir(root, "2026-06-22-linked-abcdef12", root);
+
+		const result = collectBestOfNRunHistory(root, { runId: "2026-06-22-target-abcdef12" });
+
+		assert.equal(result.entries.length, 1);
+		assert.equal(result.entries[0]?.name, "2026-06-22-target-abcdef12");
+		assert.equal(result.diagnostics.length, 0);
+	});
+});
+
+test("collectBestOfNRunHistory rejects explicit run IDs that are paths", async () => {
+	await withAdversarialFixtureDir((root) => {
+		writeCompareRun(root, "2026-06-22-target-abcdef12", { keepArtifacts: true });
+
+		const result = collectBestOfNRunHistory(root, { runId: "../2026-06-22-target-abcdef12" });
+
+		assert.equal(result.entries.length, 0);
+		assert.match(result.diagnostics.join("\n"), /expected a run directory name/);
+	});
+});
+
 test("formatBestOfNRunHistory escapes control characters from persisted run data", async () => {
 	await withAdversarialFixtureDir((root) => {
 		const runDir = writeCompareRun(root, `2026-06-22-${terminalControlPayload}`, { keepArtifacts: true });

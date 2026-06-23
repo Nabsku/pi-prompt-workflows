@@ -2602,9 +2602,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	async function runCompareRunsCommand(args: string, ctx: ExtensionCommandContext) {
 		storedCommandCtx = ctx;
 		const options = parseBestOfNRunHistoryArgs(args);
-		const history = collectBestOfNRunHistory(ctx.cwd, options.runId ? { ...options, limit: Number.MAX_SAFE_INTEGER } : options);
+		const history = collectBestOfNRunHistory(ctx.cwd, options);
 		const selectedRun = options.runId ? history.entries.find((entry) => entry.name === options.runId) : undefined;
-		const missingRunMessage = options.runId && !selectedRun ? `Compare run ${JSON.stringify(options.runId)} was not found in the current run history.` : undefined;
+		const missingRunMessage = options.runId && !selectedRun ? history.diagnostics[0] ?? `Compare run ${JSON.stringify(options.runId)} was not found in the current run history.` : undefined;
 		if (options.plain) {
 			process.stdout.write(selectedRun ? formatBestOfNRunDetail(history, selectedRun) : missingRunMessage ?? formatBestOfNRunHistory(history));
 			return;

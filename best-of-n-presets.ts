@@ -105,10 +105,17 @@ function verifyPresetPath(filePath: string, source: PromptSource, diagnostics: P
 	}
 }
 
+function stripYamlDocumentMarkers(text: string): string {
+	return text
+		.replace(/^\uFEFF?---[^\r\n]*(?:\r?\n|$)/, "")
+		.replace(/(?:^|\r?\n)\.\.\.\s*$/, "");
+}
+
 function parseStaticPresetFile(filePath: string, text: string): unknown {
 	const extension = extname(filePath).toLowerCase();
 	if (extension === ".yaml" || extension === ".yml") {
-		return parseFrontmatter<Record<string, unknown>>(`---\n${text}\n---\n`).frontmatter;
+		const yamlText = stripYamlDocumentMarkers(text);
+		return parseFrontmatter<Record<string, unknown>>(`---\n${yamlText}\n---\n`).frontmatter;
 	}
 	return JSON.parse(text);
 }

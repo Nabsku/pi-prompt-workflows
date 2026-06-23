@@ -98,6 +98,10 @@ function readBoundedText(filePath: string, root: string, maxBytes: number): { te
 	}
 }
 
+function isSafeRunId(runId: string): boolean {
+	return !!runId && basename(runId) === runId && runId !== "." && runId !== ".." && !runId.includes(sep);
+}
+
 function validateRunRoot(cwd: string): { root: string; ok: true } | { root: string; ok: false; diagnostic?: string } {
 	const piDir = resolve(cwd, ".pi");
 	const runsDir = resolve(piDir, "runs");
@@ -279,6 +283,24 @@ export function collectBestOfNRunHistory(cwd: string, options: BestOfNRunHistory
 	}
 	if (rootStat.isSymbolicLink()) return { root, entries: [], diagnostics: ["Run root is a symlink; refusing to read compare run history."] };
 	if (!rootStat.isDirectory()) return { root, entries: [], diagnostics: ["Run root exists but is not a directory."] };
+
+	if (options.runId) {
+		if (!isSafeRunId(options.runId)) {
+			return { root, entries: [], diagnostics: [`Invalid compare run id ${JSON.stringify(options.runId)}: expected a run directory name, not a path.`] };
+		}
+		const selectedPath = resolve(root, options.runId);
+		if (!isInside(root, selectedPath)) {
+			return { root, entries: [], diagnostics: [`Invalid compare run id ${JSON.stringify(options.runId)}: path escapes run root.`] };
+		}
+		try {
+			const selectedStat = lstatSync(selectedPath);
+			if (selectedStat.isSymbolicLink()) return { root, entries: [], diagnostics: [`Compare run ${options.runId} is a symlink; refusing to read it.`] };
+			if (!selectedStat.isDirectory()) return { root, entries: [], diagnostics: [`Compare run ${options.runId} exists but is not a directory.`] };
+			return { root, entries: [collectRun(selectedPath, maxBytes)], diagnostics };
+		} catch {
+			return { root, entries: [], diagnostics };
+		}
+	}
 
 	const runDirs: Array<{ path: string; mtimeMs: number; name: string }> = [];
 	let rootEntries;
