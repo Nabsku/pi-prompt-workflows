@@ -1,4 +1,4 @@
-import type { BestOfNPreflight, BestOfNPreflightSlot } from "./best-of-n-preflight.js";
+import type { BestOfNPreflight, BestOfNPreflightDiagnostic, BestOfNPreflightSlot } from "./best-of-n-preflight.js";
 import type { PromptDryRunResult, PromptDryRunRuntimeMetadata } from "./prompt-dry-run.js";
 import { sanitizeForTerminal } from "./render-safe.js";
 
@@ -89,8 +89,61 @@ function appendCompareSlots(lines: string[], title: string, slots: BestOfNPrefli
 	}
 }
 
-function appendComparePreflight(lines: string[], preflight: BestOfNPreflight): void {
-	lines.push("", "## Compare preflight");
+export function comparePreflightVerdict(preflight: BestOfNPreflight, warnings: string[] = []): "ready to run" | "blocked" | "warnings" {
+	if (preflight.diagnostics.some((diagnostic) => diagnostic.severity === "error")) return "blocked";
+	if (preflight.diagnostics.some((diagnostic) => diagnostic.severity === "warning") || warnings.length > 0) return "warnings";
+	return "ready to run";
+}
+
+function compareExecuteCommand(preflight: BestOfNPreflight, runtime: Partial<PromptDryRunRuntimeMetadata> | undefined): string {
+	const parts = [`/${preflight.prompt.name}`];
+	if (runtime?.model) parts.push(`--model=${runtime.model}`);
+	if (runtime?.cwd && runtime.cwd !== preflight.compareCwd.resolved) parts.push(`--cwd=${runtime.cwd}`);
+	if (preflight.preset?.name && preflight.preset.trust !== "not-found" && preflight.preset.trust !== "invalid") parts.push(`--preset ${preflight.preset.name}`);
+	if (preflight.artifacts.rawArtifacts.keepArtifacts) parts.push("--keep-artifacts");
+	if (preflight.task.raw) parts.push(preflight.task.raw);
+	return sanitizeInline(parts.join(" ").replace(/\s+/g, " ").trim());
+}
+
+function evidenceRetention(preflight: BestOfNPreflight): string {
+	if (preflight.artifacts.rawArtifacts.keepArtifacts) {
+		const files = preflight.artifacts.rawArtifacts.expectedFiles.join(", ") || "raw outputs";
+		return `raw worker/reviewer outputs retained (${files}).`;
+	}
+	return "summary report only. Add --keep-artifacts for raw worker/reviewer outputs.";
+}
+
+function projectPresetExpectation(preflight: BestOfNPreflight): string | undefined {
+	if (!preflight.preset) return undefined;
+	if (preflight.preset.trust === "project-approval-required") return "project preset requires session approval before execution for this compare cwd.";
+	if (preflight.preset.trust === "project-approved") return "project preset is approved for this session/compare cwd.";
+	if (preflight.preset.trust === "user") return "user preset; no project preset approval required.";
+	if (preflight.preset.trust === "invalid") return "selected project preset is invalid; fix the preset file before execution.";
+	if (preflight.preset.trust === "not-found") return "selected preset was not found; fix the preset name or catalog before execution.";
+	return undefined;
+}
+
+function diagnosticLines(diagnostics: BestOfNPreflightDiagnostic[], severity: "error" | "warning"): string[] {
+	return diagnostics
+		.filter((diagnostic) => diagnostic.severity === severity)
+		.map((diagnostic) => `- ${formatScalar(diagnostic.message)}`);
+}
+
+export function formatComparePreflight(preflight: BestOfNPreflight, runtime?: Partial<PromptDryRunRuntimeMetadata>, warnings: string[] = []): string {
+	const lines: string[] = ["## Compare preflight"];
+	const verdict = comparePreflightVerdict(preflight, warnings);
+	lines.push(`Verdict: ${verdict}`);
+	if (verdict !== "blocked") lines.push(`Execute: ${compareExecuteCommand(preflight, runtime)}`);
+	lines.push(`Evidence retention: ${evidenceRetention(preflight)}`);
+	const presetExpectation = projectPresetExpectation(preflight);
+	if (presetExpectation) lines.push(`Project preset approval: ${presetExpectation}`);
+	const errorLines = diagnosticLines(preflight.diagnostics, "error");
+	if (errorLines.length > 0) lines.push("", "### Fix before running", ...errorLines);
+	const warningLines = diagnosticLines(preflight.diagnostics, "warning");
+	if (warningLines.length > 0) lines.push("", "### Warnings", ...warningLines);
+	appendCompareSlots(lines, "Workers", preflight.slots.workers);
+	appendCompareSlots(lines, "Reviewers", preflight.slots.reviewers);
+	if (preflight.slots.finalApplier) appendCompareSlots(lines, "Final applier", [preflight.slots.finalApplier]);
 	lines.push(`- Prompt source: ${formatScalar(preflight.prompt.source)} ${formatScalar(preflight.prompt.filePath)}`);
 	lines.push(`- Compare cwd: ${formatScalar(preflight.compareCwd.resolved)} (${formatScalar(preflight.compareCwd.source)})`);
 	if (preflight.preset) {
@@ -107,13 +160,15 @@ function appendComparePreflight(lines: string[], preflight: BestOfNPreflight): v
 	lines.push(`- Commit policy: ${formatScalar(preflight.policies.commit.mode)}`);
 	lines.push(`- Report root: ${formatScalar(preflight.artifacts.report.root)}`);
 	lines.push(`- Raw artifacts: keep=${formatScalar(preflight.artifacts.rawArtifacts.keepArtifacts)}, files=${formatScalar(preflight.artifacts.rawArtifacts.expectedFiles.join(", ") || "none")}`);
-	appendCompareSlots(lines, "Workers", preflight.slots.workers);
-	appendCompareSlots(lines, "Reviewers", preflight.slots.reviewers);
-	if (preflight.slots.finalApplier) appendCompareSlots(lines, "Final applier", [preflight.slots.finalApplier]);
 	if (preflight.diagnostics.length) {
 		lines.push("", "### Compare diagnostics");
 		for (const diagnostic of preflight.diagnostics) lines.push(`- ${formatScalar(diagnostic.severity)} ${formatScalar(diagnostic.code)}: ${formatScalar(diagnostic.message)}`);
 	}
+	return lines.join("\n");
+}
+
+function appendComparePreflight(lines: string[], preflight: BestOfNPreflight, runtime?: Partial<PromptDryRunRuntimeMetadata>, warnings: string[] = []): void {
+	lines.push("", ...formatComparePreflight(preflight, runtime, warnings).split("\n"));
 }
 
 export function formatPromptDryRun(result: PromptDryRunResult): string {
@@ -124,6 +179,7 @@ export function formatPromptDryRun(result: PromptDryRunResult): string {
 		lines.push("", "## Metadata");
 		formatRuntime(result.runtime, lines);
 		appendWarnings(lines, result.warnings);
+		if (result.comparePreflight) appendComparePreflight(lines, result.comparePreflight, result.runtime, result.warnings);
 		lines.push("", "## Error", `Error: ${sanitizeInline(result.error)}`);
 		return `${lines.join("\n")}\n`;
 	}
@@ -132,7 +188,7 @@ export function formatPromptDryRun(result: PromptDryRunResult): string {
 	lines.push(`- Model: ${result.model !== undefined ? sanitizeInline(modelLabel(result.model)) : "compare preflight"}`);
 	lines.push(`- Model already active: ${formatScalar(result.modelAlreadyActive)}`);
 	formatRuntime(result.runtime, lines);
-	if (result.comparePreflight) appendComparePreflight(lines, result.comparePreflight);
+	if (result.comparePreflight) appendComparePreflight(lines, result.comparePreflight, result.runtime, result.warnings);
 	appendWarnings(lines, result.warnings);
 	appendSkills(lines, result);
 	appendArgs(lines, result.args);

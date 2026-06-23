@@ -649,22 +649,45 @@ Prompt-template frontmatter authoring uses `bestOfN:`. Runtime overrides stay on
 
 Each worker/reviewer JSON array entry must be an object with either `subagent` or `agent`, plus optional `model`, `task`, `taskSuffix`, `cwd`, and `count`. In worker slots, `"subagent": true` maps to `delegate`. In reviewer slots, `"subagent": true` maps to `reviewer`. `--final-applier=` accepts one slot object (or a one-element array) with `subagent`/`agent`, optional `model`, optional `task`, and optional `taskSuffix`; for this final slot, `"subagent": true` maps to `delegate`, and both `count` and `cwd` are not supported.
 
-## Best-of-N Compare Prompt
+## Packaged prompt examples
 
-This repo ships one example compare prompt under `examples/`:
+This repo ships copyable starter prompts under `examples/`. Start with the minimal current-model prompts before trying the advanced compare workflow:
 
-- `examples/best-of-n.md` installs as `/best-of-n`, runs in the current repo, and shows mixed workers, mixed reviewers, and an optional final apply phase.
-- Smoke test: `/best-of-n smoke test`.
+- `examples/hello.md` installs as `/hello` and uses the current session model with no skills.
+- `examples/review.md` installs as `/review` and gives a simple skill-free review checklist.
+- `examples/best-of-n-smoke.md` installs as `/best-of-n-smoke` and runs one worker plus one reviewer with no final applier, no apply step, and no commit handoff.
+- `examples/best-of-n.md` installs as `/best-of-n`, runs in the current repo, and shows mixed workers, mixed reviewers, worktrees, and an optional final apply phase.
 
-Install it manually from this repo checkout (or from the installed package directory):
+Install one or more examples manually from this repo checkout (or from the installed package directory):
 
 ```bash
 PTM_DIR=/path/to/pi-prompt-workflows
 mkdir -p ~/.pi/agent/prompts
+cp "$PTM_DIR/examples/hello.md" ~/.pi/agent/prompts/hello.md
+cp "$PTM_DIR/examples/review.md" ~/.pi/agent/prompts/review.md
+cp "$PTM_DIR/examples/best-of-n-smoke.md" ~/.pi/agent/prompts/best-of-n-smoke.md
 cp "$PTM_DIR/examples/best-of-n.md" ~/.pi/agent/prompts/best-of-n.md
 ```
 
-After copying the file, restart `pi` if it is already running. The prompt then runs an explicit compare flow:
+After copying files, restart `pi` if it is already running. Check minimal prompts with a read-only preview before executing them:
+
+```text
+/dry-run-prompt hello --plain
+/hello
+/dry-run-prompt review --plain src/server.ts
+```
+
+For compare prompts, use preflight first instead of starting with an expensive live run:
+
+```text
+/dry-run-prompt best-of-n-smoke --plain summarize this repository's test setup
+/best-of-n-smoke summarize this repository's test setup
+/dry-run-prompt best-of-n --preset quick --plain refactor the parser
+```
+
+## Best-of-N Compare Prompt
+
+The advanced `examples/best-of-n.md` prompt runs an explicit compare flow:
 
 Compare prompt templates are authored under `bestOfN:`. Top-level `workers`, `reviewers`, and `finalApplier` frontmatter fields are rejected with migration diagnostics.
 

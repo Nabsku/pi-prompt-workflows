@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { formatPromptDryRun } from "../prompt-dry-run-renderer.js";
+import type { BestOfNPreflight } from "../best-of-n-preflight.js";
 import type { PromptDryRunResult } from "../prompt-dry-run.js";
 
 const model = { provider: "anthropic", id: "claude-sonnet-4-20250514" } as never;
@@ -37,6 +38,29 @@ function positions(text: string, needles: string[]): number[] {
 		assert.notEqual(index, -1, `missing ${needle} in:\n${text}`);
 		return index;
 	});
+}
+
+function comparePreflight(overrides: Partial<BestOfNPreflight> = {}): BestOfNPreflight {
+	const base: BestOfNPreflight = {
+		schemaVersion: 1,
+		prompt: { name: "best-of-n", description: "", source: "project", rootKind: "prompts", filePath: "/repo/.pi/prompts/best-of-n.md" },
+		compareCwd: { resolved: "/repo", source: "context-cwd", requested: "/repo" },
+		slots: {
+			workers: [{ kind: "worker", index: 1, source: "prompt", agent: "worker", cwd: "/repo", effectiveModelLabel: "anthropic/claude-sonnet-4" }],
+			reviewers: [{ kind: "reviewer", index: 1, source: "default", agent: "reviewer", cwd: "/repo", effectiveModelLabel: "anthropic/claude-sonnet-4" }],
+		},
+		models: { base: "anthropic/claude-sonnet-4", workers: ["anthropic/claude-sonnet-4"], reviewers: ["anthropic/claude-sonnet-4"] },
+		task: { raw: "fix bug", parsed: ["fix", "bug"], renderedTask: "fix bug" },
+		policies: {
+			worktree: { enabled: false, requiredByFinalApplier: false, workerCwdPolicy: "independent" },
+			finalApplier: { enabled: false, requiresWorktree: false },
+			commit: { mode: "none" },
+		},
+		artifacts: { report: { willWrite: true, root: "/repo/.pi/runs/best-of-n" }, rawArtifacts: { keepArtifacts: false, expectedFiles: ["worker-1.md", "reviewer-1.md"] } },
+		callCount: { workers: 1, reviewers: 1, finalApplier: 0, total: 2, capStatus: "uncapped" },
+		diagnostics: [],
+	};
+	return { ...base, ...overrides };
 }
 
 test("formats success sections in deterministic order", () => {
@@ -153,4 +177,37 @@ test("formats errors clearly and does not include prompt body", () => {
 test("shows warnings clearly", () => {
 	const rendered = formatPromptDryRun(ok({ warnings: ["first", "second"] }));
 	assert.match(rendered, /## Warnings\n+- first\n- second/);
+});
+
+test("compare preflight starts with ready verdict, execute command, and report-only retention guidance", () => {
+	const rendered = formatPromptDryRun(ok({ comparePreflight: comparePreflight() }));
+	assert.match(rendered, /## Compare preflight\nVerdict: ready to run\nExecute: \/best-of-n fix bug\nEvidence retention: summary report only\. Add --keep-artifacts/);
+	assert.doesNotMatch(rendered, /Fix before running/);
+});
+
+test("compare preflight renders warning verdict and project preset approval expectation", () => {
+	const preflight = comparePreflight({
+		preset: { name: "quick", trust: "project-approval-required", source: "project", filePath: "/repo/.pi/best-of-n-presets.json", runtimeOverride: true },
+		diagnostics: [{ severity: "warning", code: "project-preset-approval-required", message: "Project preset requires session approval before execution.", source: "preset" }],
+	});
+	const rendered = formatPromptDryRun(ok({ comparePreflight: preflight, warnings: ["Project preset requires session approval before execution."] }));
+	assert.match(rendered, /Verdict: warnings/);
+	assert.match(rendered, /Execute: \/best-of-n --preset quick fix bug/);
+	assert.match(rendered, /Project preset approval: project preset requires session approval before execution for this compare cwd\./);
+});
+
+test("blocked compare preflight summarizes error diagnostics under Fix before running", () => {
+	const preflight = comparePreflight({
+		diagnostics: [{ severity: "error", code: "compare-final-applier-requires-worktree", message: "Compare prompts with finalApplier require worktree: true.", source: "project" }],
+	});
+	const rendered = formatPromptDryRun(error({ error: "Compare prompts with finalApplier require worktree: true.", comparePreflight: preflight, runtime: { restore: false, boomerang: false } }));
+	assert.match(rendered, /Verdict: blocked/);
+	assert.match(rendered, /### Fix before running\n- Compare prompts with finalApplier require worktree: true\./);
+	assert.doesNotMatch(rendered, /Execute: \/best-of-n/);
+});
+
+test("compare preflight reports raw artifact retention when --keep-artifacts is present", () => {
+	const preflight = comparePreflight({ artifacts: { report: { willWrite: true, root: "/repo/.pi/runs/best-of-n" }, rawArtifacts: { keepArtifacts: true, expectedFiles: ["worker-1.md", "reviewer-1.md"] } } });
+	const rendered = formatPromptDryRun(ok({ comparePreflight: preflight }));
+	assert.match(rendered, /Evidence retention: raw worker\/reviewer outputs retained \(worker-1\.md, reviewer-1\.md\)\./);
 });

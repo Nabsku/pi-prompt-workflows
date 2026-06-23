@@ -1,5 +1,6 @@
 import { decodeKittyPrintable, Key, matchesKey, type Component } from "@earendil-works/pi-tui";
 import type { PromptDryRunResult } from "./prompt-dry-run.js";
+import { formatComparePreflight } from "./prompt-dry-run-renderer.js";
 import type { PromptIncludeGraph, PromptIncludeGraphEdge, PromptIncludeGraphNode } from "./prompt-includes.js";
 import type { PromptLoaderDiagnostic } from "./prompt-loader.js";
 import { sanitizeForTerminal, truncateForTerminalWidth } from "./render-safe.js";
@@ -53,26 +54,8 @@ function modelLabel(result: PromptDryRunResult): string {
 }
 
 function formatCompare(result: PromptDryRunResult): string {
-	if (result.status !== "ok" || !result.comparePreflight) return "No compare preflight.";
-	const preflight = result.comparePreflight;
-	const lines = [
-		"# Compare preflight",
-		`Prompt: ${preflight.prompt.name}`,
-		`Compare cwd: ${preflight.compareCwd.resolved} (${preflight.compareCwd.source})`,
-		`Preset: ${preflight.preset ? `${preflight.preset.name} (${preflight.preset.trust})` : "none"}`,
-		`Calls: workers=${preflight.callCount.workers} reviewers=${preflight.callCount.reviewers} final-applier=${preflight.callCount.finalApplier} total=${preflight.callCount.total} cap=${preflight.callCount.cap ?? "uncapped"} ${preflight.callCount.capStatus}`,
-		`Policy: worktree=${preflight.policies.worktree.enabled} final-applier=${preflight.policies.finalApplier.enabled} commit=${preflight.policies.commit.mode}`,
-		`Report root: ${preflight.artifacts.report.root ?? "n/a"}`,
-		"",
-		"## Slots",
-		...preflight.slots.workers.map((slot) => `- worker ${slot.index}: agent=${slot.agent ?? "delegate"} model=${slot.effectiveModelLabel} cwd=${slot.cwd} source=${slot.source}`),
-		...preflight.slots.reviewers.map((slot) => `- reviewer ${slot.index}: agent=${slot.agent ?? "reviewer"} model=${slot.effectiveModelLabel} cwd=${slot.cwd} source=${slot.source}`),
-		...(preflight.slots.finalApplier ? [`- final-applier 1: agent=${preflight.slots.finalApplier.agent ?? "delegate"} model=${preflight.slots.finalApplier.effectiveModelLabel} cwd=${preflight.slots.finalApplier.cwd} source=${preflight.slots.finalApplier.source}`] : []),
-		"",
-		"## Diagnostics",
-		...(preflight.diagnostics.length ? preflight.diagnostics.map((diagnostic) => `- ${diagnostic.severity} ${diagnostic.code}: ${diagnostic.message}`) : ["No compare diagnostics."]),
-	];
-	return sanitizeForTerminal(lines.join("\n"), { preserveLineBreaks: true });
+	if (!result.comparePreflight) return "No compare preflight.";
+	return sanitizeForTerminal(formatComparePreflight(result.comparePreflight, result.runtime, result.warnings), { preserveLineBreaks: true });
 }
 
 function formatRuntime(result: PromptDryRunResult): string[] {
@@ -288,7 +271,9 @@ export class PromptDryRunInspector implements Component {
 		readonly tui?: unknown,
 		readonly theme?: unknown,
 		readonly done?: (value: PromptDryRunTuiResult) => void,
-	) {}
+	) {
+		if (viewModel.result.comparePreflight) this.paneIndex = PANE_NAMES.indexOf("Compare");
+	}
 
 	private activePane(): PaneName {
 		return PANE_NAMES[this.paneIndex]!;

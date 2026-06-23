@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, writeFileSync } from "node:fs";
-import { join, resolve as resolvePath } from "node:path";
+import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
@@ -18,7 +18,7 @@ import {
 	type SubagentOverride,
 } from "./args.js";
 import { DEFAULT_COMPARE_FINAL_APPLIER_TASK, DEFAULT_COMPARE_REVIEWER_TASK } from "./compare-defaults.js";
-import { loadBestOfNPresetCatalog, applyPresetDefaultModel, type ResolvedBestOfNPreset } from "./best-of-n-presets.js";
+import { loadBestOfNPresetCatalog, applyPresetDefaultModel, getBestOfNPresetCandidatePaths, type ResolvedBestOfNPreset } from "./best-of-n-presets.js";
 import { parseChainSteps, parseChainDeclaration, type ChainStep, type ChainStepOrParallel, type ParallelChainStep } from "./chain-parser.js";
 import { generateBoomerangSummary, generateChainStepSummary, generateIterationSummary, didIterationMakeChanges, getIterationEntries, wasIterationAborted } from "./loop-utils.js";
 import { selectModelCandidate } from "./model-selection.js";
@@ -87,6 +87,7 @@ interface LoopState {
 }
 
 type ReportLineupSlot = DelegationLineupSlot & { effectiveModel: string; effectiveTask: string };
+type BestOfNRunStatus = "review-complete" | "apply-complete" | "worker-failed" | "reviewer-failed" | "final-applier-failed" | "artifact-write-failed" | "report-write-failed";
 
 interface GitSnapshot {
 	head?: string;
@@ -217,7 +218,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		if (preset.source !== "project") return true;
 		const cwdKey = resolvePath(catalogCwd);
 		if (approvedProjectPresetCwds.has(cwdKey)) return true;
-		const message = `Best-of-N preset \`${preset.name}\` is loaded from ${preset.filePath}. Approve project best-of-N presets for this session?`;
+		const message = `Best-of-N preset \`${preset.name}\` is loaded from ${preset.filePath}. Approve project best-of-N presets for compare cwd ${cwdKey} in this session?`;
 		if (!ctx.hasUI || typeof (ctx.ui as { confirm?: unknown }).confirm !== "function") {
 			notify(ctx, `${message} Run in an interactive UI session and approve it, or move trusted presets to ~/.pi/agent/best-of-n-presets.json.`, "error");
 			return false;
@@ -229,6 +230,25 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 		approvedProjectPresetCwds.add(cwdKey);
 		return true;
+	}
+
+	function formatPresetSearchPaths(catalogCwd: string): string {
+		const paths = getBestOfNPresetCandidatePaths(catalogCwd);
+		return [...paths.user, ...paths.project].join(", ");
+	}
+
+	function formatMissingBestOfNPresetMessage(presetName: string, catalogCwd: string, catalog: ReturnType<typeof loadBestOfNPresetCatalog>): string {
+		const invalidProjectReasons = catalog.projectFileInvalid
+			? catalog.diagnostics
+				.filter((diagnostic) => diagnostic.source === "project" && diagnostic.code === "invalid-best-of-n-presets-file")
+				.map((diagnostic) => diagnostic.message)
+			: [];
+		return [
+			`Best-of-N preset \`${presetName}\` was not found.`,
+			`Effective compare cwd: ${resolvePath(catalogCwd)}.`,
+			`Searched preset files: ${formatPresetSearchPaths(catalogCwd)}.`,
+			...(invalidProjectReasons.length > 0 ? [`Invalid project preset file: ${invalidProjectReasons.join(" ")}`] : []),
+		].join(" ");
 	}
 
 	async function resolveBestOfNPresetLineup(
@@ -245,7 +265,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 		const preset = catalog.presets.get(presetName);
 		if (!preset) {
-			notify(ctx, `Best-of-N preset \`${presetName}\` was not found. Define it in ~/.pi/agent/best-of-n-presets.json or .pi/best-of-n-presets.json.`, "error");
+			notify(ctx, formatMissingBestOfNPresetMessage(presetName, catalogCwd, catalog), "error");
 			return undefined;
 		}
 		if (!(await ensureProjectPresetApproved(preset, ctx, catalogCwd))) return undefined;
@@ -789,6 +809,14 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		});
 	}
 
+	function fallbackReportLineupSlots(slots: DelegationLineupSlot[]): ReportLineupSlot[] {
+		return slots.map((slot) => ({
+			...slot,
+			effectiveModel: slot.model ?? "unknown",
+			effectiveTask: slot.task ?? slot.taskSuffix ?? "",
+		}));
+	}
+
 	function serializeLineupSlot(slot: ReportLineupSlot): Record<string, unknown> {
 		return {
 			agent: slot.agent,
@@ -826,7 +854,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	function writeBestOfNRunReport(options: {
 		compareCwd: string;
 		promptName: string;
-		status: "review-complete" | "apply-complete";
+		status: BestOfNRunStatus;
 		sharedTask: string;
 		taskArgs: string[];
 		presetName?: string;
@@ -842,14 +870,31 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		reviewerSummary?: string;
 		reviewerFailures?: string;
 		finalText?: string;
+		failureSummary?: string;
 	}): string {
 		const rootDiagnostic = validateWritableBestOfNRunRoot(options.compareCwd);
 		if (rootDiagnostic) throw new Error(rootDiagnostic);
 		const runDir = join(options.compareCwd, ".pi", "runs", "best-of-n", `${formatRunTimestamp()}-${slugifyRunSegment(options.promptName)}-${randomUUID().slice(0, 8)}`);
 		mkdirSync(runDir, { recursive: true });
-		writeFileSync(join(runDir, "lineup.json"), `${JSON.stringify({
+		const artifactWriteErrors: string[] = [];
+		if (options.keepArtifacts) {
+			for (const { index, result } of options.workerPairs) {
+				try { writeFileSync(join(runDir, `worker-${index + 1}.md`), `${formatRunArtifactResult(result)}\n`); }
+				catch (error) { artifactWriteErrors.push(`worker-${index + 1}.md: ${error instanceof Error ? error.message : String(error)}`); }
+			}
+			for (const { index, result } of options.reviewerPairs) {
+				try { writeFileSync(join(runDir, `reviewer-${index + 1}.md`), `${formatRunArtifactResult(result)}\n`); }
+				catch (error) { artifactWriteErrors.push(`reviewer-${index + 1}.md: ${error instanceof Error ? error.message : String(error)}`); }
+			}
+			if (options.finalText) {
+				try { writeFileSync(join(runDir, "final-applier.md"), `${options.finalText}\n`); }
+				catch (error) { artifactWriteErrors.push(`final-applier.md: ${error instanceof Error ? error.message : String(error)}`); }
+			}
+		}
+		const status: BestOfNRunStatus = artifactWriteErrors.length > 0 ? "artifact-write-failed" : options.status;
+		const lineup = {
 			prompt: options.promptName,
-			status: options.status,
+			status,
 			preset: options.presetName,
 			commit: options.commitMode,
 			keepArtifacts: options.keepArtifacts,
@@ -857,16 +902,14 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			workers: options.workers.map(serializeLineupSlot),
 			reviewers: options.reviewers.map(serializeLineupSlot),
 			finalApplier: options.finalApplier ? serializeLineupSlot(options.finalApplier) : undefined,
-		}, null, 2)}\n`);
-		if (options.keepArtifacts) {
-			for (const { index, result } of options.workerPairs) writeFileSync(join(runDir, `worker-${index + 1}.md`), `${formatRunArtifactResult(result)}\n`);
-			for (const { index, result } of options.reviewerPairs) writeFileSync(join(runDir, `reviewer-${index + 1}.md`), `${formatRunArtifactResult(result)}\n`);
-			if (options.finalText) writeFileSync(join(runDir, "final-applier.md"), `${options.finalText}\n`);
-		}
+			failureSummary: options.failureSummary,
+			artifactWriteErrors: artifactWriteErrors.length > 0 ? artifactWriteErrors : undefined,
+		};
+		writeFileSync(join(runDir, "lineup.json"), `${JSON.stringify(lineup, null, 2)}\n`);
 		const report = [
 			`# Best-of-N run: ${options.promptName}`,
 			"",
-			`- Status: ${options.status}`,
+			`- Status: ${status}`,
 			`- Compare cwd: ${options.compareCwd}`,
 			...(options.presetName ? [`- Preset: ${options.presetName}`] : []),
 			...(options.commitMode ? [`- Commit policy: ${options.commitMode}`] : []),
@@ -874,15 +917,32 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			`- Reviewer calls: ${options.reviewers.length}`,
 			`- Final applier: ${options.finalApplier ? "yes" : "no"}`,
 			`- Raw artifacts retained: ${options.keepArtifacts ? "yes" : "no"}`,
+			...(options.failureSummary ? [`- Failure: ${options.failureSummary}`] : []),
+			...(artifactWriteErrors.length > 0 ? [`- Artifact write errors: ${artifactWriteErrors.join("; ")}`] : []),
 			"",
 			...renderRunReportSection("Task", options.sharedTask),
+			...renderRunReportSection("Failure", options.failureSummary),
 			...renderRunReportSection("Workers", options.workerSummary),
 			...renderRunReportSection("Worker failures", options.workerFailures),
 			...renderRunReportSection("Reviewers", options.reviewerSummary),
 			...renderRunReportSection("Reviewer failures", options.reviewerFailures),
 			...renderRunReportSection("Final applier", options.finalText),
 		].join("\n");
-		writeFileSync(join(runDir, "report.md"), report);
+		try {
+			writeFileSync(join(runDir, "report.md"), report);
+		} catch (error) {
+			const reportWriteError = error instanceof Error ? error.message : String(error);
+			try {
+				writeFileSync(join(runDir, "lineup.json"), `${JSON.stringify({
+					...lineup,
+					status: "report-write-failed",
+					reportWriteError,
+				}, null, 2)}\n`);
+			} catch {
+				// The original report-write failure is the actionable error; best-effort history update failed too.
+			}
+			throw error;
+		}
 		return join(runDir, "report.md");
 	}
 
@@ -891,13 +951,62 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			return writeBestOfNRunReport(options);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			notify(ctx, `Best-of-N report could not be written: ${message}`, "warning");
+			notify(ctx, `Best-of-N report could not be written under ${join(options.compareCwd, ".pi", "runs", "best-of-n")}: ${message}. Recovery: fix the run-history directory permissions/shape, then rerun the compare command; no subagents were rerun while attempting to write history.`, "warning");
 			return undefined;
 		}
 	}
 
 	function formatRunReportCompletionLine(reportPath: string | undefined): string {
-		return reportPath ? `Report: ${reportPath}` : "Report: unavailable (failed to write run artifacts)";
+		if (!reportPath) return "Report: unavailable (failed to write run artifacts)";
+		const runId = basename(dirname(reportPath));
+		return [`Run id: ${runId}`, `Report: ${reportPath}`, `Inspect: /compare-runs --id ${runId}`].join("\n");
+	}
+
+	function writeCompareFailureHistory(options: {
+		ctx: ExtensionCommandContext;
+		compareCwd: string;
+		promptName: string;
+		status: Exclude<BestOfNRunStatus, "review-complete" | "apply-complete">;
+		sharedTask: string;
+		taskArgs: string[];
+		presetName?: string;
+		commitMode?: "ask";
+		keepArtifacts: boolean;
+		workers: ReportLineupSlot[];
+		reviewers: ReportLineupSlot[];
+		finalApplier?: ReportLineupSlot;
+		workerPairs?: Array<{ index: number; slot: DelegationLineupSlot; result: DelegatedPromptParallelResult }>;
+		reviewerPairs?: Array<{ index: number; slot: DelegationLineupSlot; result: DelegatedPromptParallelResult }>;
+		workerSummary?: string;
+		workerFailures?: string;
+		reviewerSummary?: string;
+		reviewerFailures?: string;
+		finalText?: string;
+		failureSummary: string;
+	}): string | undefined {
+		const reportPath = tryWriteBestOfNRunReport({
+			compareCwd: options.compareCwd,
+			promptName: options.promptName,
+			status: options.status,
+			sharedTask: options.sharedTask,
+			taskArgs: options.taskArgs,
+			presetName: options.presetName,
+			commitMode: options.commitMode,
+			keepArtifacts: options.keepArtifacts,
+			workers: options.workers,
+			reviewers: options.reviewers,
+			finalApplier: options.finalApplier,
+			workerPairs: options.workerPairs ?? [],
+			reviewerPairs: options.reviewerPairs ?? [],
+			workerSummary: options.workerSummary ?? "",
+			workerFailures: options.workerFailures,
+			reviewerSummary: options.reviewerSummary,
+			reviewerFailures: options.reviewerFailures,
+			finalText: options.finalText,
+			failureSummary: options.failureSummary,
+		}, options.ctx);
+		notify(options.ctx, `Compare failed (${options.status}): ${options.failureSummary}\n${formatRunReportCompletionLine(reportPath)}`, "error");
+		return reportPath;
 	}
 
 	function runGitCapture(cwd: string, args: string[]): string | undefined {
@@ -1374,6 +1483,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				return;
 			}
 		}
+		const fallbackWorkers = fallbackReportLineupSlots(normalizedWorkers);
+		const fallbackReviewers = fallbackReportLineupSlots(normalizedReviewers);
+		const fallbackFinalApplier = normalizedFinalApplier ? fallbackReportLineupSlots([normalizedFinalApplier])[0] : undefined;
 
 		try {
 			const workerResult = await executeSubagentPromptStep({
@@ -1395,16 +1507,68 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					args: [],
 				})),
 			});
-			const workerPairs = (workerResult?.parallelResults ?? []).map((result, index) => ({
+			if (!workerResult) {
+				writeCompareFailureHistory({
+					ctx,
+					compareCwd,
+					promptName: name,
+					status: "worker-failed",
+					sharedTask,
+					taskArgs,
+					presetName: runtime.preset ?? prompt.preset,
+					commitMode: prompt.commit,
+					keepArtifacts,
+					workers: fallbackWorkers,
+					reviewers: fallbackReviewers,
+					finalApplier: fallbackFinalApplier,
+					failureSummary: "worker phase returned no result.",
+				});
+				return;
+			}
+			const workerPairs = (workerResult.parallelResults ?? []).map((result, index) => ({
 				index,
 				slot: normalizedWorkers[index]!,
 				result,
 			}));
-			if (workerPairs.length === 0) return;
+			const reportWorkers = buildReportLineupSlots(normalizedWorkers, workerResult.preparedTasks);
+			if (workerPairs.length === 0) {
+				writeCompareFailureHistory({
+					ctx,
+					compareCwd,
+					promptName: name,
+					status: "worker-failed",
+					sharedTask,
+					taskArgs,
+					presetName: runtime.preset ?? prompt.preset,
+					commitMode: prompt.commit,
+					keepArtifacts,
+					workers: reportWorkers,
+					reviewers: fallbackReviewers,
+					finalApplier: fallbackFinalApplier,
+					failureSummary: "worker phase produced no worker result pairs.",
+				});
+				return;
+			}
 			const successfulWorkers = workerPairs.filter((entry) => !entry.result.isError);
 			const failedWorkers = workerPairs.filter((entry) => entry.result.isError);
 			if (successfulWorkers.length === 0) {
-				notify(ctx, `Compare worker phase failed: all worker slots failed.`, "error");
+				writeCompareFailureHistory({
+					ctx,
+					compareCwd,
+					promptName: name,
+					status: "worker-failed",
+					sharedTask,
+					taskArgs,
+					presetName: runtime.preset ?? prompt.preset,
+					commitMode: prompt.commit,
+					keepArtifacts,
+					workers: reportWorkers,
+					reviewers: fallbackReviewers,
+					finalApplier: fallbackFinalApplier,
+					workerPairs,
+					workerFailures: formatPhaseFailureSummary("Worker", failedWorkers),
+					failureSummary: "all worker slots failed.",
+				});
 				return;
 			}
 			const successfulWorkerText = [
@@ -1416,7 +1580,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			const workerFailureSummary = formatPhaseFailureSummary("Worker", failedWorkers);
 
 			const reviewerPreamble = buildReviewerPreamble(sharedTask, successfulWorkerText, workerFailureSummary);
-			const reviewerResult = await executeSubagentPromptStep({
+			let reviewerResult;
+			try {
+				reviewerResult = await executeSubagentPromptStep({
 				pi,
 				ctx,
 				currentModel: baseModel,
@@ -1435,24 +1601,103 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					args: [],
 				})),
 			});
-			const reviewerPairs = (reviewerResult?.parallelResults ?? []).map((result, index) => ({
+			} catch (error) {
+				const failureSummary = `reviewer phase failed before returning review pairs: ${error instanceof Error ? error.message : String(error)}`;
+				writeCompareFailureHistory({
+					ctx,
+					compareCwd,
+					promptName: name,
+					status: "reviewer-failed",
+					sharedTask,
+					taskArgs,
+					presetName: runtime.preset ?? prompt.preset,
+					commitMode: prompt.commit,
+					keepArtifacts,
+					workers: reportWorkers,
+					reviewers: fallbackReviewers,
+					finalApplier: fallbackFinalApplier,
+					workerPairs,
+					workerSummary: successfulWorkerText,
+					workerFailures: workerFailureSummary,
+					failureSummary,
+				});
+				return;
+			}
+			if (!reviewerResult) {
+				writeCompareFailureHistory({
+					ctx,
+					compareCwd,
+					promptName: name,
+					status: "reviewer-failed",
+					sharedTask,
+					taskArgs,
+					presetName: runtime.preset ?? prompt.preset,
+					commitMode: prompt.commit,
+					keepArtifacts,
+					workers: reportWorkers,
+					reviewers: fallbackReviewers,
+					finalApplier: fallbackFinalApplier,
+					workerPairs,
+					workerSummary: successfulWorkerText,
+					workerFailures: workerFailureSummary,
+					failureSummary: "reviewer phase returned no result.",
+				});
+				return;
+			}
+			const reviewerPairs = (reviewerResult.parallelResults ?? []).map((result, index) => ({
 				index,
 				slot: normalizedReviewers[index]!,
 				result,
 			}));
-			if (reviewerPairs.length === 0) return;
+			const reportReviewers = buildReportLineupSlots(normalizedReviewers, reviewerResult.preparedTasks);
+			if (reviewerPairs.length === 0) {
+				writeCompareFailureHistory({
+					ctx,
+					compareCwd,
+					promptName: name,
+					status: "reviewer-failed",
+					sharedTask,
+					taskArgs,
+					presetName: runtime.preset ?? prompt.preset,
+					commitMode: prompt.commit,
+					keepArtifacts,
+					workers: reportWorkers,
+					reviewers: reportReviewers,
+					finalApplier: fallbackFinalApplier,
+					workerPairs,
+					workerSummary: successfulWorkerText,
+					workerFailures: workerFailureSummary,
+					failureSummary: "reviewer phase produced no review pairs.",
+				});
+				return;
+			}
 			const successfulReviewers = reviewerPairs.filter((entry) => !entry.result.isError);
 			const failedReviewers = reviewerPairs.filter((entry) => entry.result.isError);
 			const successfulReviewerText = successfulReviewers.length > 0
 				? renderComparePhaseResults("Reviewer", successfulReviewers)
 				: undefined;
 			const reviewerFailureSummary = formatPhaseFailureSummary("Reviewer", failedReviewers);
-			const reportWorkers = buildReportLineupSlots(normalizedWorkers, workerResult.preparedTasks);
-			const reportReviewers = buildReportLineupSlots(normalizedReviewers, reviewerResult.preparedTasks);
-
 			if (!normalizedFinalApplier) {
 				if (!successfulReviewerText) {
-					notify(ctx, `Compare reviewer phase failed: all reviewer slots failed.`, "error");
+					writeCompareFailureHistory({
+						ctx,
+						compareCwd,
+						promptName: name,
+						status: "reviewer-failed",
+						sharedTask,
+						taskArgs,
+						presetName: runtime.preset ?? prompt.preset,
+						commitMode: prompt.commit,
+						keepArtifacts,
+						workers: reportWorkers,
+						reviewers: reportReviewers,
+						workerPairs,
+						reviewerPairs,
+						workerSummary: successfulWorkerText,
+						workerFailures: workerFailureSummary,
+						reviewerFailures: reviewerFailureSummary,
+						failureSummary: "all reviewer slots failed and no final applier is configured.",
+					});
 					return;
 				}
 				const finalText = reviewerFailureSummary
@@ -1485,7 +1730,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 			const beforeFinalApplierSnapshot = prompt.commit === "ask" ? captureGitSnapshot(approvalCwd) : undefined;
 			const finalApplierTask = buildLineupSlotTask(DEFAULT_COMPARE_FINAL_APPLIER_TASK, normalizedFinalApplier, taskArgs);
-			const finalResult = await executeSubagentPromptStep({
+			let finalResult;
+			try {
+				finalResult = await executeSubagentPromptStep({
 				pi,
 				ctx,
 				currentModel: baseModel,
@@ -1507,7 +1754,55 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				}),
 				args: [],
 			});
-			if (!finalResult?.text) return;
+			} catch (error) {
+				const failureSummary = `final applier failed before returning text: ${error instanceof Error ? error.message : String(error)}`;
+				writeCompareFailureHistory({
+					ctx,
+					compareCwd,
+					promptName: name,
+					status: "final-applier-failed",
+					sharedTask,
+					taskArgs,
+					presetName: runtime.preset ?? prompt.preset,
+					commitMode: prompt.commit,
+					keepArtifacts,
+					workers: reportWorkers,
+					reviewers: reportReviewers,
+					finalApplier: fallbackFinalApplier,
+					workerPairs,
+					reviewerPairs,
+					workerSummary: successfulWorkerText,
+					workerFailures: workerFailureSummary,
+					reviewerSummary: successfulReviewerText,
+					reviewerFailures: reviewerFailureSummary,
+					failureSummary,
+				});
+				return;
+			}
+			if (!finalResult?.text) {
+				writeCompareFailureHistory({
+					ctx,
+					compareCwd,
+					promptName: name,
+					status: "final-applier-failed",
+					sharedTask,
+					taskArgs,
+					presetName: runtime.preset ?? prompt.preset,
+					commitMode: prompt.commit,
+					keepArtifacts,
+					workers: reportWorkers,
+					reviewers: reportReviewers,
+					finalApplier: fallbackFinalApplier,
+					workerPairs,
+					reviewerPairs,
+					workerSummary: successfulWorkerText,
+					workerFailures: workerFailureSummary,
+					reviewerSummary: successfulReviewerText,
+					reviewerFailures: reviewerFailureSummary,
+					failureSummary: "final applier produced no text.",
+				});
+				return;
+			}
 			const afterFinalApplierSnapshot = prompt.commit === "ask" ? captureGitSnapshot(approvalCwd) : undefined;
 			const reportFinalApplier = buildReportLineupSlots([normalizedFinalApplier], finalResult.preparedTasks)[0];
 			const reportPath = tryWriteBestOfNRunReport({
