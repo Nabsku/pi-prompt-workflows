@@ -1,7 +1,10 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, extname, join, relative, resolve, sep } from "node:path";
+import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import type { DelegationLineupSlot, PromptLoaderDiagnostic, PromptSource } from "./prompt-loader.js";
+
+const MAX_PRESET_FILE_BYTES = 1024 * 1024;
 
 export interface BestOfNPreset {
 	description?: string;
@@ -14,11 +17,32 @@ export interface BestOfNPreset {
 export interface ResolvedBestOfNPreset extends BestOfNPreset {
 	name: string;
 	source: PromptSource;
+	sourceKind: PromptSource;
+	sourcePath: string;
 	filePath: string;
+}
+
+export type BestOfNPresetTrustLabel = "trusted-user" | "untrusted-project-approval-required";
+
+export interface BestOfNPresetDiscoveryEntry {
+	name: string;
+	source: PromptSource;
+	sourceKind: PromptSource;
+	sourcePath: string;
+	filePath: string;
+	trustLabel: BestOfNPresetTrustLabel;
+	description?: string;
+	defaultModel?: string;
+	maxModelCalls?: number;
+	workerCount: number;
+	reviewerCount: number;
+	hasFinalApplier: false;
+	preset: ResolvedBestOfNPreset;
 }
 
 export interface BestOfNPresetCatalog {
 	presets: Map<string, ResolvedBestOfNPreset>;
+	discoveredPresets: BestOfNPresetDiscoveryEntry[];
 	invalidPresetNames: Set<string>;
 	diagnostics: PromptLoaderDiagnostic[];
 	projectFileInvalid: boolean;
@@ -36,6 +60,79 @@ function createPresetDiagnostic(code: string, filePath: string, source: PromptSo
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isPathInside(child: string, parent: string): boolean {
+	const relativePath = relative(parent, child);
+	return relativePath === "" || (!relativePath.startsWith("..") && !relativePath.includes(`..${sep}`));
+}
+
+function verifyPresetPath(filePath: string, source: PromptSource, diagnostics: PromptLoaderDiagnostic[]): boolean {
+	const resolvedPath = resolve(filePath);
+	const root = source === "user" ? resolve(homedir(), ".pi", "agent") : resolve(dirname(dirname(resolvedPath)));
+	try {
+		const rootRealPath = realpathSync(root);
+		const fileParentRealPath = realpathSync(dirname(resolvedPath));
+		if (!isPathInside(fileParentRealPath, rootRealPath)) {
+			diagnostics.push(createPresetDiagnostic("invalid-best-of-n-presets-file", resolvedPath, source, `Skipping best-of-N presets file ${resolvedPath}: resolved parent escapes ${rootRealPath}.`));
+			return false;
+		}
+
+		let cursor = resolvedPath;
+		while (true) {
+			const stats = lstatSync(cursor);
+			if (stats.isSymbolicLink()) {
+				diagnostics.push(createPresetDiagnostic("invalid-best-of-n-presets-file", resolvedPath, source, `Skipping best-of-N presets file ${resolvedPath}: symlinked preset paths are not trusted.`));
+				return false;
+			}
+			if (cursor === root || cursor === dirname(cursor)) break;
+			cursor = dirname(cursor);
+		}
+
+		const stats = statSync(resolvedPath);
+		if (!stats.isFile()) {
+			diagnostics.push(createPresetDiagnostic("invalid-best-of-n-presets-file", resolvedPath, source, `Skipping best-of-N presets file ${resolvedPath}: expected a regular file.`));
+			return false;
+		}
+		if (stats.size > MAX_PRESET_FILE_BYTES) {
+			diagnostics.push(createPresetDiagnostic("invalid-best-of-n-presets-file", resolvedPath, source, `Skipping best-of-N presets file ${resolvedPath}: file is ${stats.size} bytes, max is ${MAX_PRESET_FILE_BYTES} bytes.`));
+			return false;
+		}
+		return true;
+	} catch (error) {
+		diagnostics.push(createPresetDiagnostic("invalid-best-of-n-presets-file", resolvedPath, source, `Skipping best-of-N presets file ${resolvedPath}: ${error instanceof Error ? error.message : String(error)}.`));
+		return false;
+	}
+}
+
+function parseStaticPresetFile(filePath: string, text: string): unknown {
+	const extension = extname(filePath).toLowerCase();
+	if (extension === ".yaml" || extension === ".yml") {
+		return parseFrontmatter<Record<string, unknown>>(`---\n${text}\n---\n`).frontmatter;
+	}
+	return JSON.parse(text);
+}
+
+function expandedLineupCount(slots: DelegationLineupSlot[] | undefined): number {
+	return (slots ?? []).reduce((total, slot) => total + (slot.count ?? 1), 0);
+}
+
+function createDiscoveryEntry(preset: ResolvedBestOfNPreset): BestOfNPresetDiscoveryEntry {
+	return {
+		name: preset.name,
+		source: preset.source,
+		sourceKind: preset.sourceKind,
+		sourcePath: preset.sourcePath,
+		filePath: preset.filePath,
+		trustLabel: preset.source === "project" ? "untrusted-project-approval-required" : "trusted-user",
+		description: preset.description,
+		defaultModel: preset.defaultModel,
+		maxModelCalls: preset.maxModelCalls,
+		workerCount: expandedLineupCount(preset.workers),
+		reviewerCount: expandedLineupCount(preset.reviewers),
+		hasFinalApplier: false,
+		preset,
+	};
 }
 
 function isValidModelSelectionSpec(spec: string): boolean {
@@ -201,22 +298,27 @@ function normalizePreset(name: string, value: unknown, filePath: string, source:
 
 function readPresetFile(filePath: string, source: PromptSource): BestOfNPresetCatalog {
 	const presets = new Map<string, ResolvedBestOfNPreset>();
+	const discoveredPresets: BestOfNPresetDiscoveryEntry[] = [];
 	const invalidPresetNames = new Set<string>();
 	const diagnostics: PromptLoaderDiagnostic[] = [];
-	if (!existsSync(filePath)) return { presets, invalidPresetNames, diagnostics, projectFileInvalid: false };
+	if (!existsSync(filePath)) return { presets, discoveredPresets, invalidPresetNames, diagnostics, projectFileInvalid: false };
 	let projectFileInvalid = false;
 	let parsed: unknown;
 	try {
-		parsed = JSON.parse(readFileSync(filePath, "utf-8"));
+		if (!verifyPresetPath(filePath, source, diagnostics)) {
+			projectFileInvalid = source === "project";
+			return { presets, discoveredPresets, invalidPresetNames, diagnostics, projectFileInvalid };
+		}
+		parsed = parseStaticPresetFile(filePath, readFileSync(filePath, "utf-8"));
 	} catch (error) {
 		projectFileInvalid = source === "project";
 		diagnostics.push(createPresetDiagnostic("invalid-best-of-n-presets-file", filePath, source, `Skipping best-of-N presets file ${filePath}: ${error instanceof Error ? error.message : String(error)}.`));
-		return { presets, invalidPresetNames, diagnostics, projectFileInvalid };
+		return { presets, discoveredPresets, invalidPresetNames, diagnostics, projectFileInvalid };
 	}
 	if (!isRecord(parsed) || !isRecord(parsed.presets)) {
 		projectFileInvalid = source === "project";
 		diagnostics.push(createPresetDiagnostic("invalid-best-of-n-presets-file", filePath, source, `Skipping best-of-N presets file ${filePath}: expected top-level object with a "presets" object.`));
-		return { presets, invalidPresetNames, diagnostics, projectFileInvalid };
+		return { presets, discoveredPresets, invalidPresetNames, diagnostics, projectFileInvalid };
 	}
 	for (const [name, rawPreset] of Object.entries(parsed.presets)) {
 		const preset = normalizePreset(name, rawPreset, filePath, source, diagnostics);
@@ -224,9 +326,11 @@ function readPresetFile(filePath: string, source: PromptSource): BestOfNPresetCa
 			invalidPresetNames.add(name);
 			continue;
 		}
-		presets.set(name, { name, source, filePath, ...preset });
+		const resolvedPreset: ResolvedBestOfNPreset = { name, source, sourceKind: source, sourcePath: filePath, filePath, ...preset };
+		presets.set(name, resolvedPreset);
+		discoveredPresets.push(createDiscoveryEntry(resolvedPreset));
 	}
-	return { presets, invalidPresetNames, diagnostics, projectFileInvalid };
+	return { presets, discoveredPresets, invalidPresetNames, diagnostics, projectFileInvalid };
 }
 
 export function getBestOfNPresetPaths(cwd: string): { user: string; project: string } {
@@ -236,14 +340,37 @@ export function getBestOfNPresetPaths(cwd: string): { user: string; project: str
 	};
 }
 
+export function getBestOfNPresetCandidatePaths(cwd: string): { user: string[]; project: string[] } {
+	return {
+		user: [
+			join(homedir(), ".pi", "agent", "best-of-n-presets.json"),
+			join(homedir(), ".pi", "agent", "best-of-n-presets.yaml"),
+			join(homedir(), ".pi", "agent", "best-of-n-presets.yml"),
+		],
+		project: [
+			resolve(cwd, ".pi", "best-of-n-presets.json"),
+			resolve(cwd, ".pi", "best-of-n-presets.yaml"),
+			resolve(cwd, ".pi", "best-of-n-presets.yml"),
+		],
+	};
+}
+
+function readFirstPresetFile(paths: string[], source: PromptSource): BestOfNPresetCatalog {
+	const filePath = paths.find((candidate) => existsSync(candidate));
+	if (filePath) return readPresetFile(filePath, source);
+	return { presets: new Map(), discoveredPresets: [], invalidPresetNames: new Set(), diagnostics: [], projectFileInvalid: false };
+}
+
 export function loadBestOfNPresetCatalog(cwd: string): BestOfNPresetCatalog {
-	const paths = getBestOfNPresetPaths(cwd);
-	const user = readPresetFile(paths.user, "user");
-	const project = readPresetFile(paths.project, "project");
+	const paths = getBestOfNPresetCandidatePaths(cwd);
+	const user = readFirstPresetFile(paths.user, "user");
+	const project = readFirstPresetFile(paths.project, "project");
 	const presets = project.projectFileInvalid ? new Map(project.presets) : new Map([...user.presets, ...project.presets]);
 	for (const name of project.invalidPresetNames) presets.delete(name);
+	const discoveredPresets = [...presets.values()].map(createDiscoveryEntry).sort((a, b) => a.name.localeCompare(b.name) || a.source.localeCompare(b.source));
 	return {
 		presets,
+		discoveredPresets,
 		invalidPresetNames: new Set([...user.invalidPresetNames, ...project.invalidPresetNames]),
 		diagnostics: [...user.diagnostics, ...project.diagnostics],
 		projectFileInvalid: project.projectFileInvalid,
