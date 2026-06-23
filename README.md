@@ -128,11 +128,20 @@ Then run the cheap preflight path first:
 /hello
 ```
 
-If that works, copy packaged examples from this repo or the installed package directory into `~/.pi/agent/prompts/` and preview them before execution:
+If that works, you can stop there: the inline `hello.md` is the first-run path and does not require packaged examples.
+
+Packaged examples are optional starter prompts. Copy them only when you want a larger template to customize, then preview before execution. Use either a repo checkout you already have, or unpack the published npm tarball into a temporary directory; do not rely on an undocumented Pi package-install location:
 
 ```bash
-PTM_DIR=/path/to/pi-prompt-workflows
-cp "$PTM_DIR/examples/review.md" ~/.pi/agent/prompts/review.md
+# Option A: from a local checkout of this repository
+REPO=/path/to/your/pi-prompt-workflows-checkout
+cp "$REPO/examples/review.md" ~/.pi/agent/prompts/review.md
+
+# Option B: from the published npm package tarball
+TMPDIR=$(mktemp -d)
+npm pack pi-prompt-workflows --pack-destination "$TMPDIR"
+tar -xzf "$TMPDIR"/pi-prompt-workflows-*.tgz -C "$TMPDIR"
+cp "$TMPDIR/package/examples/review.md" ~/.pi/agent/prompts/review.md
 ```
 
 ```text
@@ -709,15 +718,30 @@ This repo ships copyable starter prompts under `examples/`. Start with the minim
 - `examples/best-of-n-smoke.md` installs as `/best-of-n-smoke` and runs one worker plus one reviewer with no final applier, no apply step, and no commit handoff.
 - `examples/best-of-n.md` installs as `/best-of-n`, runs in the current repo, and shows mixed workers, mixed reviewers, worktrees, and an optional final apply phase.
 
-Install one or more examples manually from this repo checkout (or from the installed package directory):
+Installing these examples is optional. The first-run `hello.md` above works without copying packaged examples; copy these only when you want starter templates to edit.
+
+Use a repo checkout when you have one:
 
 ```bash
-PTM_DIR=/path/to/pi-prompt-workflows
+REPO=/path/to/your/pi-prompt-workflows-checkout
 mkdir -p ~/.pi/agent/prompts
-cp "$PTM_DIR/examples/hello.md" ~/.pi/agent/prompts/hello.md
-cp "$PTM_DIR/examples/review.md" ~/.pi/agent/prompts/review.md
-cp "$PTM_DIR/examples/best-of-n-smoke.md" ~/.pi/agent/prompts/best-of-n-smoke.md
-cp "$PTM_DIR/examples/best-of-n.md" ~/.pi/agent/prompts/best-of-n.md
+cp "$REPO/examples/hello.md" ~/.pi/agent/prompts/hello.md
+cp "$REPO/examples/review.md" ~/.pi/agent/prompts/review.md
+cp "$REPO/examples/best-of-n-smoke.md" ~/.pi/agent/prompts/best-of-n-smoke.md
+cp "$REPO/examples/best-of-n.md" ~/.pi/agent/prompts/best-of-n.md
+```
+
+Or copy from the published npm tarball without guessing where Pi installed the package:
+
+```bash
+TMPDIR=$(mktemp -d)
+npm pack pi-prompt-workflows --pack-destination "$TMPDIR"
+tar -xzf "$TMPDIR"/pi-prompt-workflows-*.tgz -C "$TMPDIR"
+mkdir -p ~/.pi/agent/prompts
+cp "$TMPDIR/package/examples/hello.md" ~/.pi/agent/prompts/hello.md
+cp "$TMPDIR/package/examples/review.md" ~/.pi/agent/prompts/review.md
+cp "$TMPDIR/package/examples/best-of-n-smoke.md" ~/.pi/agent/prompts/best-of-n-smoke.md
+cp "$TMPDIR/package/examples/best-of-n.md" ~/.pi/agent/prompts/best-of-n.md
 ```
 
 After copying files, restart `pi` if it is already running. Check minimal prompts with a read-only preview before executing them:
@@ -804,6 +828,8 @@ Or at runtime:
 /best-of-n --preset quick refactor the parser
 ```
 
+That minimal runtime form is summary-only: it keeps the durable `report.md` and `lineup.json`, but not raw worker/reviewer/final-applier Markdown artifacts. Add `--keep-artifacts` when you expect to audit raw outputs, hand evidence to another reviewer, or debug reviewer disagreements.
+
 List available presets without approving or running them:
 
 ```text
@@ -826,7 +852,7 @@ Dry-run and preset listing are read-only: they do not approve project presets, s
 
 Use these as copyable starting points for the full compare workflow.
 
-**Adversarial oracle review:** run a read-only tournament and retain enough evidence to inspect afterwards.
+**Evidence-retaining adversarial oracle review:** run a read-only tournament and retain raw worker/reviewer artifacts for later inspection.
 
 ```text
 /compare-presets --plain
@@ -836,7 +862,7 @@ Use these as copyable starting points for the full compare workflow.
 /compare-runs --plain --id <run-id>
 ```
 
-**Operator happy path:** discover presets, preflight the exact lineup, run with retained artifacts, then inspect the run id printed at completion.
+**Evidence-retaining operator happy path:** discover presets, preflight the exact lineup, run with retained artifacts, then inspect the run id printed at completion.
 
 ```text
 /compare-presets
@@ -845,7 +871,7 @@ Use these as copyable starting points for the full compare workflow.
 /compare-runs --id <run-id>
 ```
 
-**Compare, then inspect history:** preflight the effective lineup, execute the compare, then browse run history in Pi TUI mode or print one run deterministically.
+**Summary-only compare, then inspect history:** preflight the effective lineup, execute the compare, then browse run history in Pi TUI mode or print one run deterministically. Omit `--keep-artifacts` intentionally when the durable summary report and lineup are enough, or when you want less disk usage/noise from exploratory or low-stakes runs.
 
 ```text
 /compare-presets
