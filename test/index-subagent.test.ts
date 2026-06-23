@@ -1264,6 +1264,56 @@ test("compare prompt refuses to write reports through symlinked run roots", asyn
 	});
 });
 
+test("compare worker-phase thrown failures write inspectable failure history", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "compare.md"),
+			[
+				"---",
+				"bestOfN:",
+				"  workers:",
+				"    - agent: delegate",
+				"  reviewers:",
+				"    - agent: reviewer",
+				"---",
+				"Fix: $@",
+			].join("\n"),
+		);
+
+		const pi = new FakePi();
+		const { ctx } = createContext(cwd, pi);
+		ctx.hasUI = true;
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+			const request = payload as any;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [{ role: "assistant", content: [{ type: "text", text: "worker bridge failed" }] }],
+				parallelResults: [{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "worker bridge failed" }] }], isError: true }],
+				isError: true,
+			});
+		});
+
+		await pi.commands.get("compare")!.handler("bug", ctx);
+		const failure = pi.notifications.find((entry) => entry.type === "error" && entry.message.includes("Compare failed (worker-failed)"));
+		assert.ok(failure);
+		assert.match(failure.message, /worker phase failed before returning worker pairs/);
+		assert.match(failure.message, /Run id: .+/);
+		assert.match(failure.message, /Inspect: \/compare-runs --id .+/);
+
+		const runRoot = join(cwd, ".pi", "runs", "best-of-n");
+		const runDir = join(runRoot, readdirSync(runRoot)[0]!);
+		const lineup = JSON.parse(readFileSync(join(runDir, "lineup.json"), "utf8"));
+		assert.equal(lineup.status, "worker-failed");
+		assert.match(readFileSync(join(runDir, "report.md"), "utf8"), /worker phase failed before returning worker pairs/);
+	});
+});
+
 test("compare prompts handle partial-success policy, final-applier fallback, overrides, guardrails, and at-path cwd", async () => {
 	await withTempHome(async (root) => {
 		const cases = [

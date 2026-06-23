@@ -163,7 +163,7 @@ test("/compare-presets --plain prints deterministic preset catalog details witho
 		assert.match(output, /- Reviewers: 0/);
 		assert.match(output, /- Reviewer lineup: none/);
 		assert.match(output, /- Final applier: no/);
-		assert.match(output, /- Use:\n  - \/dry-run-prompt best-of-n --preset quick --plain <task>\n  - \/best-of-n --preset quick --keep-artifacts <task>/);
+		assert.match(output, /- Use:\n  - Dry run \(read-only\): \/dry-run-prompt best-of-n --preset quick --plain <task>\n  - Execute \(retains evidence artifacts\): \/best-of-n --preset quick --keep-artifacts <task>\n  - Execute \(summary-only, fewer local artifacts\): \/best-of-n --preset quick <task>/);
 		assert.match(output, /## strict/);
 		assert.match(output, /- Source: project/);
 		assert.match(output, /- Trust: project preset; approval is required for this compare cwd\/session\. Project presets can choose worker\/reviewer agents, models, counts, cost, and concurrency\./);
@@ -172,8 +172,9 @@ test("/compare-presets --plain prints deterministic preset catalog details witho
 		assert.match(output, /- Worker lineup: 1:2x delegate/);
 		assert.match(output, /- Reviewers: 1/);
 		assert.match(output, /- Reviewer lineup: 1:reviewer/);
-		assert.match(output, /\/dry-run-prompt best-of-n --preset strict --plain <task>/);
-		assert.match(output, /\/best-of-n --preset strict --keep-artifacts <task>/);
+		assert.match(output, /Dry run \(read-only\): \/dry-run-prompt best-of-n --preset strict --plain <task>/);
+		assert.match(output, /Execute \(retains evidence artifacts\): \/best-of-n --preset strict --keep-artifacts <task>/);
+		assert.match(output, /Execute \(summary-only, fewer local artifacts\): \/best-of-n --preset strict <task>/);
 		assert.doesNotMatch(output, /\r/);
 		assert.equal(pi.notifications.length, 0);
 		assertNoExecutionOrApproval(pi);
