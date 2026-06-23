@@ -8,7 +8,7 @@ bestOfN:
   #   /compare-presets
   #   /compare-presets --plain
   #   /dry-run-prompt best-of-n --preset quick --plain your task
-  #   /best-of-n --preset quick your task
+  #   /best-of-n --preset quick --keep-artifacts your task
   #   /compare-runs
   #   /compare-runs --plain --id <run-id>
   # Project presets override same-named user presets, but execution asks for session approval.

@@ -15,7 +15,8 @@ function formatUsePresetCommand(promptName: string, presetName: string, dryRun: 
 	const command = dryRun ? "dry-run-prompt" : promptName;
 	const promptArg = dryRun ? `${promptName} ` : "";
 	const plain = dryRun ? " --plain" : "";
-	return `/${command} ${promptArg}--preset ${presetName}${plain} <task>`;
+	const artifactRetention = dryRun ? "" : " --keep-artifacts";
+	return `/${command} ${promptArg}--preset ${presetName}${plain}${artifactRetention} <task>`;
 }
 
 function trustDescription(entry: BestOfNPresetDiscoveryEntry): string {
