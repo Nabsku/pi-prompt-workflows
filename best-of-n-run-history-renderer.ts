@@ -15,6 +15,11 @@ function formatArtifactStatus(status: string): string {
 	return status.replace(/-/g, " ");
 }
 
+function formatDate(ms: number): string {
+	if (!Number.isFinite(ms) || ms <= 0) return "unknown";
+	return new Date(ms).toISOString();
+}
+
 function runInspectCommand(run: BestOfNRunHistoryEntry): string {
 	return `/compare-runs --id ${run.name}`;
 }
@@ -26,6 +31,27 @@ function runPlainDetailCommand(run: BestOfNRunHistoryEntry): string {
 function rawArtifactGuidance(run: BestOfNRunHistoryEntry): string | undefined {
 	if (run.keepArtifacts === false) return "not retained; rerun the compare command with --keep-artifacts to keep raw worker/reviewer outputs.";
 	return undefined;
+}
+
+function artifactExplanation(status: BestOfNRunHistoryEntry["artifacts"][number]["status"], maxBytes: number, path: string): string {
+	if (status === "not-retained") return "not retained; rerun with --keep-artifacts to keep raw worker/reviewer outputs.";
+	if (status === "missing") return "missing; the expected file is gone, only partially copied, or was manually cleaned up.";
+	if (status === "rejected") return "rejected; safety refusal for a symlink, non-regular file, or path escape.";
+	if (status === "truncated") return `truncated; preview is limited to ${maxBytes} bytes. Open the full file at ${path}.`;
+	return `retained; full file path: ${path}.`;
+}
+
+function nextSteps(run: BestOfNRunHistoryEntry): string[] {
+	const steps = [
+		`Open the report: ${run.reportPath}`,
+		`Copyable detail command: ${runPlainDetailCommand(run)}`,
+		"Browse recent runs: /compare-runs",
+	];
+	if (run.keepArtifacts === false || run.artifacts.some((artifact) => artifact.status === "not-retained")) steps.push("Need raw worker/reviewer output? Rerun the compare command with --keep-artifacts.");
+	if (run.artifacts.some((artifact) => artifact.status === "missing")) steps.push("Missing artifacts mean the expected file is gone, partially copied, or manually cleaned up; rerun with --keep-artifacts if you need a complete set.");
+	if (run.artifacts.some((artifact) => artifact.status === "rejected")) steps.push("Rejected artifacts were not read because they were unsafe filesystem entries; inspect the path manually only if you trust it.");
+	if (run.artifacts.some((artifact) => artifact.status === "truncated")) steps.push("Truncated artifacts show only a bounded preview here; open the listed full-file path for the complete output.");
+	return steps;
 }
 
 export function formatBestOfNRunHistory(result: BestOfNRunHistoryResult): string {
@@ -40,6 +66,7 @@ export function formatBestOfNRunHistory(result: BestOfNRunHistoryResult): string
 	for (const [index, run] of result.entries.entries()) {
 		lines.push(`## ${index + 1}. ${sanitizeInline(run.name)}`);
 		lines.push(`- Run id: ${sanitizeInline(run.name)}`);
+		lines.push(`- Modified: ${formatDate(run.mtimeMs)}`);
 		lines.push(`- Path: ${sanitizeInline(run.path)}`);
 		lines.push(`- Report: ${sanitizeInline(run.reportPath)}`);
 		lines.push(`- Inspect: ${sanitizeInline(runInspectCommand(run))}`);
@@ -60,7 +87,8 @@ export function formatBestOfNRunHistory(result: BestOfNRunHistoryResult): string
 			for (const artifact of run.artifacts) {
 				const size = artifact.size !== undefined ? `, ${artifact.size} bytes` : "";
 				const diagnostic = artifact.diagnostic ? ` — ${sanitizeInline(artifact.diagnostic)}` : "";
-				lines.push(`  - ${sanitizeInline(artifact.name)}: ${formatArtifactStatus(artifact.status)}${size} (${sanitizeInline(artifact.path)})${diagnostic}`);
+				const explanation = artifactExplanation(artifact.status, result.maxBytes, artifact.path);
+				lines.push(`  - ${sanitizeInline(artifact.name)}: ${formatArtifactStatus(artifact.status)}${size} (${sanitizeInline(artifact.path)}) — ${sanitizeInline(explanation)}${diagnostic}`);
 			}
 		} else {
 			lines.push("- Artifacts: none discovered");
@@ -78,8 +106,10 @@ export function formatBestOfNRunDetail(result: BestOfNRunHistoryResult, run: Bes
 	if (result.diagnostics.length > 0 || run.diagnostics.length > 0) lines.push("");
 	lines.push("## Summary");
 	lines.push(`- Run id: ${sanitizeInline(run.name)}`);
+	lines.push(`- Modified: ${formatDate(run.mtimeMs)}`);
 	lines.push(`- Path: ${sanitizeInline(run.path)}`);
 	lines.push(`- Report: ${sanitizeInline(run.reportPath)}`);
+	lines.push(`- Preview limit: ${result.maxBytes} bytes`);
 	lines.push(`- Inspect: ${sanitizeInline(runInspectCommand(run))}`);
 	lines.push(`- Plain detail: ${sanitizeInline(runPlainDetailCommand(run))}`);
 	lines.push("- Browse recent: /compare-runs");
@@ -93,6 +123,8 @@ export function formatBestOfNRunDetail(result: BestOfNRunHistoryResult, run: Bes
 	lines.push(`- Raw artifacts retained: ${formatMaybe(run.keepArtifacts)}`);
 	const artifactGuidance = rawArtifactGuidance(run);
 	if (artifactGuidance) lines.push(`- Raw artifact guidance: ${sanitizeInline(artifactGuidance)}`);
+	lines.push("", "## Next steps");
+	for (const step of nextSteps(run)) lines.push(`- ${sanitizeInline(step)}`);
 	lines.push("", "## Lineup", run.lineupText ? sanitizeForTerminal(run.lineupText, { preserveLineBreaks: true }) : "lineup.json is unavailable or invalid. See diagnostics.");
 	lines.push("", "## Report", run.reportText ? sanitizeForTerminal(run.reportText, { preserveLineBreaks: true }) : "report.md is unavailable. See diagnostics.");
 	lines.push("", "## Artifacts");
@@ -102,8 +134,9 @@ export function formatBestOfNRunDetail(result: BestOfNRunHistoryResult, run: Bes
 		for (const artifact of run.artifacts) {
 			const size = artifact.size !== undefined ? `, ${artifact.size} bytes` : "";
 			const diagnostic = artifact.diagnostic ? ` — ${sanitizeInline(artifact.diagnostic)}` : "";
+			const explanation = artifactExplanation(artifact.status, result.maxBytes, artifact.path);
 			lines.push(`### ${sanitizeInline(artifact.name)}`);
-			lines.push(`${formatArtifactStatus(artifact.status)}${size} (${sanitizeInline(artifact.path)})${diagnostic}`);
+			lines.push(`${formatArtifactStatus(artifact.status)}${size} (${sanitizeInline(artifact.path)}) — ${sanitizeInline(explanation)}${diagnostic}`);
 			if (artifact.previewText) lines.push("", sanitizeForTerminal(artifact.previewText, { preserveLineBreaks: true }));
 		}
 	}
