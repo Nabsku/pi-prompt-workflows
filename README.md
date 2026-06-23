@@ -159,10 +159,11 @@ Use `/print-prompt` or `/dry-run-prompt` to preview what a prompt template would
 /dry-run-prompt review --model=gpt-5.2 src/server.ts
 ```
 
-In non-TUI contexts these commands print a Markdown report to stdout. By default, full skill content is hidden; add `--show-skills` when you explicitly want the preview to include loaded skill bodies. For delegated prompts, skill content is still reported in the report's skills section rather than inlined into the prompt body preview; at runtime the resolved skill block is prepended to the child task text before delegation.
+With `--plain`, or in contexts without Pi UI, these commands print a Markdown report to stdout. In non-TUI UI contexts, they show the same report as a notification. For compare prompts, the report is a read-only preflight that shows the selected preset, worker/reviewer lineup, call count and cap, compare cwd, policies, artifact expectations, and warnings before any worker runs. By default, full skill content is hidden; add `--show-skills` when you explicitly want the preview to include loaded skill bodies. For delegated prompts, skill content is still reported in the report's skills section rather than inlined into the prompt body preview; at runtime the resolved skill block is prepended to the child task text before delegation.
 
 ```text
 /print-prompt review --show-skills src/server.ts
+/dry-run-prompt best-of-n --preset quick --plain refactor the parser
 ```
 
 In Pi TUI mode, the commands open an interactive picker/inspector by default:
@@ -669,10 +670,10 @@ Worker/reviewer lineups are fully configurable from `bestOfN` frontmatter, prese
 
 Presets keep expensive lineup choices reusable without letting project config own prompt policy. Define them in either place:
 
-- User presets: `~/.pi/agent/best-of-n-presets.json`
-- Project presets: `<compare-cwd>/.pi/best-of-n-presets.json`
+- User presets: `~/.pi/agent/best-of-n-presets.json`, `.yaml`, or `.yml`
+- Project presets: `<compare-cwd>/.pi/best-of-n-presets.json`, `.yaml`, or `.yml`
 
-Project presets override user presets of the same name, but running a project preset asks for session approval. Compare prompts that set `cwd`, runtime `--cwd`, or use `parallel-patch-compare-at-path` resolve project presets from the effective compare cwd. `/validate-prompts` mirrors prompt `cwd` where it can be known statically.
+Only the first existing file in each location is loaded, in `json`, `yaml`, then `yml` order. Project presets override user presets of the same name. If a project preset with a name is invalid, that name fails closed instead of falling back to the user preset. Compare prompts that set `cwd`, runtime `--cwd`, or use `parallel-patch-compare-at-path` resolve project presets from the effective compare cwd. `/validate-prompts` mirrors prompt `cwd` where it can be known statically.
 
 ```json
 {
@@ -700,6 +701,24 @@ Or at runtime:
 ```bash
 /best-of-n --preset quick refactor the parser
 ```
+
+List available presets without approving or running them:
+
+```text
+/compare-presets
+/compare-presets --plain
+```
+
+`/compare-presets` reports each preset's source file, trust label, default model, `maxModelCalls`, expanded worker/reviewer counts, and diagnostics. The default UI path uses a notification/custom UI surface; `--plain` writes deterministic stdout for scripts.
+
+Preview the effective lineup before execution:
+
+```text
+/dry-run-prompt best-of-n --preset quick refactor the parser
+/print-prompt best-of-n --preset quick --plain refactor the parser
+```
+
+Dry-run and preset listing are read-only: they do not approve project presets, start subagents, write reports, or switch models. Running a compare prompt with a project preset asks for per-session approval first. User presets are trusted user config; project presets are treated as untrusted project input until approved for the session.
 
 Preset slot fields are intentionally limited to `agent`/`subagent`, `model`, and `count`. Presets cannot set `task`, `taskSuffix`, `cwd`, `finalApplier`, `worktree`, dirty/report/commit behavior, or other execution policy. Invalid selected presets fail closed instead of falling back to same-named user presets, and `maxModelCalls` caps the expanded worker + reviewer calls before any subagents start.
 

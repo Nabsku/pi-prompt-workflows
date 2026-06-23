@@ -3,6 +3,13 @@ description: Best-of-N code task with parallel workers using different models in
 # Usage: /best-of-n fix the flaky auth test
 # Usage: /best-of-n implement the plan: /path/to/plan.md
 bestOfN:
+  # To reuse a shared lineup instead of the explicit workers/reviewers below, define
+  # `~/.pi/agent/best-of-n-presets.json` or `<repo>/.pi/best-of-n-presets.json`, then run:
+  #   /compare-presets
+  #   /dry-run-prompt best-of-n --preset quick --plain your task
+  #   /best-of-n --preset quick your task
+  # Project presets override same-named user presets, but execution asks for session approval.
+  # preset: quick
   # Workers run in temporary worktrees; the final apply step edits the current branch.
   worktree: true
   workers:
