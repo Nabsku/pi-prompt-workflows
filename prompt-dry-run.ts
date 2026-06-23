@@ -317,20 +317,55 @@ export async function createPromptDryRun(
 
 	if (prompt.chain) return errorResult(prompt, DRY_RUN_CHAIN_UNSUPPORTED, warnings, runtime);
 	if (hasCompareLineup(prompt)) {
-		const preflight = createBestOfNPreflight({
+		if (parsed.runtimeCwd) {
+			const runtimeCwd = expandCwdPath(parsed.runtimeCwd);
+			if (!runtimeCwd) return errorResult(prompt, "Invalid --cwd path: must be absolute", warnings, runtime);
+			runtime.cwd = runtimeCwd;
+		}
+		const initialPreflight = createBestOfNPreflight({
 			prompt,
 			args: options.rawArgs ?? (options.args ?? []).join(" "),
 			contextCwd: options.cwd,
 			currentModelLabel: options.currentModelLabel,
 			pathArgumentPromptName: options.pathArgumentPromptName,
 		});
+		const effectivePrompt: PromptWithModel = {
+			...prompt,
+			...(parsed.model ? { models: [parsed.model] } : {}),
+		};
+		const prepared = await preparePromptExecution(
+			effectivePrompt,
+			initialPreflight.task.parsed,
+			options.currentModel,
+			options.modelRegistry,
+		);
+		if (!prepared) {
+			return errorResult(prompt, `No available model from: ${effectivePrompt.models.join(", ")}`, warnings, runtime);
+		}
+		if ("message" in prepared) {
+			if (prepared.warning) warnings.push(prepared.warning);
+			return errorResult(prompt, prepared.message, warnings, runtime);
+		}
+		if (prepared.warning) warnings.push(prepared.warning);
+		const modelLabel = `${prepared.selectedModel.model.provider}/${prepared.selectedModel.model.id}`;
+		const preflight = createBestOfNPreflight({
+			prompt,
+			args: options.rawArgs ?? (options.args ?? []).join(" "),
+			contextCwd: options.cwd,
+			currentModelLabel: modelLabel,
+			pathArgumentPromptName: options.pathArgumentPromptName,
+			renderedTask: prepared.content,
+		});
 		warnings.push(...preflight.diagnostics.filter((diagnostic) => diagnostic.severity === "warning").map((diagnostic) => diagnostic.message));
+		const errors = preflight.diagnostics.filter((diagnostic) => diagnostic.severity === "error").map((diagnostic) => diagnostic.message);
+		if (errors.length > 0) return errorResult(prompt, errors.join("\n"), warnings, runtime);
 		return {
 			status: "ok",
 			promptName: prompt.name,
 			content: preflight.task.renderedTask ?? "",
 			args: preflight.task.parsed,
-			modelAlreadyActive: false,
+			model: prepared.selectedModel.model,
+			modelAlreadyActive: prepared.selectedModel.alreadyActive,
 			warnings,
 			skills: [],
 			details: { skills: [] },

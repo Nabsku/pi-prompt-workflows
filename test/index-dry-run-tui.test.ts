@@ -424,13 +424,13 @@ test("TUI picker and inspector support preset-only compare prompts", async () =>
 	await setup("tui", async (cwd, pi, ctx) => {
 		mkdirSync(join(cwd, ".pi"), { recursive: true });
 		writeFileSync(join(cwd, ".pi", "best-of-n-presets.json"), `${JSON.stringify({ presets: { quick: { workers: [{ agent: "worker" }], reviewers: [{ agent: "reviewer" }] } } })}\n`);
-		writePrompt(cwd, "compare-preset", "---\nbestOfN:\n  preset: quick\n---\n$@");
+		writePrompt(cwd, "compare-preset", "---\nmodel: anthropic/claude-sonnet-4-20250514\nbestOfN:\n  preset: quick\n---\nReview $@");
 		await pi.emit("session_start", {}, ctx);
 		pi.customResults.push({ action: "selected", templateName: "compare-preset" });
 
 		await pi.commands.get("dry-run-prompt")!.handler!("", ctx);
 
-		assert.equal(pi.customCalls.length, 2);
+		assert.equal(pi.customCalls.length, 2, JSON.stringify(pi.notifications));
 		const picker = pi.customComponents.at(-2) as { render(width: number): string[] };
 		const rendered = picker.render(1000).join("\n");
 		assert.match(rendered, /compare-preset\s+project/);

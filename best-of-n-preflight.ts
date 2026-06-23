@@ -143,6 +143,7 @@ export interface CreateBestOfNPreflightOptions {
 	currentModelLabel?: string;
 	projectPresetApproved?: boolean;
 	pathArgumentPromptName?: string;
+	renderedTask?: string;
 }
 
 function diagnostic(severity: BestOfNPreflightDiagnosticSeverity, code: string, message: string, source?: PromptSource | "runtime" | "preset", filePath?: string): BestOfNPreflightDiagnostic {
@@ -290,6 +291,11 @@ export function createBestOfNPreflight(options: CreateBestOfNPreflightOptions): 
 	let taskArgs = parseCommandArgs(keepArtifactsExtraction.args);
 	let compareCwdSource: BestOfNPreflightCwdSource = runtime.cwd ? "runtime-cwd" : options.prompt.cwd ? "prompt-cwd" : "context-cwd";
 	let requestedCwd = runtime.cwd ?? options.prompt.cwd ?? options.contextCwd;
+	if (runtime.cwd && !expandCwdPath(runtime.cwd)) {
+		diagnostics.push(diagnostic("error", "invalid-runtime-cwd", "Invalid --cwd path: must be absolute.", "runtime"));
+		requestedCwd = options.prompt.cwd ?? options.contextCwd;
+		compareCwdSource = options.prompt.cwd ? "prompt-cwd" : "context-cwd";
+	}
 	if (options.pathArgumentPromptName && options.prompt.name === options.pathArgumentPromptName && taskArgs.length > 0) {
 		requestedCwd = taskArgs[0]!;
 		compareCwdSource = "path-argument";
@@ -300,7 +306,7 @@ export function createBestOfNPreflight(options: CreateBestOfNPreflightOptions): 
 	if (runtime.preset && !(options.prompt.workers !== undefined || options.prompt.reviewers !== undefined || options.prompt.finalApplier !== undefined || options.prompt.preset !== undefined)) {
 		diagnostics.push(diagnostic("warning", "preset-ignored-for-non-compare-prompt", "--preset is only supported on compare prompts.", "runtime"));
 	}
-	const sharedTask = substituteArgs(options.prompt.content, taskArgs);
+	const sharedTask = options.renderedTask ?? substituteArgs(options.prompt.content, taskArgs);
 	if (!sharedTask.trim()) diagnostics.push(diagnostic("error", "empty-rendered-task", `Prompt \`${options.prompt.name}\` rendered to an empty message.`, options.prompt.source, options.prompt.filePath));
 
 	const presetName = runtime.preset ?? options.prompt.preset;

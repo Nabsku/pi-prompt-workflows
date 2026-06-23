@@ -235,10 +235,37 @@ test("returns unsupported error for chain prompts", async () => {
 });
 
 test("returns compare preflight for compare prompts", async () => {
-	const result = assertOk(await createPromptDryRun(prompt({ workers: [{ agent: "worker" }] }), options("/tmp")));
-	assert.equal(result.comparePreflight?.callCount.workers, 1);
-	assert.equal(result.comparePreflight?.slots.workers[0]?.agent, "worker");
-	assert.equal(result.content, "Body ");
+	await withTempHome(async (root) => {
+		const result = assertOk(await createPromptDryRun(prompt({ workers: [{ agent: "worker" }] }), options(root)));
+		assert.equal(result.comparePreflight?.callCount.workers, 1);
+		assert.equal(result.comparePreflight?.slots.workers[0]?.agent, "worker");
+		assert.equal(result.content, "Body ");
+	});
+});
+
+test("compare preflight dry-run renders model conditionals like runtime", async () => {
+	await withTempHome(async (root) => {
+		const result = assertOk(await createPromptDryRun(
+			prompt({ workers: [{ agent: "worker" }], content: '<if-model is="openai/*">OpenAI $@<else>Other $@</if-model>' }),
+			options(root, { rawArgs: "--model=gpt-5.2 ship" }),
+		));
+		assert.equal(result.content, "OpenAI ship");
+		assert.equal(result.comparePreflight?.task.renderedTask, "OpenAI ship");
+		assert.equal(result.model?.id, gpt.id);
+	});
+});
+
+test("compare preflight dry-run rejects relative runtime cwd like runtime", async () => {
+	const result = assertError(await createPromptDryRun(prompt({ workers: [{ agent: "worker" }] }), options("/tmp", { rawArgs: "--cwd=subdir ship" })));
+	assert.equal(result.error, "Invalid --cwd path: must be absolute");
+});
+
+test("compare preflight dry-run fails when preflight has error diagnostics", async () => {
+	const result = assertError(await createPromptDryRun(
+		prompt({ preset: "missing" }),
+		options("/tmp", { rawArgs: "ship" }),
+	));
+	assert.match(result.error, /Best-of-N preset `missing` was not found/);
 });
 
 test("returns compare preflight for path-driven compare prompts", async () => {

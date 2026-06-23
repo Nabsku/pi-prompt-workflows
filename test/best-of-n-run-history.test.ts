@@ -176,6 +176,8 @@ test("collectBestOfNRunHistory parses large lineup metadata without artifact pre
 			["reviewer-1.md", "not-retained"],
 			["worker-1.md", "not-retained"],
 		]);
+		assert.ok((entry.lineupText?.length ?? 0) < 128);
+		assert.match(entry.diagnostics.join("\n"), /lineup\.json display truncated to 64 bytes/);
 	});
 });
 

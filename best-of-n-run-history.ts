@@ -120,7 +120,15 @@ function validateRunRoot(cwd: string): { root: string; ok: true } | { root: stri
 	return { root, ok: true };
 }
 
-function parseLineup(filePath: string, runDir: string, diagnostics: string[]): { lineup?: Record<string, unknown>; text?: string } {
+function capLineupTextForDisplay(text: string, maxBytes: number, diagnostics: string[]): string {
+	const byteLength = Buffer.byteLength(text, "utf8");
+	if (byteLength <= maxBytes) return text;
+	const capped = Buffer.from(text, "utf8").subarray(0, Math.max(maxBytes, 0)).toString("utf8");
+	diagnostics.push(`lineup.json display truncated to ${maxBytes} bytes (original ${byteLength} bytes).`);
+	return capped;
+}
+
+function parseLineup(filePath: string, runDir: string, diagnostics: string[], maxBytes: number): { lineup?: Record<string, unknown>; text?: string } {
 	const resolved = resolve(filePath);
 	if (!isInside(runDir, resolved)) {
 		diagnostics.push(`Rejected ${basename(filePath)}: path escapes run directory.`);
@@ -151,10 +159,10 @@ function parseLineup(filePath: string, runDir: string, diagnostics: string[]): {
 		const parsed = JSON.parse(text);
 		const object = safeJsonObject(parsed);
 		if (!object) diagnostics.push("lineup.json ignored: expected a JSON object.");
-		return { lineup: object, text };
+		return { lineup: object, text: capLineupTextForDisplay(text, maxBytes, diagnostics) };
 	} catch (error) {
 		diagnostics.push(`lineup.json ignored: ${error instanceof Error ? error.message : String(error)}.`);
-		return { text };
+		return { text: capLineupTextForDisplay(text, maxBytes, diagnostics) };
 	}
 }
 
@@ -239,7 +247,7 @@ function collectRun(runDir: string, maxBytes: number): BestOfNRunHistoryEntry {
 	const reportPath = join(runDir, "report.md");
 	const report = readBoundedText(reportPath, runDir, maxBytes);
 	if (report.diagnostic) diagnostics.push(report.diagnostic);
-	const parsedLineup = parseLineup(join(runDir, "lineup.json"), runDir, diagnostics);
+	const parsedLineup = parseLineup(join(runDir, "lineup.json"), runDir, diagnostics, maxBytes);
 	const lineup = parsedLineup.lineup;
 	let stat;
 	try {
