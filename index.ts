@@ -2872,11 +2872,31 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		const action = getOwnStringProperty(value, "action");
 		if (action === "closed") return { action: "closed" };
 		if (action === "back") return { action: "back" };
+		if (action === "refresh") return { action: "refresh" };
 		if (action !== "selected") return undefined;
 		const runId = getOwnStringProperty(value, "runId");
 		if (!runId) return undefined;
 		if (!history.entries.some((entry) => entry.name === runId)) return undefined;
 		return { action: "selected", runId };
+	}
+
+	function formatMissingCompareRunMessage(history: BestOfNRunHistoryResult, cwd: string, runId: string): string {
+		return [
+			history.diagnostics[0] ?? `Compare run ${JSON.stringify(runId)} was not found in the current run history.`,
+			`Searched root: ${history.root}`,
+			`Command cwd: ${cwd}`,
+			"Recovery: run /compare-runs to browse recent runs, copy the exact Run id, or rerun the compare prompt from the same cwd.",
+			"If you need raw worker/reviewer outputs, rerun with --keep-artifacts.",
+		].join("\n");
+	}
+
+	function formatStaleCompareRunMessage(history: BestOfNRunHistoryResult, cwd: string, runId: string): string {
+		return [
+			`Compare run ${JSON.stringify(runId)} vanished or is no longer readable; refreshed run history.`,
+			`Searched root: ${history.root}`,
+			`Command cwd: ${cwd}`,
+			"Recovery: press r or reopen /compare-runs, then select a current Run id. If files were manually cleaned up, rerun the compare prompt from the same cwd.",
+		].join("\n");
 	}
 
 	async function openCompareRunPicker(ctx: ExtensionCommandContext, history: BestOfNRunHistoryResult, initialRunId?: string): Promise<CompareRunHistoryTuiResult | undefined> {
@@ -2897,12 +2917,13 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		return parseCompareRunPickerAction(result, history);
 	}
 
-	async function inspectCompareRunInTui(ctx: ExtensionCommandContext, history: BestOfNRunHistoryResult, runId: string): Promise<void> {
-		const action = await openCompareRunInspector(ctx, history, runId);
-		if (action?.action === "back") {
-			const selection = await openCompareRunPicker(ctx, history, runId);
-			if (selection?.action === "selected") await inspectCompareRunInTui(ctx, history, selection.runId);
+	async function inspectCompareRunInTui(ctx: ExtensionCommandContext, options: ReturnType<typeof parseBestOfNRunHistoryArgs>, runId: string): Promise<CompareRunHistoryTuiResult | undefined> {
+		const latest = collectBestOfNRunHistory(ctx.cwd, { ...options, runId });
+		if (!latest.entries.some((entry) => entry.name === runId)) {
+			notify(ctx, formatStaleCompareRunMessage(latest, ctx.cwd, runId), "error");
+			return { action: "refresh" };
 		}
+		return openCompareRunInspector(ctx, latest, runId);
 	}
 
 	async function runCompareRunsCommand(args: string, ctx: ExtensionCommandContext) {
@@ -2916,25 +2937,32 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 		const history = collectBestOfNRunHistory(ctx.cwd, options);
 		const selectedRun = options.runId ? history.entries.find((entry) => entry.name === options.runId) : undefined;
-		const missingRunMessage = options.runId && !selectedRun ? [
-			history.diagnostics[0] ?? `Compare run ${JSON.stringify(options.runId)} was not found in the current run history.`,
-			`Searched root: ${history.root}`,
-			`Command cwd: ${ctx.cwd}`,
-			"Recovery: run /compare-runs to browse recent runs, copy the exact Run id, or rerun the compare prompt from the same cwd.",
-			"If you need raw worker/reviewer outputs, rerun with --keep-artifacts.",
-		].join("\n") : undefined;
+		const missingRunMessage = options.runId && !selectedRun ? formatMissingCompareRunMessage(history, ctx.cwd, options.runId) : undefined;
 		if (options.plain) {
 			process.stdout.write(selectedRun ? formatBestOfNRunDetail(history, selectedRun) : missingRunMessage ?? formatBestOfNRunHistory(history));
 			return;
 		}
 		if ((options.tui || isTuiMode(ctx)) && hasCustomUi(ctx)) {
 			if (options.runId) {
-				if (selectedRun) await inspectCompareRunInTui(ctx, history, selectedRun.name);
+				if (selectedRun) await inspectCompareRunInTui(ctx, options, selectedRun.name);
 				else notify(ctx, missingRunMessage ?? "Compare run was not found in the current run history.", "error");
 				return;
 			}
-			const selection = await openCompareRunPicker(ctx, history);
-			if (selection?.action === "selected") await inspectCompareRunInTui(ctx, history, selection.runId);
+			let currentHistory = history;
+			for (;;) {
+				const selection = await openCompareRunPicker(ctx, currentHistory);
+				if (selection?.action === "refresh") {
+					currentHistory = collectBestOfNRunHistory(ctx.cwd, options);
+					continue;
+				}
+				if (selection?.action !== "selected") break;
+				const detailAction = await inspectCompareRunInTui(ctx, options, selection.runId);
+				if (detailAction?.action === "back" || detailAction?.action === "refresh") {
+					currentHistory = collectBestOfNRunHistory(ctx.cwd, options);
+					continue;
+				}
+				break;
+			}
 			return;
 		}
 		if (options.tui) {

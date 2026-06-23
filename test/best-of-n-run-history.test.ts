@@ -94,12 +94,13 @@ test("collectBestOfNRunHistory summarizes lineup, report path, and not-retained 
 		]);
 		const output = formatBestOfNRunHistory(result);
 		assert.match(output, /Prompt: compare/);
+		assert.match(output, /Modified: \d{4}-\d{2}-\d{2}T/);
 		assert.match(output, /Preset: strict-oracle/);
 		assert.match(output, /Run id: 2026-06-22-compare-abcdef12/);
 		assert.match(output, /Inspect: \/compare-runs --id 2026-06-22-compare-abcdef12/);
 		assert.match(output, /Plain detail: \/compare-runs --plain --id 2026-06-22-compare-abcdef12/);
 		assert.match(output, /Raw artifact guidance: not retained; rerun the compare command with --keep-artifacts/);
-		assert.match(output, /worker-1\.md: not retained/);
+		assert.match(output, /worker-1\.md: not retained.*rerun with --keep-artifacts/);
 	});
 });
 
@@ -192,6 +193,35 @@ test("collectBestOfNRunHistory reports missing files when retained artifacts are
 		const result = collectBestOfNRunHistory(root);
 		const worker = result.entries[0]!.artifacts.find((artifact) => artifact.name === "worker-1.md");
 		assert.equal(worker?.status, "missing");
+	});
+});
+
+test("formatBestOfNRunDetail explains missing, rejected, truncated, and not-retained artifacts", async () => {
+	await withAdversarialFixtureDir((root) => {
+		const missingRun = writeCompareRun(root, "2026-06-22-missing-abcdef12", { keepArtifacts: true });
+		rmSync(join(missingRun, "worker-1.md"));
+		let result = collectBestOfNRunHistory(root, { runId: "2026-06-22-missing-abcdef12" });
+		let output = formatBestOfNRunDetail(result, result.entries[0]!);
+		assert.match(output, /worker-1\.md/);
+		assert.match(output, /expected file is gone, only partially copied, or was manually cleaned up/);
+
+		const rejectedRun = writeCompareRun(root, "2026-06-22-rejected-abcdef12", { keepArtifacts: true });
+		writeFileSync(join(root, "outside.md"), "outside\n");
+		createSymlinkedArtifact(rejectedRun, "worker-1.md", join(root, "outside.md"));
+		result = collectBestOfNRunHistory(root, { runId: "2026-06-22-rejected-abcdef12" });
+		output = formatBestOfNRunDetail(result, result.entries[0]!);
+		assert.match(output, /safety refusal for a symlink, non-regular file, or path escape/);
+
+		writeCompareRun(root, "2026-06-22-truncated-abcdef12", { keepArtifacts: true, hugeArtifactBytes: 128 });
+		result = collectBestOfNRunHistory(root, { runId: "2026-06-22-truncated-abcdef12", maxBytes: 16 });
+		output = formatBestOfNRunDetail(result, result.entries[0]!);
+		assert.match(output, /Preview limit: 16 bytes/);
+		assert.match(output, /preview is limited to 16 bytes/);
+
+		writeCompareRun(root, "2026-06-22-not-retained-abcdef12", { keepArtifacts: false });
+		result = collectBestOfNRunHistory(root, { runId: "2026-06-22-not-retained-abcdef12" });
+		output = formatBestOfNRunDetail(result, result.entries[0]!);
+		assert.match(output, /rerun with --keep-artifacts/);
 	});
 });
 
@@ -426,8 +456,12 @@ test("formatBestOfNRunDetail exposes read-only summary, lineup, report, artifact
 
 		assert.match(output, /# Compare run detail/);
 		assert.match(output, /## Summary/);
+		assert.match(output, /Modified: \d{4}-\d{2}-\d{2}T/);
+		assert.match(output, /Preview limit: 32768 bytes/);
 		assert.match(output, /Run id: 2026-06-22-detail-abcdef12/);
 		assert.match(output, /Browse recent: \/compare-runs/);
+		assert.match(output, /## Next steps/);
+		assert.match(output, /Open the report:/);
 		assert.match(output, /## Lineup/);
 		assert.match(output, /## Report/);
 		assert.match(output, /## Artifacts/);
@@ -453,7 +487,7 @@ test("compare-runs TUI mode opens searchable picker and selected run detail insp
 		assert.ok(pi.customComponents[1] instanceof CompareRunDetailInspector);
 		const rendered = (pi.customComponents[1] as CompareRunDetailInspector).render(120).join("\n");
 		assert.match(rendered, /Compare run: 2026-06-23-second-abcdef12/);
-		assert.match(rendered, /Summary\s+Lineup\s+Report\s+Artifacts\s+Diagnostics|\[Summary\]/);
+		assert.match(rendered, /\[Report\]/);
 		assert.doesNotMatch(rendered, /execute button|apply button|commit button/i);
 		assert.equal(pi.setModelCalls.length, 0);
 		assert.equal(pi.userMessages.length, 0);
@@ -511,8 +545,16 @@ test("compare run TUI components filter runs, sanitize chrome, and expose read-o
 
 		const inspector = new CompareRunDetailInspector(createCompareRunDetailViewModel(result, result.entries.find((entry) => entry.name.includes("beta"))!));
 		let rendered = inspector.render(120).join("\n");
+		assert.match(rendered, /\[Report\]/);
+		inspector.handleInput("1");
+		rendered = inspector.render(120).join("\n");
 		assert.match(rendered, /\[Summary\]/);
+		assert.match(rendered, /Preview limit: 32768 bytes/);
 		inspector.handleInput("2");
+		rendered = inspector.render(120).join("\n");
+		assert.match(rendered, /\[Next steps\]/);
+		assert.match(rendered, /Plain detail: \/compare-runs --plain --id 2026-06-23-beta-abcdef12/);
+		inspector.handleInput("4");
 		rendered = inspector.render(120).join("\n");
 		assert.match(rendered, /\[Lineup\]/);
 		assert.match(rendered, /"workers"/);
@@ -520,12 +562,67 @@ test("compare run TUI components filter runs, sanitize chrome, and expose read-o
 		rendered = inspector.render(120).join("\n");
 		assert.match(rendered, /\[Report\]/);
 		assert.match(rendered, /# Beta/);
-		inspector.handleInput("4");
-		rendered = inspector.render(120).join("\n");
-		assert.match(rendered, /\[Artifacts\]/);
 		inspector.handleInput("5");
 		rendered = inspector.render(120).join("\n");
+		assert.match(rendered, /\[Artifacts\]/);
+		inspector.handleInput("6");
+		rendered = inspector.render(120).join("\n");
 		assert.match(rendered, /\[Diagnostics\]/);
+	});
+});
+
+test("compare run TUI picker shows modified time and supports refresh action", async () => {
+	await withAdversarialFixtureDir((root) => {
+		writeCompareRun(root, "2026-06-23-refresh-abcdef12", { keepArtifacts: true });
+		const result = collectBestOfNRunHistory(root);
+		const doneValues: unknown[] = [];
+		const picker = new CompareRunPicker(buildCompareRunCatalog(result), undefined, undefined, undefined, (value) => doneValues.push(value));
+		const rendered = picker.render(160).join("\n");
+		assert.match(rendered, /2026-06-23-refresh-abcdef12\s+\d{4}-\d{2}-\d{2}T/);
+		assert.match(rendered, /r: refresh/);
+		picker.handleInput("r");
+		assert.deepEqual(doneValues.at(-1), { action: "refresh" });
+	});
+});
+
+test("compare-runs TUI reports vanished selected run and refreshes history", async () => {
+	await withAdversarialFixtureDir(async (root) => {
+		const staleRun = writeCompareRun(root, "2026-06-23-stale-abcdef12", { keepArtifacts: true });
+		writeCompareRun(root, "2026-06-23-current-abcdef12", { keepArtifacts: true });
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		let customCalls = 0;
+		const ctx = {
+			cwd: root,
+			mode: "tui",
+			hasUI: true,
+			model: { provider: "anthropic", id: "claude" },
+			ui: {
+				notify(message: string, type: string) { pi.customMessages.push({ message, type }); },
+				async custom(factory: (...args: any[]) => unknown) {
+					const component = factory({}, {}, {}, (value: unknown) => value);
+					pi.customComponents.push(component);
+					customCalls += 1;
+					if (customCalls === 1) {
+						rmSync(staleRun, { recursive: true, force: true });
+						return { action: "selected", runId: "2026-06-23-stale-abcdef12" };
+					}
+					return { action: "closed" };
+				},
+			},
+			isIdle() { return false; },
+			async waitForIdle() {},
+			modelRegistry: { getAll() { return []; }, getAvailable() { return []; } },
+		};
+
+		await pi.commands.get("compare-runs")!.handler("", ctx);
+
+		assert.equal(pi.customComponents.length, 2);
+		assert.match(pi.customMessages[0].message, /vanished or is no longer readable; refreshed run history/);
+		const refreshedPicker = pi.customComponents[1] as CompareRunPicker;
+		const rendered = refreshedPicker.render(160).join("\n");
+		assert.doesNotMatch(rendered, /2026-06-23-stale-abcdef12/);
+		assert.match(rendered, /2026-06-23-current-abcdef12/);
 	});
 });
 
