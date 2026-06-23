@@ -17,6 +17,7 @@ import {
 	type LineupOverrideAction,
 	type SubagentOverride,
 } from "./args.js";
+import { DEFAULT_COMPARE_FINAL_APPLIER_TASK, DEFAULT_COMPARE_REVIEWER_TASK } from "./compare-defaults.js";
 import { loadBestOfNPresetCatalog, applyPresetDefaultModel, type ResolvedBestOfNPreset } from "./best-of-n-presets.js";
 import { parseChainSteps, parseChainDeclaration, type ChainStep, type ChainStepOrParallel, type ParallelChainStep } from "./chain-parser.js";
 import { generateBoomerangSummary, generateChainStepSummary, generateIterationSummary, didIterationMakeChanges, getIterationEntries, wasIterationAborted } from "./loop-utils.js";
@@ -120,26 +121,6 @@ interface PromptStepResult {
 	changed: boolean;
 	text?: string;
 }
-
-const DEFAULT_COMPARE_REVIEWER_TASK = [
-	"Review the worker variants and produce findings only.",
-	"Required output:",
-	"1. Summarize concrete strengths with patch/diff evidence, including worktree change summaries when present.",
-	"2. Call out concrete correctness risks and regression risks.",
-	"3. Extract cherry-pick ideas from non-winning variants.",
-	"4. Do not rank variants or select a winner.",
-	"5. Do not include manual apply commands.",
-].join("\n");
-
-const DEFAULT_COMPARE_FINAL_APPLIER_TASK = [
-	"Apply the final implementation directly in the current repo.",
-	"Required output:",
-	"1. Pick the best single variant or synthesize/cherry-pick across variants.",
-	"2. Apply changes directly on the current branch.",
-	"3. Keep edits minimal and focused on the implementation task.",
-	"4. Run obvious relevant verification when practical.",
-	"5. Report changed files and verification commands run.",
-].join("\n");
 
 export default function promptModelExtension(pi: ExtensionAPI) {
 	let prompts = new Map<string, PromptWithModel>();
@@ -1338,9 +1319,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		const effectiveReviewerSlots = requestedReviewers.length > 0
 			? requestedReviewers
 			: [{ agent: "reviewer" }];
-		const presetModelCalls = expandedLineupCallCount(effectiveWorkerSlots) + expandedLineupCallCount(effectiveReviewerSlots);
+		const presetModelCalls = expandedLineupCallCount(effectiveWorkerSlots) + expandedLineupCallCount(effectiveReviewerSlots) + (requestedFinalApplier ? 1 : 0);
 		if (presetLineup.maxModelCalls !== undefined && presetModelCalls > presetLineup.maxModelCalls) {
-			notify(ctx, `Best-of-N preset model-call cap exceeded: requested ${presetModelCalls} worker/reviewer call(s), but preset allows ${presetLineup.maxModelCalls}.`, "error");
+			notify(ctx, `Best-of-N preset model-call cap exceeded: requested ${presetModelCalls} model call(s), but preset allows ${presetLineup.maxModelCalls}.`, "error");
 			return;
 		}
 
@@ -2194,6 +2175,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			modelRegistry: ctx.modelRegistry,
 			commands: pi.getCommands() as RuntimeSkillCommand[],
 			showSkills,
+			pathArgumentPromptName: promptName === "parallel-patch-compare-at-path" ? promptName : undefined,
 		});
 		const plainReport = formatPromptDryRun(result);
 
@@ -2244,6 +2226,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			modelRegistry: ctx.modelRegistry,
 			commands: pi.getCommands() as RuntimeSkillCommand[],
 			showSkills: parsed.showSkills,
+			pathArgumentPromptName: parsed.promptName === "parallel-patch-compare-at-path" ? parsed.promptName : undefined,
 		});
 		const plainReport = formatPromptDryRun(result);
 
@@ -2619,23 +2602,24 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	async function runCompareRunsCommand(args: string, ctx: ExtensionCommandContext) {
 		storedCommandCtx = ctx;
 		const options = parseBestOfNRunHistoryArgs(args);
-		const history = collectBestOfNRunHistory(ctx.cwd, options);
+		const history = collectBestOfNRunHistory(ctx.cwd, options.runId ? { ...options, limit: Number.MAX_SAFE_INTEGER } : options);
 		const selectedRun = options.runId ? history.entries.find((entry) => entry.name === options.runId) : undefined;
+		const missingRunMessage = options.runId && !selectedRun ? `Compare run ${JSON.stringify(options.runId)} was not found in the current run history.` : undefined;
 		if (options.plain) {
-			process.stdout.write(selectedRun ? formatBestOfNRunDetail(history, selectedRun) : formatBestOfNRunHistory(history));
+			process.stdout.write(selectedRun ? formatBestOfNRunDetail(history, selectedRun) : missingRunMessage ?? formatBestOfNRunHistory(history));
 			return;
 		}
 		if (isTuiMode(ctx) && hasCustomUi(ctx)) {
 			if (options.runId) {
 				if (selectedRun) await inspectCompareRunInTui(ctx, history, selectedRun.name);
-				else notify(ctx, `Compare run "${options.runId}" was not found in the current run history.`, "error");
+				else notify(ctx, missingRunMessage ?? "Compare run was not found in the current run history.", "error");
 				return;
 			}
 			const selection = await openCompareRunPicker(ctx, history);
 			if (selection?.action === "selected") await inspectCompareRunInTui(ctx, history, selection.runId);
 			return;
 		}
-		notify(ctx, selectedRun ? formatBestOfNRunDetail(history, selectedRun) : formatBestOfNRunHistory(history), selectedRun || !options.runId ? "info" : "error");
+		notify(ctx, selectedRun ? formatBestOfNRunDetail(history, selectedRun) : missingRunMessage ?? formatBestOfNRunHistory(history), selectedRun || !options.runId ? "info" : "error");
 	}
 
 	function parseComparePresetsArgs(args: string): { plain: boolean } {

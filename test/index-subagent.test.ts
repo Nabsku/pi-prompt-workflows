@@ -46,6 +46,7 @@ class FakePi {
 	setModelCalls: string[] = [];
 	userMessages: string[] = [];
 	customMessages: any[] = [];
+	notifications: Array<{ message: string; type: string }> = [];
 
 	registerMessageRenderer() {}
 	registerCommand(name: string, command: FakeCommand) { this.commands.set(name, command); }
@@ -130,7 +131,7 @@ function createContext(cwd: string, pi: FakePi) {
 				isUsingOAuth() { return false; },
 			},
 			ui: {
-				notify() {},
+				notify(message: string, type: string) { pi.notifications.push({ message, type }); },
 				onTerminalInput() { return () => {}; },
 				setStatus() {},
 				setWorkingMessage() {},
@@ -724,6 +725,51 @@ test("compare prompt expands count, applies taskSuffix, and runs a final applier
 		assert.match(failedReviewerArtifact, /Error: quota/);
 		assert.match(failedReviewerArtifact, /Assistant output:\nPartial reviewer draft/);
 		assert.equal(existsSync(join(runDir, "final-applier.md")), true);
+	});
+});
+
+test("compare preset maxModelCalls includes final applier before execution", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(root, ".pi", "agent"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(root, ".pi", "agent", "best-of-n-presets.json"), JSON.stringify({
+			presets: {
+				tiny: {
+					maxModelCalls: 2,
+					workers: [{ agent: "delegate" }],
+					reviewers: [{ agent: "reviewer" }],
+				},
+			},
+		}));
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "compare.md"),
+			[
+				"---",
+				"bestOfN:",
+				"  preset: tiny",
+				"  finalApplier:",
+				"    agent: reviewer",
+				"  worktree: true",
+				"---",
+				"Fix: $@",
+			].join("\n"),
+		);
+
+		const pi = new FakePi();
+		const { ctx } = createContext(cwd, pi);
+		ctx.hasUI = true;
+		let subagentRequests = 0;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, () => { subagentRequests++; });
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("compare")!.handler("bug", ctx);
+
+		assert.equal(subagentRequests, 0);
+		assert.equal(pi.userMessages.length, 0);
+		assert.equal(pi.notifications.at(-1)?.type, "error");
+		assert.match(pi.notifications.at(-1)?.message ?? "", /requested 3 model call\(s\), but preset allows 2/);
 	});
 });
 

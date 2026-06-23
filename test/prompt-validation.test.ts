@@ -596,14 +596,14 @@ test("validatePromptTemplates rejects best-of-N preset references that exceed ma
 		const cwd = join(root, "project");
 		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 		mkdirSync(join(cwd, ".pi"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "compare.md"), "---\nbestOfN:\n  preset: capped\n---\n$@");
-		writeFileSync(join(cwd, ".pi", "best-of-n-presets.json"), JSON.stringify({ presets: { capped: { maxModelCalls: 2, workers: [{ agent: "delegate", count: 2 }] } } }));
+		writeFileSync(join(cwd, ".pi", "prompts", "compare.md"), "---\nbestOfN:\n  preset: capped\n  worktree: true\n  finalApplier:\n    agent: reviewer\n---\n$@");
+		writeFileSync(join(cwd, ".pi", "best-of-n-presets.json"), JSON.stringify({ presets: { capped: { maxModelCalls: 2, workers: [{ agent: "delegate" }] } } }));
 
 		const result = validatePromptTemplates(cwd);
 
 		assert.equal(result.ok, false);
 		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "best-of-n-preset-cap-exceeded"), true);
-		assert.match(result.diagnostics.find((diagnostic) => diagnostic.code === "best-of-n-preset-cap-exceeded")?.message ?? "", /expanded worker\/reviewer calls \(3\) exceed maxModelCalls \(2\)/);
+		assert.match(result.diagnostics.find((diagnostic) => diagnostic.code === "best-of-n-preset-cap-exceeded")?.message ?? "", /expanded model calls \(3\) exceed maxModelCalls \(2\)/);
 	});
 });
 

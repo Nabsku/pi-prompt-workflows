@@ -2,14 +2,12 @@ import { lstatSync, realpathSync } from "node:fs";
 import { join, resolve as resolvePath } from "node:path";
 import { extractLineupOverrides, extractSubagentOverride, parseCommandArgs, substituteArgs, type LineupOverrideAction } from "./args.js";
 import { applyPresetDefaultModel, loadBestOfNPresetCatalog } from "./best-of-n-presets.js";
+import { DEFAULT_COMPARE_FINAL_APPLIER_TASK, DEFAULT_COMPARE_REVIEWER_TASK } from "./compare-defaults.js";
 import type { DelegationLineupSlot, PromptLoaderDiagnostic, PromptRootKind, PromptSource, PromptWithModel } from "./prompt-loader.js";
 import { expandCwdPath } from "./prompt-loader.js";
 import { DEFAULT_SUBAGENT_NAME } from "./subagent-runtime.js";
 
 export const BEST_OF_N_PREFLIGHT_SCHEMA_VERSION = 1;
-
-const DEFAULT_COMPARE_REVIEWER_TASK = "Review the worker variants and produce findings only.\nRequired output:\n1. Summarize concrete strengths with patch/diff evidence, including worktree change summaries when present.\n2. Call out concrete correctness risks and regression risks.\n3. Recommend whether to apply one variant, synthesize several variants, or decline to apply.";
-const DEFAULT_COMPARE_FINAL_APPLIER_TASK = "Apply the best implementation from the worker variants and reviewer findings.";
 
 export type BestOfNPreflightSchemaVersion = typeof BEST_OF_N_PREFLIGHT_SCHEMA_VERSION;
 export type BestOfNPreflightDiagnosticSeverity = "warning" | "error";

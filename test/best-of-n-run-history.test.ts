@@ -301,6 +301,26 @@ test("compare-runs --plain writes to stdout", async () => {
 	});
 });
 
+test("compare-runs --plain reports explicit missing run IDs", async () => {
+	await withAdversarialFixtureDir(async (root) => {
+		writeCompareRun(root, "2026-06-22-real-abcdef12", { keepArtifacts: true });
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const ctx = {
+			cwd: root,
+			hasUI: true,
+			model: { provider: "anthropic", id: "claude" },
+			ui: { notify(message: string, type: string) { pi.customMessages.push({ message, type }); } },
+			isIdle() { return false; },
+			async waitForIdle() {},
+			modelRegistry: { getAll() { return []; }, getAvailable() { return []; } },
+		};
+		const output = await captureStdout(() => pi.commands.get("compare-runs")!.handler("--plain --id missing-run", ctx));
+		assert.match(output, /Compare run "missing-run" was not found/);
+		assert.doesNotMatch(output, /# Compare run history/);
+	});
+});
+
 function createCompareRunTuiContext(root: string, pi: FakePi) {
 	return {
 		cwd: root,
@@ -392,13 +412,18 @@ test("compare-runs TUI picker ignores malformed and non-catalog UI return values
 	}
 });
 
-test("compare run TUI components filter runs and expose read-only detail panes", async () => {
+test("compare run TUI components filter runs, sanitize chrome, and expose read-only detail panes", async () => {
 	await withAdversarialFixtureDir((root) => {
+		writeCompareRun(root, `2026-06-21-${terminalControlPayload}-abcdef12`, { keepArtifacts: true });
 		writeCompareRun(root, "2026-06-22-alpha-abcdef12", { keepArtifacts: true });
 		writeCompareRun(root, "2026-06-23-beta-abcdef12", { keepArtifacts: true, reportText: "# Beta\n\n- Status: complete\n" });
 		const result = collectBestOfNRunHistory(root);
 		const doneValues: unknown[] = [];
 		const picker = new CompareRunPicker(buildCompareRunCatalog(result), undefined, undefined, undefined, (value) => doneValues.push(value));
+
+		const initialPickerOutput = picker.render(200).join("\n");
+		assert.doesNotMatch(initialPickerOutput, /[\u001b\u0007\u009b]/);
+		assert.match(initialPickerOutput, /bad-name\\u0007-c1/);
 
 		for (const ch of "beta") picker.handleInput(ch);
 		assert.match(picker.render(90).join("\n"), /2026-06-23-beta-abcdef12/);

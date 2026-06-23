@@ -324,7 +324,8 @@ function presetExpandedCallCount(preset: ResolvedBestOfNPreset, prompt: PromptWi
 	const workerSlots = preset.workers ?? prompt.workers;
 	const reviewerSlots = preset.reviewers ?? prompt.reviewers;
 	return (workerSlots && workerSlots.length > 0 ? expandedSlotCount(workerSlots) : 1)
-		+ (reviewerSlots && reviewerSlots.length > 0 ? expandedSlotCount(reviewerSlots) : 1);
+		+ (reviewerSlots && reviewerSlots.length > 0 ? expandedSlotCount(reviewerSlots) : 1)
+		+ (prompt.finalApplier ? 1 : 0);
 }
 
 function validateComparePrompts(cwd: string, result: PromptValidationResult, prompts: ReturnType<typeof loadPromptsWithModel>["prompts"]) {
@@ -360,7 +361,7 @@ function validateComparePrompts(cwd: string, result: PromptValidationResult, pro
 							"best-of-n-preset-cap-exceeded",
 							prompt.filePath,
 							prompt.source,
-							`Prompt template ${prompt.filePath} references best-of-N preset ${JSON.stringify(prompt.preset)}, but its expanded worker/reviewer calls (${modelCalls}) exceed maxModelCalls (${preset.maxModelCalls}).`,
+							`Prompt template ${prompt.filePath} references best-of-N preset ${JSON.stringify(prompt.preset)}, but its expanded model calls (${modelCalls}) exceed maxModelCalls (${preset.maxModelCalls}).`,
 						),
 					);
 				}
