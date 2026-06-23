@@ -12,6 +12,16 @@ bestOfN:
   #   /compare-runs
   #   /compare-runs --plain --id <run-id>
   # Project presets override same-named user presets, but execution asks for session approval.
+  # JSON and YAML preset files are supported. Minimal YAML example:
+  #   presets:
+  #     quick:
+  #       defaultModel: openai-codex/gpt-5.4-mini:low
+  #       maxModelCalls: 3 # expanded workers + reviewers + optional final applier
+  #       workers:
+  #         - agent: delegate
+  #           count: 2
+  #       reviewers:
+  #         - agent: reviewer
   # preset: quick
   # Workers run in temporary worktrees; the final apply step edits the current branch.
   worktree: true
