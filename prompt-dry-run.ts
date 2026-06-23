@@ -79,6 +79,7 @@ export interface PromptDryRunError {
 	error: string;
 	warnings: string[];
 	runtime?: Partial<PromptDryRunRuntimeMetadata>;
+	comparePreflight?: BestOfNPreflight;
 }
 
 export type PromptDryRunResult = PromptDryRunSuccess | PromptDryRunError;
@@ -209,8 +210,9 @@ function errorResult(
 	error: string,
 	warnings: string[] = [],
 	runtime?: Partial<PromptDryRunRuntimeMetadata>,
+	comparePreflight?: BestOfNPreflight,
 ): PromptDryRunError {
-	return { status: "error", promptName: prompt.name, error, warnings, ...(runtime ? { runtime } : {}) };
+	return { status: "error", promptName: prompt.name, error, warnings, ...(runtime ? { runtime } : {}), ...(comparePreflight ? { comparePreflight } : {}) };
 }
 
 function hasCompareLineup(prompt: PromptWithModel): boolean {
@@ -358,7 +360,7 @@ export async function createPromptDryRun(
 		});
 		warnings.push(...preflight.diagnostics.filter((diagnostic) => diagnostic.severity === "warning").map((diagnostic) => diagnostic.message));
 		const errors = preflight.diagnostics.filter((diagnostic) => diagnostic.severity === "error").map((diagnostic) => diagnostic.message);
-		if (errors.length > 0) return errorResult(prompt, errors.join("\n"), warnings, runtime);
+		if (errors.length > 0) return errorResult(prompt, errors.join("\n"), warnings, runtime, preflight);
 		return {
 			status: "ok",
 			promptName: prompt.name,

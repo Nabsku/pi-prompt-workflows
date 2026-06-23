@@ -7,6 +7,7 @@ import {
 	PromptDryRunPicker,
 	type PromptTemplateCatalogItem,
 } from "../prompt-dry-run-tui.js";
+import type { BestOfNPreflight } from "../best-of-n-preflight.js";
 import type { PromptDryRunResult } from "../prompt-dry-run.js";
 
 const catalog: PromptTemplateCatalogItem[] = [
@@ -63,6 +64,28 @@ const okResult: PromptDryRunResult = {
 	details: { skills: [] },
 	runtime: { cwd: "/repo", restore: false, boomerang: false },
 };
+
+function comparePreflight(): BestOfNPreflight {
+	return {
+		schemaVersion: 1,
+		prompt: { name: "best-of-n", description: "", source: "project", rootKind: "prompts", filePath: "/repo/.pi/prompts/best-of-n.md" },
+		compareCwd: { resolved: "/repo", source: "context-cwd", requested: "/repo" },
+		slots: {
+			workers: [{ kind: "worker", index: 1, source: "prompt", agent: "worker", cwd: "/repo", effectiveModelLabel: "anthropic/claude-sonnet-4" }],
+			reviewers: [{ kind: "reviewer", index: 1, source: "default", agent: "reviewer", cwd: "/repo", effectiveModelLabel: "anthropic/claude-sonnet-4" }],
+		},
+		models: { base: "anthropic/claude-sonnet-4", workers: ["anthropic/claude-sonnet-4"], reviewers: ["anthropic/claude-sonnet-4"] },
+		task: { raw: "fix bug", parsed: ["fix", "bug"], renderedTask: "fix bug" },
+		policies: {
+			worktree: { enabled: false, requiredByFinalApplier: false, workerCwdPolicy: "independent" },
+			finalApplier: { enabled: false, requiresWorktree: false },
+			commit: { mode: "none" },
+		},
+		artifacts: { report: { willWrite: true, root: "/repo/.pi/runs/best-of-n" }, rawArtifacts: { keepArtifacts: false, expectedFiles: ["worker-1.md", "reviewer-1.md"] } },
+		callCount: { workers: 1, reviewers: 1, finalApplier: 0, total: 2, capStatus: "uncapped" },
+		diagnostics: [],
+	};
+}
 
 const plainReport = [
 	"# Prompt dry-run: review",
@@ -498,4 +521,15 @@ test("inspector treats empty skillContent as present --show-skills data", () => 
 	assert.match(viewModel.panes.skills, /- empty \(\/repo\/\.pi\/skills\/empty\/SKILL\.md\)/);
 	assert.doesNotMatch(viewModel.panes.skills, /full skill content hidden|--show-skills/i);
 	assert.doesNotMatch(text, /full skill content hidden|--show-skills/i);
+});
+
+test("inspector opens on Compare pane by default when compare preflight exists", () => {
+	const result: PromptDryRunResult = okResult.status === "ok" ? { ...okResult, warnings: [], comparePreflight: comparePreflight() } : okResult;
+	const inspector = new PromptDryRunInspector(createPromptDryRunTuiViewModel(result, plainReport));
+	const text = renderText(inspector.render(120));
+
+	assert.match(text, /\[Compare\]/);
+	assert.match(text, /Verdict: ready to run/);
+	assert.match(text, /Execute: \/best-of-n fix bug/);
+	assert.match(text, /Evidence retention: summary report only\. Add --keep-artifacts/);
 });

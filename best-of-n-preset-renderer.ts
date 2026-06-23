@@ -11,16 +11,52 @@ function formatMaybe(value: unknown): string {
 	return sanitizeInline(String(value));
 }
 
+function formatUsePresetCommand(promptName: string, presetName: string, dryRun: boolean): string {
+	const command = dryRun ? "dry-run-prompt" : promptName;
+	const promptArg = dryRun ? `${promptName} ` : "";
+	const plain = dryRun ? " --plain" : "";
+	return `/${command} ${promptArg}--preset ${presetName}${plain} <task>`;
+}
+
+function trustDescription(entry: BestOfNPresetDiscoveryEntry): string {
+	if (entry.source === "project") {
+		return "project preset; approval is required for this compare cwd/session. Project presets can choose worker/reviewer agents, models, counts, cost, and concurrency.";
+	}
+	return "user config; no project preset approval required. This does not mean the preset is audited safe.";
+}
+
+function promptPolicyDescription(): string {
+	return "prompt still owns task, cwd/worktree, final-applier, and commit policy.";
+}
+
+function formatLineupSlot(slot: { agent?: string; model?: string; count?: number }, index: number): string {
+	const repeat = slot.count && slot.count > 1 ? `${slot.count}x ` : "";
+	const agent = sanitizeInline(slot.agent ?? "default");
+	const model = slot.model ? ` @ ${sanitizeInline(slot.model)}` : "";
+	return `${index + 1}:${repeat}${agent}${model}`;
+}
+
+function formatLineup(slots: Array<{ agent?: string; model?: string; count?: number }> | undefined): string {
+	if (!slots || slots.length === 0) return "none";
+	return slots.map(formatLineupSlot).join("; ");
+}
+
 function formatPreset(entry: BestOfNPresetDiscoveryEntry): string[] {
 	const lines = [`## ${sanitizeInline(entry.name)}`];
 	lines.push(`- Source: ${sanitizeInline(entry.source)}`);
 	lines.push(`- Source file: ${sanitizeInline(entry.filePath)}`);
-	lines.push(`- Trust: ${sanitizeInline(entry.trustLabel)}`);
+	lines.push(`- Trust: ${sanitizeInline(trustDescription(entry))}`);
+	lines.push(`- Prompt policy: ${sanitizeInline(promptPolicyDescription())}`);
 	lines.push(`- Default model: ${formatMaybe(entry.defaultModel)}`);
 	lines.push(`- Max model calls: ${formatMaybe(entry.maxModelCalls)}`);
 	lines.push(`- Workers: ${entry.workerCount}`);
+	lines.push(`- Worker lineup: ${formatLineup(entry.preset.workers)}`);
 	lines.push(`- Reviewers: ${entry.reviewerCount}`);
+	lines.push(`- Reviewer lineup: ${formatLineup(entry.preset.reviewers)}`);
 	lines.push(`- Final applier: ${formatMaybe(entry.hasFinalApplier)}`);
+	lines.push("- Use:");
+	lines.push(`  - ${formatUsePresetCommand("best-of-n", entry.name, true)}`);
+	lines.push(`  - ${formatUsePresetCommand("best-of-n", entry.name, false)}`);
 	if (entry.description) lines.push(`- Description: ${sanitizeInline(entry.description)}`);
 	return lines;
 }

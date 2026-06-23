@@ -142,6 +142,13 @@ function createContext(cwd: string, pi: FakePi) {
 	};
 }
 
+function readOnlyCompareLineup(cwd: string) {
+	const runRoot = join(cwd, ".pi", "runs", "best-of-n");
+	const runDirs = readdirSync(runRoot);
+	assert.equal(runDirs.length, 1);
+	return JSON.parse(readFileSync(join(runRoot, runDirs[0]!, "lineup.json"), "utf8"));
+}
+
 function respondWithDelegatedResult(pi: FakePi, setup?: (request: any) => void) {
 	pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
 		const request = payload as any;
@@ -1293,6 +1300,11 @@ test("compare prompts handle partial-success policy, final-applier fallback, ove
 				assert(pi: FakePi, phase: number) {
 					assert.equal(phase, 1);
 					assert.equal(pi.userMessages.length, 0);
+					assert.equal(pi.setModelCalls.length, 0);
+					const lineup = readOnlyCompareLineup(join(root, "compare-all-workers-fail"));
+					assert.equal(lineup.status, "worker-failed");
+					assert.equal(lineup.workers.length, 2);
+					assert.match(lineup.failureSummary, /all worker slots failed/);
 				},
 			},
 			{
@@ -1329,6 +1341,11 @@ test("compare prompts handle partial-success policy, final-applier fallback, ove
 				assert(pi: FakePi, phase: number) {
 					assert.equal(phase, 2);
 					assert.equal(pi.userMessages.length, 0);
+					assert.equal(pi.setModelCalls.length, 0);
+					const lineup = readOnlyCompareLineup(join(root, "compare-no-reviewer-success"));
+					assert.equal(lineup.status, "reviewer-failed");
+					assert.equal(lineup.reviewers.length, 2);
+					assert.match(lineup.failureSummary, /all reviewer slots failed/);
 				},
 			},
 			{
@@ -1427,6 +1444,40 @@ test("compare prompts handle partial-success policy, final-applier fallback, ove
 					assert.equal(pi.userMessages.length, 1);
 					assert.match(pi.userMessages[0]!, /\[Compare apply complete: compare-final-applier-override\]/);
 					assert.match(pi.userMessages[0]!, /Runtime final apply/);
+				},
+			},
+			{
+				name: "compare-final-applier-empty",
+				command: "compare-final-applier-empty fix",
+				content: [
+					"---",
+					"bestOfN:",
+					"  workers:",
+					"    - agent: delegate",
+					"  reviewers:",
+					"    - agent: reviewer",
+					"  finalApplier:",
+					"    agent: reviewer",
+					"  worktree: true",
+					"---",
+					"$@",
+				].join("\n"),
+				handle(_request: any, phase: number) {
+					if (phase === 1) {
+						return { messages: [], parallelResults: [{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "worker" }] }], isError: false }], isError: false };
+					}
+					if (phase === 2) {
+						return { messages: [], parallelResults: [{ agent: "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: "review" }] }], isError: false }], isError: false };
+					}
+					return { messages: [], isError: false };
+				},
+				assert(pi: FakePi, phase: number) {
+					assert.equal(phase, 3);
+					assert.equal(pi.userMessages.length, 0);
+					assert.equal(pi.setModelCalls.length, 0);
+					const lineup = readOnlyCompareLineup(join(root, "compare-final-applier-empty"));
+					assert.equal(lineup.status, "final-applier-failed");
+					assert.match(lineup.failureSummary, /final applier failed before returning text/);
 				},
 			},
 			{
@@ -1601,9 +1652,11 @@ test("project best-of-N preset approval is scoped to session_start", async () =>
 		const pi = new FakePi();
 		const { ctx } = createContext(cwd, pi);
 		let confirmCount = 0;
+		let confirmMessage = "";
 		ctx.hasUI = true;
-		ctx.ui.confirm = async () => {
+		ctx.ui.confirm = async (_title: string, message: string) => {
 			confirmCount++;
+			confirmMessage = message;
 			return true;
 		};
 		promptModelExtension(pi as never);
@@ -1612,6 +1665,7 @@ test("project best-of-N preset approval is scoped to session_start", async () =>
 		await pi.emit("session_start", {}, ctx);
 		await pi.commands.get("compare")!.handler("first", ctx);
 		assert.equal(confirmCount, 1);
+		assert.match(confirmMessage, new RegExp(`Approve project best-of-N presets for compare cwd ${cwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} in this session`));
 
 		await pi.emit("session_start", {}, ctx);
 		await pi.commands.get("compare")!.handler("second", ctx);
@@ -1665,6 +1719,36 @@ test("project best-of-N presets resolve from compare cwd", async () => {
 		await pi.commands.get("parallel-patch-compare-at-path")!.handler(`${target} implement it`, ctx);
 		assert.equal(confirmCount, 1);
 		assert.equal(firstTaskCount, 2);
+	});
+});
+
+test("missing selected best-of-N preset reports compare cwd, searched paths, yaml paths, and invalid project file", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "compare.md"), "---\nbestOfN:\n  preset: missing\n---\n$@");
+		writeFileSync(join(cwd, ".pi", "best-of-n-presets.yaml"), "{ not yaml");
+
+		const pi = new FakePi();
+		const { ctx } = createContext(cwd, pi);
+		ctx.hasUI = true;
+		promptModelExtension(pi as never);
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, () => {
+			assert.fail("missing preset should reject before delegated execution");
+		});
+
+		await pi.emit("session_start", {}, ctx);
+		await pi.commands.get("compare")!.handler("fix it", ctx);
+
+		const messages = pi.notifications.map((notification) => notification.message).join("\n");
+		assert.match(messages, /Best-of-N preset `missing` was not found/);
+		assert.match(messages, new RegExp(`Effective compare cwd: ${cwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+		assert.match(messages, /best-of-n-presets\.json/);
+		assert.match(messages, /best-of-n-presets\.yaml/);
+		assert.match(messages, /best-of-n-presets\.yml/);
+		assert.match(messages, /Invalid project preset file: Skipping best-of-N presets file/);
+		assert.equal(pi.userMessages.length, 0);
 	});
 });
 
