@@ -174,6 +174,21 @@ test("unknown template reports not found error", async () => {
 	});
 });
 
+test("--plain prints complete dry-run error reports to stdout", async () => {
+	await setup(async (_root, cwd, pi, ctx) => {
+		writePrompt(cwd, "chainy", "---\nmodel: anthropic/claude-sonnet-4-20250514\nchain: review -> fix\n---\nignored");
+		await pi.emit("session_start", {}, ctx);
+
+		const output = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("chainy --plain", ctx));
+
+		assert.equal(pi.notifications.length, 0);
+		assert.match(output, /# Prompt dry-run: chainy/);
+		assert.match(output, /Status: error/);
+		assert.match(output, /Dry-run for chain templates is not supported/);
+		assertNoExecutionSideEffects(pi);
+	});
+});
+
 test("print-prompt writes dry-run report to stdout instead of LLM history and has no execution side effects", async () => {
 	await setup(async (_root, cwd, pi, ctx) => {
 		mkdirSync(join(cwd, ".pi", "prompt-partials"), { recursive: true });

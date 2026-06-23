@@ -6,6 +6,8 @@ export interface BestOfNRunHistoryOptions {
 	maxBytes?: number;
 	plain?: boolean;
 	runId?: string;
+	tui?: boolean;
+	errors?: string[];
 }
 
 export interface BestOfNArtifactEntry {
@@ -349,23 +351,50 @@ export function parseBestOfNRunHistoryArgs(args: string): BestOfNRunHistoryOptio
 	let limit: number | undefined;
 	let plain = false;
 	let runId: string | undefined;
+	let tui = false;
+	const errors: string[] = [];
 	for (let index = 0; index < tokens.length; index += 1) {
 		const token = tokens[index];
 		if (token === "--plain") {
 			plain = true;
+		} else if (token === "--tui") {
+			tui = true;
 		} else if ((token === "--run" || token === "--id") && tokens[index + 1]) {
-			runId = tokens[index + 1];
-			index += 1;
+			const value = tokens[index + 1]!;
+			if (value.startsWith("--")) errors.push(`Missing value for ${token}.`);
+			else {
+				runId = value;
+				index += 1;
+			}
+		} else if (token === "--run" || token === "--id") {
+			errors.push(`Missing value for ${token}.`);
+		} else if (token === "--run=" || token === "--id=") {
+			errors.push(`Missing value for ${token.slice(0, token.indexOf("="))}.`);
 		} else if (token.startsWith("--run=")) {
 			runId = token.slice("--run=".length);
 		} else if (token.startsWith("--id=")) {
 			runId = token.slice("--id=".length);
 		} else if (token === "--limit" && tokens[index + 1]) {
-			limit = Number.parseInt(tokens[index + 1]!, 10);
-			index += 1;
+			const value = tokens[index + 1]!;
+			if (value.startsWith("--")) errors.push("Missing value for --limit.");
+			else {
+				limit = Number.parseInt(value, 10);
+				if (!/^\d+$/.test(value) || !Number.isFinite(limit) || limit < 1) errors.push(`Invalid --limit ${JSON.stringify(value)}: expected a positive integer.`);
+				index += 1;
+			}
+		} else if (token === "--limit") {
+			errors.push("Missing value for --limit.");
+		} else if (token === "--limit=") {
+			errors.push("Missing value for --limit.");
 		} else if (token.startsWith("--limit=")) {
-			limit = Number.parseInt(token.slice("--limit=".length), 10);
+			const value = token.slice("--limit=".length);
+			limit = Number.parseInt(value, 10);
+			if (!/^\d+$/.test(value) || !Number.isFinite(limit) || limit < 1) errors.push(`Invalid --limit ${JSON.stringify(value)}: expected a positive integer.`);
+		} else if (token.startsWith("--")) {
+			errors.push(`Unknown /compare-runs option ${JSON.stringify(token)}.`);
+		} else {
+			errors.push(`Unexpected /compare-runs argument ${JSON.stringify(token)}.`);
 		}
 	}
-	return { limit, plain, runId };
+	return { limit, plain, runId, tui, errors };
 }
