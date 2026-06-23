@@ -1,7 +1,8 @@
-import { decodeKittyPrintable, Key, matchesKey, truncateToWidth, type Component } from "@earendil-works/pi-tui";
+import { decodeKittyPrintable, Key, matchesKey, type Component } from "@earendil-works/pi-tui";
 import type { PromptDryRunResult } from "./prompt-dry-run.js";
 import type { PromptIncludeGraph, PromptIncludeGraphEdge, PromptIncludeGraphNode } from "./prompt-includes.js";
 import type { PromptLoaderDiagnostic } from "./prompt-loader.js";
+import { sanitizeForTerminal, truncateForTerminalWidth } from "./render-safe.js";
 
 export interface PromptTemplateCatalogItem {
 	name: string;
@@ -28,23 +29,15 @@ export interface PromptDryRunTuiViewModel {
 	};
 }
 
-export interface PromptDryRunTuiResult {
-	action: "closed" | "selected" | "back";
-	templateName?: string;
-}
+export type PromptDryRunTuiResult =
+	| { action: "closed" }
+	| { action: "back" }
+	| { action: "selected"; templateName: string };
 
-const ANSI_ESCAPE_PATTERN = /\u001b(?:\][^\u0007]*(?:\u0007|\u001b\\)|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])/g;
-const CONTROL_PATTERN = /[\u0000-\u001f\u007f-\u009f]/g;
 const PICKER_VISIBLE_ROWS = 18;
 
-function sanitizeText(value: string): string {
-	return value
-		.replace(ANSI_ESCAPE_PATTERN, "")
-		.replace(CONTROL_PATTERN, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
-}
-
 function lineSafe(line: string, width: number): string {
-	return truncateToWidth(sanitizeText(line), Math.max(1, width));
+	return truncateForTerminalWidth(line, Math.max(1, width), { marker: "…" });
 }
 
 function linesSafe(lines: string[], width: number): string[] {
@@ -150,13 +143,13 @@ function formatIncludes(result: PromptDryRunResult): string {
 }
 
 export function createPromptDryRunTuiViewModel(result: PromptDryRunResult, plainReport: string): PromptDryRunTuiViewModel {
-	const warnings = result.warnings.length ? result.warnings.map((warning) => `- ${warning}`).join("\n") : "No warnings.";
-	const prompt = result.status === "ok" ? `# Prompt body\n${result.content}` : `# Error\n${result.error}`;
+	const warnings = result.warnings.length ? result.warnings.map((warning) => `- ${sanitizeForTerminal(warning)}`).join("\n") : "No warnings.";
+	const prompt = result.status === "ok" ? `# Prompt body\n${sanitizeForTerminal(result.content, { preserveLineBreaks: true })}` : `# Error\n${sanitizeForTerminal(result.error, { preserveLineBreaks: true })}`;
 	const metadata = [
-		`Prompt: ${result.promptName}`,
+		`Prompt: ${sanitizeForTerminal(result.promptName)}`,
 		`Status: ${result.status}`,
-		`Model: ${modelLabel(result)}`,
-		...(result.status === "ok" ? [`Arguments: ${result.args.length ? result.args.join(" ") : "(none)"}`] : []),
+		`Model: ${sanitizeForTerminal(modelLabel(result))}`,
+		...(result.status === "ok" ? [`Arguments: ${result.args.length ? result.args.map((arg) => sanitizeForTerminal(arg)).join(" ") : "(none)"}`] : []),
 		...formatRuntime(result),
 	].join("\n");
 	return {
@@ -302,11 +295,12 @@ export class PromptDryRunInspector implements Component {
 	}
 
 	handleInput(data: string): void {
-		if (matchesKey(data, "q") || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
+		const printable = decodeKittyPrintable(data);
+		if (data === "q" || printable === "q" || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
 			this.done?.({ action: "closed" });
 			return;
 		}
-		if (matchesKey(data, "b")) {
+		if (data === "b" || printable === "b") {
 			this.done?.({ action: "back" });
 			return;
 		}
@@ -315,15 +309,15 @@ export class PromptDryRunInspector implements Component {
 			this.scroll = 0;
 			return;
 		}
-		const paneKey = Array.from({ length: PANE_NAMES.length }, (_, index) => String(index + 1)).find((key) => matchesKey(data, key));
+		const paneKey = Array.from({ length: PANE_NAMES.length }, (_, index) => String(index + 1)).find((key) => data === key || printable === key);
 		if (paneKey) {
 			this.paneIndex = Number(paneKey) - 1;
 			this.scroll = 0;
 			return;
 		}
-		if (matchesKey(data, "j") || matchesKey(data, Key.down)) {
+		if (data === "j" || printable === "j" || matchesKey(data, Key.down)) {
 			this.scroll = Math.min(this.scroll + 1, Math.max(0, this.paneText().split("\n").length - 1));
-		} else if (matchesKey(data, "k") || matchesKey(data, Key.up)) {
+		} else if (data === "k" || printable === "k" || matchesKey(data, Key.up)) {
 			this.scroll = Math.max(0, this.scroll - 1);
 		}
 	}

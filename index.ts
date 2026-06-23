@@ -2126,15 +2126,45 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		return await ui.custom((tui, theme, _layout, done) => new PromptDryRunInspector(createPromptDryRunTuiViewModel(result, plainReport), tui, theme, done));
 	}
 
-	async function openPromptDryRunPicker(ctx: ExtensionCommandContext, initialTemplateName?: string): Promise<PromptDryRunTuiResult | unknown> {
+	async function openPromptDryRunPicker(ctx: ExtensionCommandContext, initialTemplateName?: string): Promise<PromptDryRunTuiResult | undefined> {
 		const ui = (ctx as ExtensionCommandContext & {
 			ui: { custom: (factory: (...args: any[]) => unknown, options?: unknown) => Promise<PromptDryRunTuiResult | unknown> | PromptDryRunTuiResult | unknown };
 		}).ui;
-		return await ui.custom((tui, theme, _layout, done) => new PromptDryRunPicker(buildPromptDryRunCatalog(), initialTemplateName, tui, theme, done));
+		const catalog = buildPromptDryRunCatalog();
+		const result = await ui.custom((tui, theme, _layout, done) => new PromptDryRunPicker(catalog, initialTemplateName, tui, theme, done));
+		return parsePromptDryRunPickerAction(result, catalog);
 	}
 
 	function notifyDryRunError(ctx: ExtensionCommandContext, message: string) {
 		notify(ctx, message, "error");
+	}
+
+	function getOwnStringProperty(value: unknown, key: string): string | undefined {
+		if (!value || typeof value !== "object") return undefined;
+		const descriptor = Object.getOwnPropertyDescriptor(value, key);
+		if (!descriptor || !("value" in descriptor) || typeof descriptor.value !== "string") return undefined;
+		return descriptor.value;
+	}
+
+	type PromptDryRunInspectorAction = { action: "back" } | { action: "closed" };
+
+	function parsePromptDryRunInspectorAction(value: unknown): PromptDryRunInspectorAction | undefined {
+		const action = getOwnStringProperty(value, "action");
+		if (action === "back") return { action: "back" };
+		if (action === "closed") return { action: "closed" };
+		return undefined;
+	}
+
+	function parsePromptDryRunPickerAction(value: unknown, catalog: PromptTemplateCatalogItem[]): PromptDryRunTuiResult | undefined {
+		const action = getOwnStringProperty(value, "action");
+		if (action === "closed") return { action: "closed" };
+		if (action === "back") return { action: "back" };
+		if (action !== "selected") return undefined;
+
+		const templateName = getOwnStringProperty(value, "templateName");
+		if (!templateName) return undefined;
+		if (!catalog.some((item) => item.name === templateName)) return undefined;
+		return { action: "selected", templateName };
 	}
 
 	async function inspectPromptDryRunInTui(ctx: ExtensionCommandContext, promptName: string, rawArgs: string, showSkills: boolean): Promise<void> {
@@ -2161,11 +2191,11 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 
 		for (const warning of result.warnings) notify(ctx, warning, "warning");
-		const action = await openPromptDryRunInspector(ctx, result, plainReport);
-		if (action && typeof action === "object" && (action as PromptDryRunTuiResult).action === "back") {
+		const action = parsePromptDryRunInspectorAction(await openPromptDryRunInspector(ctx, result, plainReport));
+		if (action?.action === "back") {
 			const selection = await openPromptDryRunPicker(ctx, result.promptName);
-			if (selection && typeof selection === "object" && (selection as PromptDryRunTuiResult).action === "selected" && (selection as PromptDryRunTuiResult).templateName) {
-				await inspectPromptDryRunInTui(ctx, (selection as PromptDryRunTuiResult).templateName, rawArgs, showSkills);
+			if (selection?.action === "selected") {
+				await inspectPromptDryRunInTui(ctx, selection.templateName, rawArgs, showSkills);
 			}
 		}
 	}
@@ -2178,8 +2208,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		if (!parsed.promptName) {
 			if (useTui) {
 				const selection = await openPromptDryRunPicker(ctx);
-				if (selection && typeof selection === "object" && (selection as PromptDryRunTuiResult).action === "selected" && (selection as PromptDryRunTuiResult).templateName) {
-					await inspectPromptDryRunInTui(ctx, (selection as PromptDryRunTuiResult).templateName, parsed.remainingArgs, parsed.showSkills);
+				if (selection?.action === "selected") {
+					await inspectPromptDryRunInTui(ctx, selection.templateName, parsed.remainingArgs, parsed.showSkills);
 				}
 				return;
 			}
@@ -2211,11 +2241,11 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 		for (const warning of result.warnings) notify(ctx, warning, "warning");
 		if (useTui) {
-			const action = await openPromptDryRunInspector(ctx, result, plainReport);
-			if (action && typeof action === "object" && (action as PromptDryRunTuiResult).action === "back") {
+			const action = parsePromptDryRunInspectorAction(await openPromptDryRunInspector(ctx, result, plainReport));
+			if (action?.action === "back") {
 				const selection = await openPromptDryRunPicker(ctx, result.promptName);
-				if (selection && typeof selection === "object" && (selection as PromptDryRunTuiResult).action === "selected" && (selection as PromptDryRunTuiResult).templateName) {
-					await inspectPromptDryRunInTui(ctx, (selection as PromptDryRunTuiResult).templateName, parsed.remainingArgs, parsed.showSkills);
+				if (selection?.action === "selected") {
+					await inspectPromptDryRunInTui(ctx, selection.templateName, parsed.remainingArgs, parsed.showSkills);
 				}
 			}
 			return;

@@ -1,11 +1,22 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import promptModelExtension from "../index.js";
 import { collectBestOfNRunHistory } from "../best-of-n-run-history.js";
 import { formatBestOfNRunHistory } from "../best-of-n-run-history-renderer.js";
+import {
+	compareRunRoot,
+	createSymlinkedArtifact,
+	createSymlinkedRunDir,
+	createSymlinkedRunRoot,
+	makeUnreadable,
+	supportsPermissionDenialFixtures,
+	terminalControlPayload,
+	withAdversarialFixtureDir,
+	writeCompareRun,
+} from "./fixtures/compare-adversarial-fixtures.js";
 
 class FakePi {
 	commands = new Map<string, { description: string; handler: (args: string, ctx: any) => Promise<void> }>();
@@ -24,11 +35,6 @@ class FakePi {
 	sendMessage(message: any) { this.customMessages.push(message); }
 }
 
-function withTempDir(run: (root: string) => void | Promise<void>) {
-	const root = mkdtempSync(join(tmpdir(), "pi-prompt-run-history-"));
-	return Promise.resolve(run(root)).finally(() => rmSync(root, { recursive: true, force: true }));
-}
-
 function captureStdout(run: () => Promise<void>) {
 	let output = "";
 	const original = process.stdout.write;
@@ -41,37 +47,8 @@ function captureStdout(run: () => Promise<void>) {
 	});
 }
 
-function writeRun(root: string, name: string, options: { keepArtifacts?: boolean; malformedLineup?: boolean; omitReport?: boolean } = {}) {
-	const runDir = join(root, ".pi", "runs", "best-of-n", name);
-	mkdirSync(runDir, { recursive: true });
-	if (!options.omitReport) {
-		writeFileSync(join(runDir, "report.md"), "# Best-of-N run: compare\n\n- Status: review-complete\n\n## Task\n\nship it\n");
-	}
-	writeFileSync(
-		join(runDir, "lineup.json"),
-		options.malformedLineup
-			? "{ nope"
-			: `${JSON.stringify({
-				prompt: "compare",
-				status: "review-complete",
-				preset: "strict-oracle",
-				commit: "ask",
-				keepArtifacts: options.keepArtifacts ?? false,
-				workers: [{ agent: "worker", effectiveModel: "anthropic/claude", effectiveTask: "work" }],
-				reviewers: [{ agent: "reviewer", effectiveModel: "anthropic/claude", effectiveTask: "review" }],
-				finalApplier: { agent: "applier", effectiveModel: "anthropic/claude", effectiveTask: "apply" },
-			}, null, 2)}\n`,
-	);
-	if (options.keepArtifacts) {
-		writeFileSync(join(runDir, "worker-1.md"), "worker output\n");
-		writeFileSync(join(runDir, "reviewer-1.md"), "reviewer output\n");
-		writeFileSync(join(runDir, "final-applier.md"), "final output\n");
-	}
-	return runDir;
-}
-
 test("collectBestOfNRunHistory renders useful empty state for missing run root", async () => {
-	await withTempDir((root) => {
+	await withAdversarialFixtureDir((root) => {
 		const result = collectBestOfNRunHistory(root);
 		assert.equal(result.entries.length, 0);
 		const output = formatBestOfNRunHistory(result);
@@ -80,9 +57,23 @@ test("collectBestOfNRunHistory renders useful empty state for missing run root",
 	});
 });
 
+test("adversarial fixture cleanup does not follow symlink escapes", async () => {
+	const external = mkdtempSync(join(tmpdir(), "pi-prompt-fixture-escape-"));
+	const marker = join(external, "marker.txt");
+	try {
+		writeFileSync(marker, "keep\n");
+		await withAdversarialFixtureDir((root) => {
+			createSymlinkedRunDir(root, "2026-06-22-linked-abcdef12", external);
+		});
+		assert.equal(existsSync(marker), true);
+	} finally {
+		rmSync(external, { recursive: true, force: true });
+	}
+});
+
 test("collectBestOfNRunHistory summarizes lineup, report path, and not-retained artifacts", async () => {
-	await withTempDir((root) => {
-		const runDir = writeRun(root, "2026-06-22-compare-abcdef12");
+	await withAdversarialFixtureDir((root) => {
+		const runDir = writeCompareRun(root, "2026-06-22-compare-abcdef12");
 		const result = collectBestOfNRunHistory(root);
 		assert.equal(result.entries.length, 1);
 		const [entry] = result.entries;
@@ -106,8 +97,8 @@ test("collectBestOfNRunHistory summarizes lineup, report path, and not-retained 
 });
 
 test("collectBestOfNRunHistory tolerates malformed lineup and missing report", async () => {
-	await withTempDir((root) => {
-		writeRun(root, "2026-06-22-bad-abcdef12", { malformedLineup: true, omitReport: true });
+	await withAdversarialFixtureDir((root) => {
+		writeCompareRun(root, "2026-06-22-bad-abcdef12", { malformedLineup: true, omitReport: true });
 		const result = collectBestOfNRunHistory(root);
 		assert.equal(result.entries.length, 1);
 		const output = formatBestOfNRunHistory(result);
@@ -118,14 +109,12 @@ test("collectBestOfNRunHistory tolerates malformed lineup and missing report", a
 });
 
 test("collectBestOfNRunHistory rejects symlinked run dirs and symlinked artifact files", async () => {
-	await withTempDir((root) => {
-		const realRun = writeRun(root, "2026-06-22-real-abcdef12", { keepArtifacts: true });
+	await withAdversarialFixtureDir((root) => {
+		const realRun = writeCompareRun(root, "2026-06-22-real-abcdef12", { keepArtifacts: true });
 		const escaped = join(root, "escaped.md");
 		writeFileSync(escaped, "secret\n");
-		rmSync(join(realRun, "worker-1.md"));
-		symlinkSync(escaped, join(realRun, "worker-1.md"));
-		const runRoot = join(root, ".pi", "runs", "best-of-n");
-		symlinkSync(root, join(runRoot, "2026-06-22-linked-abcdef12"));
+		createSymlinkedArtifact(realRun, "worker-1.md", escaped);
+		createSymlinkedRunDir(root, "2026-06-22-linked-abcdef12", root);
 
 		const result = collectBestOfNRunHistory(root);
 		assert.equal(result.entries.length, 1);
@@ -137,15 +126,14 @@ test("collectBestOfNRunHistory rejects symlinked run dirs and symlinked artifact
 });
 
 test("collectBestOfNRunHistory rejects symlinked run-root ancestors", async () => {
-	await withTempDir((root) => {
+	await withAdversarialFixtureDir((root) => {
 		const external = mkdtempSync(join(tmpdir(), "pi-prompt-run-history-external-"));
 		try {
-			mkdirSync(join(external, "runs"), { recursive: true });
-			symlinkSync(external, join(root, ".pi"));
-			writeRun(external, "2026-06-22-escaped-abcdef12");
+			writeCompareRun(external, "2026-06-22-escaped-abcdef12");
+			createSymlinkedRunRoot(root, compareRunRoot(external));
 			const result = collectBestOfNRunHistory(root);
 			assert.equal(result.entries.length, 0);
-			assert.match(result.diagnostics.join("\n"), /Run root component .*\.pi.* is a symlink/);
+			assert.match(result.diagnostics.join("\n"), /Run root component .*best-of-n.* is a symlink/);
 		} finally {
 			rmSync(external, { recursive: true, force: true });
 		}
@@ -153,9 +141,8 @@ test("collectBestOfNRunHistory rejects symlinked run-root ancestors", async () =
 });
 
 test("collectBestOfNRunHistory caps huge artifact reads", async () => {
-	await withTempDir((root) => {
-		const runDir = writeRun(root, "2026-06-22-huge-abcdef12", { keepArtifacts: true });
-		writeFileSync(join(runDir, "reviewer-1.md"), "x".repeat(128));
+	await withAdversarialFixtureDir((root) => {
+		writeCompareRun(root, "2026-06-22-huge-abcdef12", { keepArtifacts: true, hugeArtifactBytes: 128 });
 		const result = collectBestOfNRunHistory(root, { maxBytes: 16 });
 		const reviewer = result.entries[0]!.artifacts.find((artifact) => artifact.name === "reviewer-1.md");
 		assert.equal(reviewer?.status, "truncated");
@@ -164,8 +151,8 @@ test("collectBestOfNRunHistory caps huge artifact reads", async () => {
 });
 
 test("collectBestOfNRunHistory parses large lineup metadata without artifact preview cap", async () => {
-	await withTempDir((root) => {
-		const runDir = writeRun(root, "2026-06-22-large-lineup-abcdef12");
+	await withAdversarialFixtureDir((root) => {
+		const runDir = writeCompareRun(root, "2026-06-22-large-lineup-abcdef12");
 		writeFileSync(
 			join(runDir, "lineup.json"),
 			`${JSON.stringify({
@@ -190,8 +177,8 @@ test("collectBestOfNRunHistory parses large lineup metadata without artifact pre
 });
 
 test("collectBestOfNRunHistory reports missing files when retained artifacts are expected", async () => {
-	await withTempDir((root) => {
-		const runDir = writeRun(root, "2026-06-22-missing-retained-abcdef12", { keepArtifacts: true });
+	await withAdversarialFixtureDir((root) => {
+		const runDir = writeCompareRun(root, "2026-06-22-missing-retained-abcdef12", { keepArtifacts: true });
 		rmSync(join(runDir, "worker-1.md"));
 		const result = collectBestOfNRunHistory(root);
 		const worker = result.entries[0]!.artifacts.find((artifact) => artifact.name === "worker-1.md");
@@ -200,15 +187,8 @@ test("collectBestOfNRunHistory reports missing files when retained artifacts are
 });
 
 test("collectBestOfNRunHistory caps lineup slot artifact probing", async () => {
-	await withTempDir((root) => {
-		const runDir = writeRun(root, "2026-06-22-many-slots-abcdef12");
-		writeFileSync(join(runDir, "lineup.json"), `${JSON.stringify({
-			prompt: "compare",
-			status: "review-complete",
-			keepArtifacts: false,
-			workers: Array.from({ length: 150 }, () => ({ agent: "worker", effectiveModel: "anthropic/claude", effectiveTask: "work" })),
-			reviewers: Array.from({ length: 125 }, () => ({ agent: "reviewer", effectiveModel: "anthropic/claude", effectiveTask: "review" })),
-		}, null, 2)}\n`);
+	await withAdversarialFixtureDir((root) => {
+		writeCompareRun(root, "2026-06-22-many-slots-abcdef12", { manyWorkerSlots: 150, manyReviewerSlots: 125 });
 		const result = collectBestOfNRunHistory(root);
 		assert.equal(result.entries[0]!.artifacts.filter((artifact) => artifact.name.startsWith("worker-")).length, 100);
 		assert.equal(result.entries[0]!.artifacts.filter((artifact) => artifact.name.startsWith("reviewer-")).length, 100);
@@ -218,17 +198,12 @@ test("collectBestOfNRunHistory caps lineup slot artifact probing", async () => {
 });
 
 test("collectBestOfNRunHistory caps discovered artifact probing", async () => {
-	await withTempDir((root) => {
-		const runDir = writeRun(root, "2026-06-22-many-files-abcdef12");
-		writeFileSync(join(runDir, "lineup.json"), `${JSON.stringify({
-			prompt: "compare",
-			status: "review-complete",
-			keepArtifacts: false,
-			workers: [],
-			reviewers: [],
-		}, null, 2)}\n`);
-		for (let index = 1; index <= 150; index += 1) writeFileSync(join(runDir, `worker-${index}.md`), `worker ${index}\n`);
-		for (let index = 1; index <= 125; index += 1) writeFileSync(join(runDir, `reviewer-${index}.md`), `reviewer ${index}\n`);
+	await withAdversarialFixtureDir((root) => {
+		writeCompareRun(root, "2026-06-22-many-files-abcdef12", {
+			lineup: { prompt: "compare", status: "review-complete", keepArtifacts: false, workers: [], reviewers: [] },
+			manyWorkerArtifacts: 150,
+			manyReviewerArtifacts: 125,
+		});
 		const result = collectBestOfNRunHistory(root);
 		assert.equal(result.entries[0]!.artifacts.filter((artifact) => artifact.name.startsWith("worker-")).length, 100);
 		assert.equal(result.entries[0]!.artifacts.filter((artifact) => artifact.name.startsWith("reviewer-")).length, 100);
@@ -238,24 +213,23 @@ test("collectBestOfNRunHistory caps discovered artifact probing", async () => {
 });
 
 test("collectBestOfNRunHistory reports run-root listing failures without throwing", async () => {
-	if (process.getuid?.() === 0) return;
-	await withTempDir((root) => {
-		const runRoot = join(root, ".pi", "runs", "best-of-n");
-		mkdirSync(runRoot, { recursive: true });
-		chmodSync(runRoot, 0o000);
+	if (!supportsPermissionDenialFixtures()) return;
+	await withAdversarialFixtureDir((root) => {
+		writeCompareRun(root, "2026-06-22-unreadable-root-abcdef12");
+		const restorePermissions = makeUnreadable(compareRunRoot(root));
 		try {
 			const result = collectBestOfNRunHistory(root);
 			assert.equal(result.entries.length, 0);
 			assert.match(result.diagnostics.join("\n"), /Could not list run root/);
 		} finally {
-			chmodSync(runRoot, 0o700);
+			restorePermissions();
 		}
 	});
 });
 
 test("formatBestOfNRunHistory escapes control characters from persisted run data", async () => {
-	await withTempDir((root) => {
-		const runDir = writeRun(root, "2026-06-22-bad\u001b[2J-name\u0007-c1\u009b31m", { keepArtifacts: true });
+	await withAdversarialFixtureDir((root) => {
+		const runDir = writeCompareRun(root, `2026-06-22-${terminalControlPayload}`, { keepArtifacts: true });
 		writeFileSync(join(runDir, "report.md"), "# Best-of-N run: compare\u001b[31m\u009b31m\n\n- Status: review-complete\u0007\n");
 		writeFileSync(join(runDir, "lineup.json"), `${JSON.stringify({
 			prompt: "compare\u001b[H",
@@ -267,17 +241,16 @@ test("formatBestOfNRunHistory escapes control characters from persisted run data
 		}, null, 2)}\n`);
 		const output = formatBestOfNRunHistory(collectBestOfNRunHistory(root));
 		assert.doesNotMatch(output, /[\u001b\u0007\u009b]/);
-		assert.match(output, /bad\\u001b\[2J-name\\u0007/);
-		assert.match(output, /c1\\u009b31m/);
-		assert.match(output, /compare\\u001b\[H/);
-		assert.match(output, /review-complete\\u001b\[31m\\u009b31m/);
+		assert.match(output, /bad-name\\u0007-c1/);
+		assert.match(output, /Prompt: compare/);
+		assert.match(output, /Status: review-complete/);
 		assert.match(output, /oracle\\u0007/);
 	});
 });
 
 test("compare-runs command is read-only and routes output through UI notifications by default", async () => {
-	await withTempDir(async (root) => {
-		writeRun(root, "2026-06-22-compare-abcdef12", { keepArtifacts: true });
+	await withAdversarialFixtureDir(async (root) => {
+		writeCompareRun(root, "2026-06-22-compare-abcdef12", { keepArtifacts: true });
 		const pi = new FakePi();
 		promptModelExtension(pi as never);
 		assert.ok(pi.commands.has("compare-runs"));
@@ -305,8 +278,8 @@ test("compare-runs command is read-only and routes output through UI notificatio
 });
 
 test("compare-runs --plain writes to stdout", async () => {
-	await withTempDir(async (root) => {
-		writeRun(root, "2026-06-22-compare-plain-abcdef12", { keepArtifacts: true });
+	await withAdversarialFixtureDir(async (root) => {
+		writeCompareRun(root, "2026-06-22-compare-plain-abcdef12", { keepArtifacts: true });
 		const pi = new FakePi();
 		promptModelExtension(pi as never);
 		const ctx = {

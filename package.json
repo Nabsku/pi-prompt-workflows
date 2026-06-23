@@ -29,6 +29,7 @@
   "files": [
     "index.ts",
     "args.ts",
+    "best-of-n-preflight.ts",
     "best-of-n-presets.ts",
     "best-of-n-run-history.ts",
     "best-of-n-run-history-renderer.ts",
@@ -42,6 +43,7 @@
     "prompt-dry-run-tui.ts",
     "prompt-includes.ts",
     "prompt-loader.ts",
+    "render-safe.ts",
     "prompt-skills.ts",
     "prompt-validation.ts",
     "deterministic-step.ts",

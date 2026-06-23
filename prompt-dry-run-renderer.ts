@@ -1,7 +1,8 @@
 import type { PromptDryRunResult, PromptDryRunRuntimeMetadata } from "./prompt-dry-run.js";
+import { sanitizeForTerminal } from "./render-safe.js";
 
 function sanitizeInline(value: string): string {
-	return JSON.stringify(value).slice(1, -1);
+	return sanitizeForTerminal(value);
 }
 
 function formatScalar(value: string | number | boolean | null | undefined): string {
@@ -18,9 +19,10 @@ function modelLabel(model: { provider?: string; id?: string; name?: string }): s
 }
 
 function fencedBlock(language: string, content: string): string {
-	const longest = Math.max(3, ...Array.from(content.matchAll(/`+/g), (match) => match[0].length + 1));
+	const safeContent = sanitizeForTerminal(content, { preserveLineBreaks: true });
+	const longest = Math.max(3, ...Array.from(safeContent.matchAll(/`+/g), (match) => match[0].length + 1));
 	const fence = "`".repeat(longest);
-	return `${fence}${language}\n${content}\n${fence}`;
+	return `${fence}${language}\n${safeContent}\n${fence}`;
 }
 
 function formatRuntime(runtime: Partial<PromptDryRunRuntimeMetadata> | undefined, lines: string[]): void {

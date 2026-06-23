@@ -1,7 +1,8 @@
 import type { BestOfNRunHistoryResult } from "./best-of-n-run-history.js";
+import { sanitizeForTerminal } from "./render-safe.js";
 
 function sanitizeInline(value: string): string {
-	return JSON.stringify(value).slice(1, -1).replace(/[\u007f-\u009f]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
+	return sanitizeForTerminal(value);
 }
 
 function formatMaybe(value: unknown): string {

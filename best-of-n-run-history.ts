@@ -85,7 +85,7 @@ function readBoundedText(filePath: string, root: string, maxBytes: number): { te
 			const bytesRead = bytesToRead > 0 ? readSync(fd, buffer, 0, bytesToRead, 0) : 0;
 			const text = buffer.subarray(0, bytesRead).toString("utf8");
 			if (stat.size <= maxBytes) return { text, size: stat.size };
-			return { text, size: stat.size, truncated: true, diagnostic: `${basename(filePath)} truncated to ${maxBytes} bytes.` };
+			return { text, size: stat.size, truncated: true, diagnostic: `${basename(filePath)} truncated to ${maxBytes} bytes (original ${stat.size} bytes).` };
 		} finally {
 			closeSync(fd);
 		}

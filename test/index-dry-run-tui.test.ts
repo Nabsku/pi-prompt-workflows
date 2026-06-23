@@ -218,6 +218,49 @@ test("TUI picker selection uses catalog template names directly instead of repar
 	});
 });
 
+test("TUI picker ignores malformed or non-catalog UI return values without routing to dry-run", async () => {
+	const inheritedSelection = Object.create({ action: "selected", templateName: "review" });
+	for (const maliciousReturn of [
+		"/tmp/owned.md",
+		{ action: "selected", templateName: "/tmp/owned.md" },
+		{ action: "selected", templateName: "run-2026-06-23-stale" },
+		{ action: "selected", templateName: "hidden" },
+		{ action: "selected", templateName: "removed" },
+		{ action: "selected", templateName: "x".repeat(200_000) },
+		{ action: "selected", templateName: "review", get path() { throw new Error("unexpected field should not be read"); } },
+		inheritedSelection,
+	]) {
+		await setup("tui", async (cwd, pi, ctx) => {
+			writePrompt(cwd, "review", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nReview $@");
+			writePrompt(cwd, "hidden", "---\nmodel: anthropic/claude-sonnet-4-20250514\nhidden: true\n---\nHidden $@");
+			await pi.emit("session_start", {}, ctx);
+			pi.customResults.push(maliciousReturn);
+
+			await pi.commands.get("dry-run-prompt")!.handler!("", ctx);
+
+			const shouldInspectReview = maliciousReturn && typeof maliciousReturn === "object" && Object.getOwnPropertyDescriptor(maliciousReturn, "templateName")?.value === "review";
+			assert.equal(pi.customCalls.length, shouldInspectReview ? 2 : 1);
+			if (!shouldInspectReview) assert.equal(pi.customComponents.length, 1);
+			assertNoExecutionSideEffects(pi);
+		});
+	}
+});
+
+test("TUI back navigation ignores stale raw CLI args and non-catalog picker selections", async () => {
+	await setup("tui", async (cwd, pi, ctx) => {
+		writePrompt(cwd, "first", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nFirst body $@");
+		writePrompt(cwd, "second", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nSecond body $@");
+		await pi.emit("session_start", {}, ctx);
+		pi.customResults.push({ action: "back" }, { action: "selected", templateName: "/tmp/replayed-from-cli" });
+
+		await pi.commands.get("print-prompt")!.handler!("first /tmp/replayed-from-cli --show-skills", ctx);
+
+		assert.equal(pi.customCalls.length, 2);
+		assert.equal(pi.notifications.length, 0);
+		assertNoExecutionSideEffects(pi);
+	});
+});
+
 test("inspector back opens picker and selected template opens the next inspector", async () => {
 	await setup("tui", async (cwd, pi, ctx) => {
 		writePrompt(cwd, "first", "---\nmodel: anthropic/claude-sonnet-4-20250514\n---\nFirst body");
