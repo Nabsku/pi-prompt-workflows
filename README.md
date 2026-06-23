@@ -720,6 +720,52 @@ Preview the effective lineup before execution:
 
 Dry-run and preset listing are read-only: they do not approve project presets, start subagents, write reports, or switch models. Running a compare prompt with a project preset asks for per-session approval first. User presets are trusted user config; project presets are treated as untrusted project input until approved for the session.
 
+### Compare workflow examples
+
+Use these as copyable starting points for the full compare workflow.
+
+**Adversarial oracle review:** run a read-only tournament and retain enough evidence to inspect afterwards.
+
+```text
+/compare-presets --plain
+/dry-run-prompt best-of-n --preset quick --plain review the auth refactor for security and regression risk
+/best-of-n --preset quick --keep-artifacts review the auth refactor for security and regression risk
+/compare-runs --plain --limit 5
+/compare-runs --plain --id <run-id>
+```
+
+**Compare, then inspect history:** preflight the effective lineup, execute the compare, then browse run history in Pi TUI mode or print one run deterministically.
+
+```text
+/compare-presets
+/print-prompt best-of-n --preset quick --plain refactor the parser
+/best-of-n --preset quick refactor the parser
+/compare-runs
+/compare-runs --plain --run <run-id>
+```
+
+In Pi TUI mode, `/compare-runs` opens a read-only picker/detail inspector. `--plain` forces stdout output for scripts and logs.
+
+**Safe final-applier with manual commit approval:** keep `worktree: true`, configure one `finalApplier`, and set `commit: ask` in the prompt so the extension shows a display-only commit handoff instead of committing automatically.
+
+```yaml
+bestOfN:
+  preset: quick
+  worktree: true
+  finalApplier:
+    agent: delegate
+    model: anthropic/claude-sonnet-4-20250514:high
+    taskSuffix: Apply the final patch on the current branch and report verification.
+  commit: ask
+```
+
+```text
+/dry-run-prompt best-of-n --preset quick --plain implement the parser cleanup
+/best-of-n --preset quick implement the parser cleanup
+```
+
+After the final applier finishes, review the reported diff and run only the suggested `git -C <compare-cwd> add --patch` / `git -C <compare-cwd> commit -m ...` commands you actually approve. For intended new files shown as `??`, use `git -C <compare-cwd> add -N -- <path>` before patch-staging.
+
 Preset slot fields are intentionally limited to `agent`/`subagent`, `model`, and `count`. Presets cannot set `task`, `taskSuffix`, `cwd`, `finalApplier`, `worktree`, dirty/report/commit behavior, or other execution policy. Invalid selected presets fail closed instead of falling back to same-named user presets, and `maxModelCalls` caps the expanded worker + reviewer calls before any subagents start.
 
 For same-model best-of-N, use `count: N` on one worker slot:

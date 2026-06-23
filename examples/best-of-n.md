@@ -6,8 +6,11 @@ bestOfN:
   # To reuse a shared lineup instead of the explicit workers/reviewers below, define
   # `~/.pi/agent/best-of-n-presets.json` or `<repo>/.pi/best-of-n-presets.json`, then run:
   #   /compare-presets
+  #   /compare-presets --plain
   #   /dry-run-prompt best-of-n --preset quick --plain your task
   #   /best-of-n --preset quick your task
+  #   /compare-runs
+  #   /compare-runs --plain --id <run-id>
   # Project presets override same-named user presets, but execution asks for session approval.
   # preset: quick
   # Workers run in temporary worktrees; the final apply step edits the current branch.
@@ -33,5 +36,8 @@ bestOfN:
     # The final apply step picks or synthesizes from worker/reviewer findings and applies on the current branch.
     model: openai-codex/gpt-5.4-mini:xhigh
     taskSuffix: Apply the final patch directly on the current branch, run best-effort relevant verification, and report changed files plus verification run.
+  # Ask mode never commits automatically. It renders changed files, a diff summary,
+  # the run report path, and copyable git add/commit commands for manual approval.
+  commit: ask
 ---
 $@
