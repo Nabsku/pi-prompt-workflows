@@ -196,6 +196,22 @@ test("compare preflight renders warning verdict and project preset approval expe
 	assert.match(rendered, /Project preset approval: project preset requires session approval before execution for this compare cwd\./);
 });
 
+test("compare preflight execute command preserves runtime cwd and lineup overrides", () => {
+	const preflight = comparePreflight({
+		compareCwd: { resolved: "/tmp/other", source: "runtime-cwd", requested: "/tmp/other" },
+		slots: {
+			workers: [{ kind: "worker", index: 1, source: "runtime-override", agent: "coder", model: "m1", cwd: "/tmp/other", effectiveModelLabel: "m1" }],
+			reviewers: [{ kind: "reviewer", index: 1, source: "runtime-override", agent: "critic", model: "m2", cwd: "/tmp/other", effectiveModelLabel: "m2" }],
+			finalApplier: { kind: "final-applier", index: 1, source: "runtime-override", agent: "apply", model: "m3", cwd: "/tmp/other", effectiveModelLabel: "m3" },
+		},
+	});
+	const rendered = formatPromptDryRun(ok({ comparePreflight: preflight, runtime: { restore: false, boomerang: false, cwd: "/tmp/other" } }));
+	assert.match(rendered, /Execute: \/best-of-n --cwd=\/tmp\/other/);
+	assert.equal(rendered.includes('--workers=[{"agent":"coder","model":"m1","cwd":"/tmp/other"}]'), true);
+	assert.equal(rendered.includes('--reviewers=[{"agent":"critic","model":"m2","cwd":"/tmp/other"}]'), true);
+	assert.equal(rendered.includes('--final-applier={"agent":"apply","model":"m3"}'), true);
+});
+
 test("blocked compare preflight summarizes error diagnostics under Fix before running", () => {
 	const preflight = comparePreflight({
 		diagnostics: [{ severity: "error", code: "compare-final-applier-requires-worktree", message: "Compare prompts with finalApplier require worktree: true.", source: "project" }],

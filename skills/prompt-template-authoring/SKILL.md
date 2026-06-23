@@ -188,10 +188,10 @@ Preset files live at `~/.pi/agent/best-of-n-presets.json` / `.yaml` / `.yml` and
 
 Common compare workflows:
 
-- Adversarial oracle review: `/compare-presets --plain`, `/dry-run-prompt best-of-n --preset quick --plain review the change`, `/best-of-n --preset quick --keep-artifacts review the change`, then `/compare-runs --plain --id <run-id>`.
-- Compare operator happy path: `/compare-presets`, `/dry-run-prompt best-of-n --preset quick --plain <task>`, `/best-of-n --preset quick --keep-artifacts <task>`, then `/compare-runs --id <run-id>`.
-- Compare then inspect history: `/print-prompt best-of-n --preset quick --plain refactor the parser`, `/best-of-n --preset quick refactor the parser`, then `/compare-runs` for the TUI picker or `/compare-runs --plain --id <run-id>` for stdout.
-- Safe final-applier: set `bestOfN.worktree: true`, configure one `finalApplier`, set `commit: ask`, then run `/dry-run-prompt best-of-n --preset quick --plain implement the cleanup` before `/best-of-n --preset quick implement the cleanup`.
+- Evidence-retaining adversarial oracle review: `/compare-presets --plain`, `/dry-run-prompt best-of-n --preset quick --plain review the change`, `/best-of-n --preset quick --keep-artifacts review the change`, then `/compare-runs --plain --id <run-id>`.
+- Evidence-retaining compare operator happy path: `/compare-presets`, `/dry-run-prompt best-of-n --preset quick --plain <task>`, `/best-of-n --preset quick --keep-artifacts <task>`, then `/compare-runs --id <run-id>`.
+- Summary-only compare, then inspect history: `/print-prompt best-of-n --preset quick --plain refactor the parser`, `/best-of-n --preset quick refactor the parser`, then `/compare-runs` for the TUI picker or `/compare-runs --plain --id <run-id>` for stdout. Omit `--keep-artifacts` intentionally when the durable summary report and lineup are enough.
+- Summary-only safe final-applier: set `bestOfN.worktree: true`, configure one `finalApplier`, set `commit: ask`, then run `/dry-run-prompt best-of-n --preset quick --plain implement the cleanup` before `/best-of-n --preset quick implement the cleanup`. Add `--keep-artifacts` if you need raw final-applier evidence retained.
 
 ```yaml
 ---

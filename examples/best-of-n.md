@@ -16,7 +16,7 @@ bestOfN:
   #   presets:
   #     quick:
   #       defaultModel: openai-codex/gpt-5.4-mini:low
-  #       maxModelCalls: 3 # expanded workers + reviewers + optional final applier
+  #       maxModelCalls: 4 # expanded workers + reviewers + optional final applier
   #       workers:
   #         - agent: delegate
   #           count: 2
