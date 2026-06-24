@@ -2603,6 +2603,10 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				process.stdout.write(plainReport);
 				return;
 			}
+			if (result.comparePreflight) {
+				notify(ctx, plainReport, "error");
+				return;
+			}
 			notify(ctx, result.error, "error");
 			return;
 		}
@@ -2976,7 +2980,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		const ui = (ctx as ExtensionCommandContext & {
 			ui: { custom: (factory: (...args: any[]) => unknown, options?: unknown) => Promise<CompareRunHistoryTuiResult | unknown> | CompareRunHistoryTuiResult | unknown };
 		}).ui;
-		const result = await ui.custom((tui, theme, _layout, done) => new CompareRunDetailInspector(createCompareRunDetailViewModel(history, run), tui, theme, done));
+		const result = await ui.custom((tui, theme, _layout, done) => new CompareRunDetailInspector(createCompareRunDetailViewModel(history, run, { commandCwd: ctx.cwd }), tui, theme, done));
 		return parseCompareRunPickerAction(result, history);
 	}
 
@@ -3002,10 +3006,11 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 		const searchCwd = historyCwd ?? ctx.cwd;
 		const history = collectBestOfNRunHistory(searchCwd, options);
+		const pickerOptions = { ...options, runId: undefined };
 		const selectedRun = options.runId ? history.entries.find((entry) => entry.name === options.runId) : undefined;
 		const missingRunMessage = options.runId && !selectedRun ? formatMissingCompareRunMessage(history, searchCwd, options.runId) : undefined;
 		if (options.plain) {
-			process.stdout.write(selectedRun ? formatBestOfNRunDetail(history, selectedRun) : missingRunMessage ?? formatBestOfNRunHistory(history));
+			process.stdout.write(selectedRun ? formatBestOfNRunDetail(history, selectedRun, { commandCwd: ctx.cwd }) : missingRunMessage ?? formatBestOfNRunHistory(history, { commandCwd: ctx.cwd }));
 			return;
 		}
 		if ((options.tui || isTuiMode(ctx)) && hasCustomUi(ctx)) {
@@ -3019,7 +3024,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				for (;;) {
 					const detailAction = await inspectCompareRunInTui(ctx, options, currentRun.name, searchCwd);
 					if (detailAction?.action === "refresh") {
-						currentHistory = collectBestOfNRunHistory(searchCwd, options);
+						currentHistory = collectBestOfNRunHistory(searchCwd, pickerOptions);
 						const refreshedRun = currentHistory.entries.find((entry) => entry.name === currentRun.name);
 						if (!refreshedRun) {
 							notify(ctx, `Compare run ${currentRun.name} vanished or is no longer readable; refreshed run history.`, "warning");
@@ -3031,17 +3036,18 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					if (detailAction?.action === "back") break;
 					return;
 				}
+				currentHistory = collectBestOfNRunHistory(searchCwd, pickerOptions);
 			}
 			for (;;) {
 				const selection = await openCompareRunPicker(ctx, currentHistory);
 				if (selection?.action === "refresh") {
-					currentHistory = collectBestOfNRunHistory(searchCwd, options);
+					currentHistory = collectBestOfNRunHistory(searchCwd, pickerOptions);
 					continue;
 				}
 				if (selection?.action !== "selected") break;
 				const detailAction = await inspectCompareRunInTui(ctx, options, selection.runId, searchCwd);
 				if (detailAction?.action === "back" || detailAction?.action === "refresh") {
-					currentHistory = collectBestOfNRunHistory(searchCwd, options);
+					currentHistory = collectBestOfNRunHistory(searchCwd, pickerOptions);
 					continue;
 				}
 				break;
@@ -3051,7 +3057,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		if (options.tui) {
 			notify(ctx, "--tui compare run history is not available without Pi TUI custom UI; showing a notification report instead.", "warning");
 		}
-		notify(ctx, selectedRun ? formatBestOfNRunDetail(history, selectedRun) : missingRunMessage ?? formatBestOfNRunHistory(history), selectedRun || !options.runId ? "info" : "error");
+		notify(ctx, selectedRun ? formatBestOfNRunDetail(history, selectedRun, { commandCwd: ctx.cwd }) : missingRunMessage ?? formatBestOfNRunHistory(history, { commandCwd: ctx.cwd }), selectedRun || !options.runId ? "info" : "error");
 	}
 
 	function parseComparePresetsArgs(args: string): { plain: boolean } {

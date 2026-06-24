@@ -366,7 +366,7 @@ test("compare-runs --plain writes to stdout", async () => {
 
 test("compare-runs --plain can inspect a run from an explicit cwd", async () => {
 	await withAdversarialFixtureDir(async (root) => {
-		const otherRoot = mkdtempSync(join(tmpdir(), "pi-prompt-run-history-other-"));
+		const otherRoot = mkdtempSync(join(tmpdir(), "pi prompt run history other "));
 		try {
 			writeCompareRun(otherRoot, "2026-06-22-other-abcdef12", { keepArtifacts: true });
 			const pi = new FakePi();
@@ -384,6 +384,9 @@ test("compare-runs --plain can inspect a run from an explicit cwd", async () => 
 			assert.match(output, /# Compare run detail/);
 			assert.match(output, /Run: 2026-06-22-other-abcdef12/);
 			assert.match(output, new RegExp(otherRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+			const quotedOtherRoot = JSON.stringify(otherRoot).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			assert.match(output, new RegExp(`Inspect: \\/compare-runs --cwd ${quotedOtherRoot} --id 2026-06-22-other-abcdef12`));
+			assert.match(output, new RegExp(`Plain detail: \\/compare-runs --plain --cwd ${quotedOtherRoot} --id 2026-06-22-other-abcdef12`));
 		} finally {
 			rmSync(otherRoot, { recursive: true, force: true });
 		}
@@ -667,6 +670,7 @@ test("compare-runs TUI reports vanished selected run and refreshes history", asy
 test("compare-runs direct TUI id handles detail refresh and back actions", async () => {
 	await withAdversarialFixtureDir(async (root) => {
 		writeCompareRun(root, "2026-06-23-direct-abcdef12", { keepArtifacts: true });
+		writeCompareRun(root, "2026-06-23-sibling-abcdef12", { keepArtifacts: true });
 		const pi = new FakePi();
 		promptModelExtension(pi as never);
 		pi.customResults.push({ action: "refresh" }, { action: "back" }, { action: "closed" });
@@ -677,6 +681,9 @@ test("compare-runs direct TUI id handles detail refresh and back actions", async
 		assert.equal(pi.customComponents[0] instanceof CompareRunDetailInspector, true);
 		assert.equal(pi.customComponents[1] instanceof CompareRunDetailInspector, true);
 		assert.equal(pi.customComponents[2] instanceof CompareRunPicker, true);
+		const pickerOutput = (pi.customComponents[2] as CompareRunPicker).render(160).join("\n");
+		assert.match(pickerOutput, /2026-06-23-direct-abcdef12/);
+		assert.match(pickerOutput, /2026-06-23-sibling-abcdef12/);
 	});
 });
 

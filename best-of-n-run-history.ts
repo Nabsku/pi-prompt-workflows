@@ -42,6 +42,7 @@ export interface BestOfNRunHistoryEntry {
 }
 
 export interface BestOfNRunHistoryResult {
+	cwd?: string;
 	root: string;
 	maxBytes: number;
 	entries: BestOfNRunHistoryEntry[];
@@ -286,32 +287,32 @@ export function collectBestOfNRunHistory(cwd: string, options: BestOfNRunHistory
 	const rootCheck = validateRunRoot(cwd);
 	const root = rootCheck.root;
 	const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
-	if (!rootCheck.ok) return { root, maxBytes, entries: [], diagnostics: rootCheck.diagnostic ? [rootCheck.diagnostic] : [] };
+	if (!rootCheck.ok) return { cwd, root, maxBytes, entries: [], diagnostics: rootCheck.diagnostic ? [rootCheck.diagnostic] : [] };
 	const diagnostics: string[] = [];
 	let rootStat;
 	try {
 		rootStat = lstatSync(root);
 	} catch (error) {
-		return { root, maxBytes, entries: [], diagnostics: [`Could not inspect run root: ${error instanceof Error ? error.message : String(error)}.`] };
+		return { cwd, root, maxBytes, entries: [], diagnostics: [`Could not inspect run root: ${error instanceof Error ? error.message : String(error)}.`] };
 	}
-	if (rootStat.isSymbolicLink()) return { root, maxBytes, entries: [], diagnostics: ["Run root is a symlink; refusing to read compare run history."] };
-	if (!rootStat.isDirectory()) return { root, maxBytes, entries: [], diagnostics: ["Run root exists but is not a directory."] };
+	if (rootStat.isSymbolicLink()) return { cwd, root, maxBytes, entries: [], diagnostics: ["Run root is a symlink; refusing to read compare run history."] };
+	if (!rootStat.isDirectory()) return { cwd, root, maxBytes, entries: [], diagnostics: ["Run root exists but is not a directory."] };
 
 	if (options.runId) {
 		if (!isSafeRunId(options.runId)) {
-			return { root, maxBytes, entries: [], diagnostics: [`Invalid compare run id ${JSON.stringify(options.runId)}: expected a run directory name, not a path.`] };
+			return { cwd, root, maxBytes, entries: [], diagnostics: [`Invalid compare run id ${JSON.stringify(options.runId)}: expected a run directory name, not a path.`] };
 		}
 		const selectedPath = resolve(root, options.runId);
 		if (!isInside(root, selectedPath)) {
-			return { root, maxBytes, entries: [], diagnostics: [`Invalid compare run id ${JSON.stringify(options.runId)}: path escapes run root.`] };
+			return { cwd, root, maxBytes, entries: [], diagnostics: [`Invalid compare run id ${JSON.stringify(options.runId)}: path escapes run root.`] };
 		}
 		try {
 			const selectedStat = lstatSync(selectedPath);
-			if (selectedStat.isSymbolicLink()) return { root, maxBytes, entries: [], diagnostics: [`Compare run ${options.runId} is a symlink; refusing to read it.`] };
-			if (!selectedStat.isDirectory()) return { root, maxBytes, entries: [], diagnostics: [`Compare run ${options.runId} exists but is not a directory.`] };
-			return { root, maxBytes, entries: [collectRun(selectedPath, maxBytes)], diagnostics };
+			if (selectedStat.isSymbolicLink()) return { cwd, root, maxBytes, entries: [], diagnostics: [`Compare run ${options.runId} is a symlink; refusing to read it.`] };
+			if (!selectedStat.isDirectory()) return { cwd, root, maxBytes, entries: [], diagnostics: [`Compare run ${options.runId} exists but is not a directory.`] };
+			return { cwd, root, maxBytes, entries: [collectRun(selectedPath, maxBytes)], diagnostics };
 		} catch {
-			return { root, maxBytes, entries: [], diagnostics };
+			return { cwd, root, maxBytes, entries: [], diagnostics };
 		}
 	}
 
@@ -320,7 +321,7 @@ export function collectBestOfNRunHistory(cwd: string, options: BestOfNRunHistory
 	try {
 		rootEntries = readdirSync(root, { withFileTypes: true });
 	} catch (error) {
-		return { root, maxBytes, entries: [], diagnostics: [`Could not list run root: ${error instanceof Error ? error.message : String(error)}.`] };
+		return { cwd, root, maxBytes, entries: [], diagnostics: [`Could not list run root: ${error instanceof Error ? error.message : String(error)}.`] };
 	}
 	for (const entry of rootEntries) {
 		const candidate = join(root, entry.name);
@@ -346,7 +347,7 @@ export function collectBestOfNRunHistory(cwd: string, options: BestOfNRunHistory
 
 	runDirs.sort((a, b) => b.mtimeMs - a.mtimeMs || b.name.localeCompare(a.name));
 	const entries = runDirs.slice(0, clampLimit(options.limit)).map((run) => collectRun(run.path, maxBytes));
-	return { root, maxBytes, entries, diagnostics };
+	return { cwd, root, maxBytes, entries, diagnostics };
 }
 
 export function parseBestOfNRunHistoryArgs(args: string): BestOfNRunHistoryOptions {
