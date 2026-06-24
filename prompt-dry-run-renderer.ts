@@ -12,6 +12,10 @@ function formatScalar(value: string | number | boolean | null | undefined): stri
 	return sanitizeInline(String(value));
 }
 
+function quoteSlashCommandArg(value: string): string {
+	return /^[^\s"'\\]+$/.test(value) ? value : JSON.stringify(value);
+}
+
 function modelLabel(model: { provider?: string; id?: string; name?: string }): string {
 	if (model.provider && model.id) return `${model.provider}/${model.id}`;
 	if (model.id) return model.id;
@@ -115,17 +119,17 @@ function hasRuntimeLineupOverride(preflight: BestOfNPreflight): boolean {
 
 function compareExecuteCommand(preflight: BestOfNPreflight, runtime: Partial<PromptDryRunRuntimeMetadata> | undefined): string {
 	const parts = [`/${preflight.prompt.name}`];
-	if (runtime?.model) parts.push(`--model=${runtime.model}`);
-	if (runtime?.cwd && (preflight.compareCwd.source === "runtime-cwd" || runtime.cwd !== preflight.compareCwd.resolved)) parts.push(`--cwd=${runtime.cwd}`);
-	if (preflight.preset?.name && preflight.preset.trust !== "not-found" && preflight.preset.trust !== "invalid") parts.push(`--preset ${preflight.preset.name}`);
+	if (runtime?.model) parts.push("--model", quoteSlashCommandArg(runtime.model));
+	if (runtime?.cwd && (preflight.compareCwd.source === "runtime-cwd" || runtime.cwd !== preflight.compareCwd.resolved)) parts.push("--cwd", quoteSlashCommandArg(runtime.cwd));
+	if (preflight.preset?.name && preflight.preset.trust !== "not-found" && preflight.preset.trust !== "invalid") parts.push("--preset", quoteSlashCommandArg(preflight.preset.name));
 	if (hasRuntimeLineupOverride(preflight)) {
-		parts.push(`--workers=${JSON.stringify(preflight.slots.workers.map((slot) => runtimeOverrideSlot(slot, true)))}`);
-		parts.push(`--reviewers=${JSON.stringify(preflight.slots.reviewers.map((slot) => runtimeOverrideSlot(slot, true)))}`);
-		if (preflight.slots.finalApplier) parts.push(`--final-applier=${JSON.stringify(runtimeOverrideSlot(preflight.slots.finalApplier, false))}`);
+		parts.push(`--workers=${quoteSlashCommandArg(JSON.stringify(preflight.slots.workers.map((slot) => runtimeOverrideSlot(slot, true))))}`);
+		parts.push(`--reviewers=${quoteSlashCommandArg(JSON.stringify(preflight.slots.reviewers.map((slot) => runtimeOverrideSlot(slot, true))))}`);
+		if (preflight.slots.finalApplier) parts.push(`--final-applier=${quoteSlashCommandArg(JSON.stringify(runtimeOverrideSlot(preflight.slots.finalApplier, false)))}`);
 	}
 	if (preflight.artifacts.rawArtifacts.keepArtifacts) parts.push("--keep-artifacts");
 	if (preflight.task.raw) parts.push(preflight.task.raw);
-	return sanitizeInline(parts.join(" ").replace(/\s+/g, " ").trim());
+	return sanitizeInline(parts.join(" ").trim());
 }
 
 function evidenceRetention(preflight: BestOfNPreflight): string {

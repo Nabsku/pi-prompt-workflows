@@ -1,5 +1,6 @@
 import { closeSync, existsSync, lstatSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
 import { basename, join, relative, resolve, sep } from "node:path";
+import { parseCommandArgs } from "./args.js";
 
 export interface BestOfNRunHistoryOptions {
 	limit?: number;
@@ -7,6 +8,7 @@ export interface BestOfNRunHistoryOptions {
 	plain?: boolean;
 	runId?: string;
 	tui?: boolean;
+	cwd?: string;
 	errors?: string[];
 }
 
@@ -348,11 +350,12 @@ export function collectBestOfNRunHistory(cwd: string, options: BestOfNRunHistory
 }
 
 export function parseBestOfNRunHistoryArgs(args: string): BestOfNRunHistoryOptions {
-	const tokens = args.trim().split(/\s+/).filter(Boolean);
+	const tokens = parseCommandArgs(args);
 	let limit: number | undefined;
 	let plain = false;
 	let runId: string | undefined;
 	let tui = false;
+	let cwd: string | undefined;
 	const errors: string[] = [];
 	for (let index = 0; index < tokens.length; index += 1) {
 		const token = tokens[index];
@@ -375,6 +378,19 @@ export function parseBestOfNRunHistoryArgs(args: string): BestOfNRunHistoryOptio
 			runId = token.slice("--run=".length);
 		} else if (token.startsWith("--id=")) {
 			runId = token.slice("--id=".length);
+		} else if (token === "--cwd" && tokens[index + 1]) {
+			const value = tokens[index + 1]!;
+			if (value.startsWith("--")) errors.push("Missing value for --cwd.");
+			else {
+				cwd = value;
+				index += 1;
+			}
+		} else if (token === "--cwd") {
+			errors.push("Missing value for --cwd.");
+		} else if (token === "--cwd=") {
+			errors.push("Missing value for --cwd.");
+		} else if (token.startsWith("--cwd=")) {
+			cwd = token.slice("--cwd=".length);
 		} else if (token === "--limit" && tokens[index + 1]) {
 			const value = tokens[index + 1]!;
 			if (value.startsWith("--")) errors.push("Missing value for --limit.");
@@ -397,5 +413,5 @@ export function parseBestOfNRunHistoryArgs(args: string): BestOfNRunHistoryOptio
 			errors.push(`Unexpected /compare-runs argument ${JSON.stringify(token)}.`);
 		}
 	}
-	return { limit, plain, runId, tui, errors };
+	return { limit, plain, runId, tui, cwd, errors };
 }

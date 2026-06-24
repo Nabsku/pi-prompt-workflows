@@ -364,18 +364,56 @@ test("compare-runs --plain writes to stdout", async () => {
 	});
 });
 
+test("compare-runs --plain can inspect a run from an explicit cwd", async () => {
+	await withAdversarialFixtureDir(async (root) => {
+		const otherRoot = mkdtempSync(join(tmpdir(), "pi-prompt-run-history-other-"));
+		try {
+			writeCompareRun(otherRoot, "2026-06-22-other-abcdef12", { keepArtifacts: true });
+			const pi = new FakePi();
+			promptModelExtension(pi as never);
+			const ctx = {
+				cwd: root,
+				hasUI: true,
+				model: { provider: "anthropic", id: "claude" },
+				ui: { notify(message: string, type: string) { pi.customMessages.push({ message, type }); } },
+				isIdle() { return false; },
+				async waitForIdle() {},
+				modelRegistry: { getAll() { return []; }, getAvailable() { return []; } },
+			};
+			const output = await captureStdout(() => pi.commands.get("compare-runs")!.handler(`--plain --cwd "${otherRoot}" --id 2026-06-22-other-abcdef12`, ctx));
+			assert.match(output, /# Compare run detail/);
+			assert.match(output, /Run: 2026-06-22-other-abcdef12/);
+			assert.match(output, new RegExp(otherRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+		} finally {
+			rmSync(otherRoot, { recursive: true, force: true });
+		}
+	});
+});
+
 test("parseBestOfNRunHistoryArgs reports unknown and malformed args", () => {
 	assert.deepEqual(parseBestOfNRunHistoryArgs("--plain --id --limit nope --mystery stray"), {
 		limit: Number.NaN,
 		plain: true,
 		runId: undefined,
 		tui: false,
+		cwd: undefined,
 		errors: [
 			"Missing value for --id.",
 			"Invalid --limit \"nope\": expected a positive integer.",
 			"Unknown /compare-runs option \"--mystery\".",
 			"Unexpected /compare-runs argument \"stray\".",
 		],
+	});
+});
+
+test("parseBestOfNRunHistoryArgs accepts quoted cwd override", () => {
+	assert.deepEqual(parseBestOfNRunHistoryArgs('--plain --cwd "/tmp/repo with space" --id run-1'), {
+		limit: undefined,
+		plain: true,
+		runId: "run-1",
+		tui: false,
+		cwd: "/tmp/repo with space",
+		errors: [],
 	});
 });
 
