@@ -956,14 +956,28 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 	}
 
-	function formatRunReportCompletionLine(reportPath: string | undefined, options: { keepArtifacts?: boolean } = {}): string {
+	function quoteSlashCommandArg(value: string): string {
+		return /^[^\s"'\\]+$/.test(value) ? value : JSON.stringify(value);
+	}
+
+	function formatCompareRunCommand(runId: string, options: { plain?: boolean; compareCwd?: string; commandCwd?: string } = {}): string {
+		const parts = ["/compare-runs"];
+		if (options.plain) parts.push("--plain");
+		if (options.compareCwd && options.commandCwd && resolvePath(options.compareCwd) !== resolvePath(options.commandCwd)) {
+			parts.push("--cwd", quoteSlashCommandArg(options.compareCwd));
+		}
+		parts.push("--id", quoteSlashCommandArg(runId));
+		return parts.join(" ");
+	}
+
+	function formatRunReportCompletionLine(reportPath: string | undefined, options: { keepArtifacts?: boolean; compareCwd?: string; commandCwd?: string } = {}): string {
 		if (!reportPath) return "Report: unavailable (failed to write run artifacts)";
 		const runId = basename(dirname(reportPath));
 		return [
 			`Run id: ${runId}`,
 			`Report: ${reportPath}`,
-			`Inspect: /compare-runs --id ${runId}`,
-			`Plain detail: /compare-runs --plain --id ${runId}`,
+			`Inspect: ${formatCompareRunCommand(runId, { compareCwd: options.compareCwd, commandCwd: options.commandCwd })}`,
+			`Plain detail: ${formatCompareRunCommand(runId, { plain: true, compareCwd: options.compareCwd, commandCwd: options.commandCwd })}`,
 			"Browse recent: /compare-runs",
 			...(options.keepArtifacts === false ? ["Raw artifacts: not retained. Rerun with --keep-artifacts to keep raw worker/reviewer outputs."] : []),
 		].join("\n");
@@ -1012,7 +1026,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			finalText: options.finalText,
 			failureSummary: options.failureSummary,
 		}, options.ctx);
-		notify(options.ctx, `Compare failed (${options.status}): ${options.failureSummary}\n${formatRunReportCompletionLine(reportPath, { keepArtifacts: options.keepArtifacts })}`, "error");
+		notify(options.ctx, `Compare failed (${options.status}): ${options.failureSummary}\n${formatRunReportCompletionLine(reportPath, { keepArtifacts: options.keepArtifacts, compareCwd: options.compareCwd, commandCwd: options.ctx.cwd })}`, "error");
 		return reportPath;
 	}
 
@@ -1239,6 +1253,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 	function renderBestOfNCommitAsk(options: {
 		compareCwd: string;
+		commandCwd: string;
 		promptName: string;
 		taskArgs: string[];
 		reportPath?: string;
@@ -1258,7 +1273,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			"`bestOfN.commit: ask` is enabled. Review and stage only the intended final-applier changes before committing.",
 			"",
 			`- Compare cwd: ${options.compareCwd}`,
-			`- ${formatRunReportCompletionLine(options.reportPath)}`,
+			`- ${formatRunReportCompletionLine(options.reportPath, { compareCwd: options.compareCwd, commandCwd: options.commandCwd })}`,
 			`- Suggested commit: \`${suggestedMessage}\``,
 			"",
 			...(guardWarnings ? [
@@ -1750,7 +1765,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					reviewerSummary: successfulReviewerText,
 					reviewerFailures: reviewerFailureSummary,
 				}, ctx);
-				pi.sendUserMessage(`[Compare review complete: ${name}]\n\n${formatRunReportCompletionLine(reportPath, { keepArtifacts })}\n\n${finalText}`);
+				pi.sendUserMessage(`[Compare review complete: ${name}]\n\n${formatRunReportCompletionLine(reportPath, { keepArtifacts, compareCwd, commandCwd: ctx.cwd })}\n\n${finalText}`);
 				await waitForTurnStart(ctx);
 				await ctx.waitForIdle();
 				return;
@@ -1854,9 +1869,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				finalText: finalResult.text,
 			}, ctx);
 			const commitAsk = prompt.commit === "ask" && beforeFinalApplierSnapshot && afterFinalApplierSnapshot
-				? renderBestOfNCommitAsk({ compareCwd: approvalCwd, promptName: name, taskArgs, reportPath, beforeFinalApplier: beforeFinalApplierSnapshot, afterFinalApplier: afterFinalApplierSnapshot })
+				? renderBestOfNCommitAsk({ compareCwd: approvalCwd, commandCwd: ctx.cwd, promptName: name, taskArgs, reportPath, beforeFinalApplier: beforeFinalApplierSnapshot, afterFinalApplier: afterFinalApplierSnapshot })
 				: "";
-			pi.sendUserMessage(`[Compare apply complete: ${name}]\n\n${formatRunReportCompletionLine(reportPath, { keepArtifacts })}\n\n${finalResult.text}`);
+			pi.sendUserMessage(`[Compare apply complete: ${name}]\n\n${formatRunReportCompletionLine(reportPath, { keepArtifacts, compareCwd, commandCwd: ctx.cwd })}\n\n${finalResult.text}`);
 			if (commitAsk) {
 				pi.sendMessage({
 					customType: PROMPT_TEMPLATE_COMMIT_ASK_MESSAGE_TYPE,
@@ -2964,10 +2979,10 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		return parseCompareRunPickerAction(result, history);
 	}
 
-	async function inspectCompareRunInTui(ctx: ExtensionCommandContext, options: ReturnType<typeof parseBestOfNRunHistoryArgs>, runId: string): Promise<CompareRunHistoryTuiResult | undefined> {
-		const latest = collectBestOfNRunHistory(ctx.cwd, { ...options, runId });
+	async function inspectCompareRunInTui(ctx: ExtensionCommandContext, options: ReturnType<typeof parseBestOfNRunHistoryArgs>, runId: string, historyCwd: string): Promise<CompareRunHistoryTuiResult | undefined> {
+		const latest = collectBestOfNRunHistory(historyCwd, { ...options, runId });
 		if (!latest.entries.some((entry) => entry.name === runId)) {
-			notify(ctx, formatStaleCompareRunMessage(latest, ctx.cwd, runId), "error");
+			notify(ctx, formatStaleCompareRunMessage(latest, historyCwd, runId), "error");
 			return { action: "refresh" };
 		}
 		return openCompareRunInspector(ctx, latest, runId);
@@ -2976,22 +2991,25 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	async function runCompareRunsCommand(args: string, ctx: ExtensionCommandContext) {
 		storedCommandCtx = ctx;
 		const options = parseBestOfNRunHistoryArgs(args);
+		const historyCwd = options.cwd ? expandCwdPath(options.cwd) : ctx.cwd;
+		if (options.cwd && !historyCwd) options.errors?.push(`Invalid --cwd ${JSON.stringify(options.cwd)}: expected an absolute path or ~/ path.`);
 		if (options.errors?.length) {
-			const message = [`Invalid /compare-runs arguments:`, ...options.errors.map((error) => `- ${error}`), "Usage: /compare-runs [--plain] [--tui] [--id <run-id>] [--limit <positive-integer>]."].join("\n");
+			const message = [`Invalid /compare-runs arguments:`, ...options.errors.map((error) => `- ${error}`), "Usage: /compare-runs [--plain] [--tui] [--cwd <absolute-path>] [--id <run-id>] [--limit <positive-integer>]."].join("\n");
 			if (options.plain || !ctx.hasUI) process.stdout.write(`${message}\n`);
 			else notify(ctx, message, "error");
 			return;
 		}
-		const history = collectBestOfNRunHistory(ctx.cwd, options);
+		const searchCwd = historyCwd ?? ctx.cwd;
+		const history = collectBestOfNRunHistory(searchCwd, options);
 		const selectedRun = options.runId ? history.entries.find((entry) => entry.name === options.runId) : undefined;
-		const missingRunMessage = options.runId && !selectedRun ? formatMissingCompareRunMessage(history, ctx.cwd, options.runId) : undefined;
+		const missingRunMessage = options.runId && !selectedRun ? formatMissingCompareRunMessage(history, searchCwd, options.runId) : undefined;
 		if (options.plain) {
 			process.stdout.write(selectedRun ? formatBestOfNRunDetail(history, selectedRun) : missingRunMessage ?? formatBestOfNRunHistory(history));
 			return;
 		}
 		if ((options.tui || isTuiMode(ctx)) && hasCustomUi(ctx)) {
 			if (options.runId) {
-				if (selectedRun) await inspectCompareRunInTui(ctx, options, selectedRun.name);
+				if (selectedRun) await inspectCompareRunInTui(ctx, options, selectedRun.name, searchCwd);
 				else notify(ctx, missingRunMessage ?? "Compare run was not found in the current run history.", "error");
 				return;
 			}
@@ -2999,13 +3017,13 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			for (;;) {
 				const selection = await openCompareRunPicker(ctx, currentHistory);
 				if (selection?.action === "refresh") {
-					currentHistory = collectBestOfNRunHistory(ctx.cwd, options);
+					currentHistory = collectBestOfNRunHistory(searchCwd, options);
 					continue;
 				}
 				if (selection?.action !== "selected") break;
-				const detailAction = await inspectCompareRunInTui(ctx, options, selection.runId);
+				const detailAction = await inspectCompareRunInTui(ctx, options, selection.runId, searchCwd);
 				if (detailAction?.action === "back" || detailAction?.action === "refresh") {
-					currentHistory = collectBestOfNRunHistory(ctx.cwd, options);
+					currentHistory = collectBestOfNRunHistory(searchCwd, options);
 					continue;
 				}
 				break;
