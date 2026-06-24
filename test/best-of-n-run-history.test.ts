@@ -664,6 +664,22 @@ test("compare-runs TUI reports vanished selected run and refreshes history", asy
 	});
 });
 
+test("compare-runs direct TUI id handles detail refresh and back actions", async () => {
+	await withAdversarialFixtureDir(async (root) => {
+		writeCompareRun(root, "2026-06-23-direct-abcdef12", { keepArtifacts: true });
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		pi.customResults.push({ action: "refresh" }, { action: "back" }, { action: "closed" });
+
+		await pi.commands.get("compare-runs")!.handler("--id 2026-06-23-direct-abcdef12", createCompareRunTuiContext(root, pi));
+
+		assert.equal(pi.customComponents.length, 3);
+		assert.equal(pi.customComponents[0] instanceof CompareRunDetailInspector, true);
+		assert.equal(pi.customComponents[1] instanceof CompareRunDetailInspector, true);
+		assert.equal(pi.customComponents[2] instanceof CompareRunPicker, true);
+	});
+});
+
 function resultSnapshot(root: string) {
 	return collectBestOfNRunHistory(root).entries.map((entry) => ({
 		name: entry.name,

@@ -1039,6 +1039,8 @@ test("compare prompt commit ask approval commands use repo root from subdir cwd"
 		const approvalText = commitAsk.details.approvalText;
 		assert.match(approvalText, new RegExp(`- Compare cwd: ${expectedRepoRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
 		assert.match(approvalText, new RegExp(`git -C '${expectedRepoRoot.replace(/'/g, `'"'"'`).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}' add --patch`));
+		assert.match(approvalText, /Inspect: \/compare-runs --id .+/);
+		assert.doesNotMatch(approvalText, new RegExp(`Inspect: \\/compare-runs --cwd ${expectedRepoRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} --id`));
 		assert.match(approvalText, /^\?\? sibling\.md$/m);
 	});
 });

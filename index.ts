@@ -1226,6 +1226,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	function renderBestOfNCommitAsk(options: {
 		compareCwd: string;
 		commandCwd: string;
+		reportCwd?: string;
 		promptName: string;
 		taskArgs: string[];
 		reportPath?: string;
@@ -1245,7 +1246,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			"`bestOfN.commit: ask` is enabled. Review and stage only the intended final-applier changes before committing.",
 			"",
 			`- Compare cwd: ${options.compareCwd}`,
-			`- ${formatRunReportCompletionLine(options.reportPath, { compareCwd: options.compareCwd, commandCwd: options.commandCwd })}`,
+			`- ${formatRunReportCompletionLine(options.reportPath, { compareCwd: options.reportCwd ?? options.compareCwd, commandCwd: options.commandCwd })}`,
 			`- Suggested commit: \`${suggestedMessage}\``,
 			"",
 			...(guardWarnings ? [
@@ -1841,7 +1842,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				finalText: finalResult.text,
 			}, ctx);
 			const commitAsk = prompt.commit === "ask" && beforeFinalApplierSnapshot && afterFinalApplierSnapshot
-				? renderBestOfNCommitAsk({ compareCwd: approvalCwd, commandCwd: ctx.cwd, promptName: name, taskArgs, reportPath, beforeFinalApplier: beforeFinalApplierSnapshot, afterFinalApplier: afterFinalApplierSnapshot })
+				? renderBestOfNCommitAsk({ compareCwd: approvalCwd, commandCwd: ctx.cwd, reportCwd: compareCwd, promptName: name, taskArgs, reportPath, beforeFinalApplier: beforeFinalApplierSnapshot, afterFinalApplier: afterFinalApplierSnapshot })
 				: "";
 			pi.sendUserMessage(`[Compare apply complete: ${name}]\n\n${formatRunReportCompletionLine(reportPath, { keepArtifacts, compareCwd, commandCwd: ctx.cwd })}\n\n${finalResult.text}`);
 			if (commitAsk) {
@@ -2982,12 +2983,29 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			return;
 		}
 		if ((options.tui || isTuiMode(ctx)) && hasCustomUi(ctx)) {
-			if (options.runId) {
-				if (selectedRun) await inspectCompareRunInTui(ctx, options, selectedRun.name, searchCwd);
-				else notify(ctx, missingRunMessage ?? "Compare run was not found in the current run history.", "error");
-				return;
-			}
 			let currentHistory = history;
+			if (options.runId) {
+				if (!selectedRun) {
+					notify(ctx, missingRunMessage ?? "Compare run was not found in the current run history.", "error");
+					return;
+				}
+				let currentRun = selectedRun;
+				for (;;) {
+					const detailAction = await inspectCompareRunInTui(ctx, options, currentRun.name, searchCwd);
+					if (detailAction?.action === "refresh") {
+						currentHistory = collectBestOfNRunHistory(searchCwd, options);
+						const refreshedRun = currentHistory.entries.find((entry) => entry.name === currentRun.name);
+						if (!refreshedRun) {
+							notify(ctx, `Compare run ${currentRun.name} vanished or is no longer readable; refreshed run history.`, "warning");
+							break;
+						}
+						currentRun = refreshedRun;
+						continue;
+					}
+					if (detailAction?.action === "back") break;
+					return;
+				}
+			}
 			for (;;) {
 				const selection = await openCompareRunPicker(ctx, currentHistory);
 				if (selection?.action === "refresh") {
