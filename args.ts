@@ -295,6 +295,37 @@ function readJsonLikeFlagTokenEnd(argsString: string, tokenStart: number): numbe
 	return i;
 }
 
+function readSpaceSeparatedFlagValue(argsString: string, valueStart: number): { value: string; end: number } | null {
+	let i = valueStart;
+	while (i < argsString.length && /\s/.test(argsString[i])) i++;
+	if (i >= argsString.length) return null;
+
+	const char = argsString[i];
+	if (char === '"' || char === "'") {
+		const quote = char;
+		let end = i + 1;
+		let value = "";
+		while (end < argsString.length) {
+			const current = argsString[end];
+			if (current === "\\" && end + 1 < argsString.length) {
+				value += argsString[end + 1];
+				end += 2;
+				continue;
+			}
+			if (current === quote) return { value, end: end + 1 };
+			value += current;
+			end++;
+		}
+		return { value, end };
+	}
+
+	const start = i;
+	while (i < argsString.length && !/\s/.test(argsString[i])) i++;
+	const value = argsString.slice(start, i);
+	if (!value || value.startsWith("--")) return null;
+	return { value, end: i };
+}
+
 export function extractSubagentOverride(argsString: string): SubagentOverrideExtraction {
 	let override: SubagentOverride | undefined;
 	let cwdRaw: string | undefined;
@@ -345,18 +376,12 @@ export function extractSubagentOverride(argsString: string): SubagentOverrideExt
 		}
 
 		if (token === "--cwd") {
-			let lookahead = i;
-			while (lookahead < argsString.length && /\s/.test(argsString[lookahead])) lookahead++;
-			if (lookahead < argsString.length && argsString[lookahead] !== '"' && argsString[lookahead] !== "'") {
-				const valueStart = lookahead;
-				while (lookahead < argsString.length && !/\s/.test(argsString[lookahead])) lookahead++;
-				const value = argsString.slice(valueStart, lookahead);
-				if (value && !value.startsWith("--")) {
-					tokensToRemove.push({ start: tokenStart, end: i }, { start: valueStart, end: lookahead });
-					cwdRaw = value;
-					i = lookahead;
-					continue;
-				}
+			const parsed = readSpaceSeparatedFlagValue(argsString, i);
+			if (parsed) {
+				tokensToRemove.push({ start: tokenStart, end: i }, { start: i, end: parsed.end });
+				cwdRaw = parsed.value || undefined;
+				i = parsed.end;
+				continue;
 			}
 			tokensToRemove.push({ start: tokenStart, end: i });
 			continue;
@@ -370,18 +395,12 @@ export function extractSubagentOverride(argsString: string): SubagentOverrideExt
 		}
 
 		if (token === "--model") {
-			let lookahead = i;
-			while (lookahead < argsString.length && /\s/.test(argsString[lookahead])) lookahead++;
-			if (lookahead < argsString.length && argsString[lookahead] !== '"' && argsString[lookahead] !== "'") {
-				const valueStart = lookahead;
-				while (lookahead < argsString.length && !/\s/.test(argsString[lookahead])) lookahead++;
-				const value = argsString.slice(valueStart, lookahead);
-				if (value && !value.startsWith("--")) {
-					tokensToRemove.push({ start: tokenStart, end: i }, { start: valueStart, end: lookahead });
-					modelRaw = value;
-					i = lookahead;
-					continue;
-				}
+			const parsed = readSpaceSeparatedFlagValue(argsString, i);
+			if (parsed) {
+				tokensToRemove.push({ start: tokenStart, end: i }, { start: i, end: parsed.end });
+				modelRaw = parsed.value || undefined;
+				i = parsed.end;
+				continue;
 			}
 			tokensToRemove.push({ start: tokenStart, end: i });
 			continue;
@@ -395,18 +414,12 @@ export function extractSubagentOverride(argsString: string): SubagentOverrideExt
 		}
 
 		if (token === "--preset") {
-			let lookahead = i;
-			while (lookahead < argsString.length && /\s/.test(argsString[lookahead])) lookahead++;
-			if (lookahead < argsString.length && argsString[lookahead] !== '"' && argsString[lookahead] !== "'") {
-				const valueStart = lookahead;
-				while (lookahead < argsString.length && !/\s/.test(argsString[lookahead])) lookahead++;
-				const value = argsString.slice(valueStart, lookahead);
-				if (value && !value.startsWith("--")) {
-					tokensToRemove.push({ start: tokenStart, end: i }, { start: valueStart, end: lookahead });
-					presetRaw = value;
-					i = lookahead;
-					continue;
-				}
+			const parsed = readSpaceSeparatedFlagValue(argsString, i);
+			if (parsed) {
+				tokensToRemove.push({ start: tokenStart, end: i }, { start: i, end: parsed.end });
+				presetRaw = parsed.value || undefined;
+				i = parsed.end;
+				continue;
 			}
 			tokensToRemove.push({ start: tokenStart, end: i });
 			continue;
