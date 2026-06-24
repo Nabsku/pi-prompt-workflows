@@ -20,12 +20,23 @@ function formatDate(ms: number): string {
 	return new Date(ms).toISOString();
 }
 
-function runInspectCommand(run: BestOfNRunHistoryEntry): string {
-	return `/compare-runs --id ${run.name}`;
+function quoteSlashCommandArg(value: string): string {
+	if (!/[\s"'\\]/.test(value)) return value;
+	return JSON.stringify(value);
 }
 
-function runPlainDetailCommand(run: BestOfNRunHistoryEntry): string {
-	return `/compare-runs --plain --id ${run.name}`;
+function cwdArg(result: BestOfNRunHistoryResult, commandCwd?: string): string {
+	const historyCwd = result.cwd;
+	if (!commandCwd || !historyCwd || historyCwd === commandCwd) return "";
+	return ` --cwd ${quoteSlashCommandArg(historyCwd)}`;
+}
+
+function runInspectCommand(result: BestOfNRunHistoryResult, run: BestOfNRunHistoryEntry, commandCwd?: string): string {
+	return `/compare-runs${cwdArg(result, commandCwd)} --id ${run.name}`;
+}
+
+function runPlainDetailCommand(result: BestOfNRunHistoryResult, run: BestOfNRunHistoryEntry, commandCwd?: string): string {
+	return `/compare-runs --plain${cwdArg(result, commandCwd)} --id ${run.name}`;
 }
 
 function rawArtifactGuidance(run: BestOfNRunHistoryEntry): string | undefined {
@@ -41,10 +52,10 @@ function artifactExplanation(status: BestOfNRunHistoryEntry["artifacts"][number]
 	return `retained; full file path: ${path}.`;
 }
 
-function nextSteps(run: BestOfNRunHistoryEntry): string[] {
+function nextSteps(result: BestOfNRunHistoryResult, run: BestOfNRunHistoryEntry, commandCwd?: string): string[] {
 	const steps = [
 		`Open the report: ${run.reportPath}`,
-		`Copyable detail command: ${runPlainDetailCommand(run)}`,
+		`Copyable detail command: ${runPlainDetailCommand(result, run, commandCwd)}`,
 		"Browse recent runs: /compare-runs",
 	];
 	if (run.keepArtifacts === false || run.artifacts.some((artifact) => artifact.status === "not-retained")) steps.push("Need raw worker/reviewer output? Rerun the compare command with --keep-artifacts.");
@@ -54,7 +65,7 @@ function nextSteps(run: BestOfNRunHistoryEntry): string[] {
 	return steps;
 }
 
-export function formatBestOfNRunHistory(result: BestOfNRunHistoryResult): string {
+export function formatBestOfNRunHistory(result: BestOfNRunHistoryResult, options: { commandCwd?: string } = {}): string {
 	const lines: string[] = ["# Compare run history", "", `Root: ${sanitizeInline(result.root)}`, ""];
 	for (const diagnostic of result.diagnostics) lines.push(`Warning: ${sanitizeInline(diagnostic)}`);
 	if (result.diagnostics.length > 0) lines.push("");
@@ -69,8 +80,8 @@ export function formatBestOfNRunHistory(result: BestOfNRunHistoryResult): string
 		lines.push(`- Modified: ${formatDate(run.mtimeMs)}`);
 		lines.push(`- Path: ${sanitizeInline(run.path)}`);
 		lines.push(`- Report: ${sanitizeInline(run.reportPath)}`);
-		lines.push(`- Inspect: ${sanitizeInline(runInspectCommand(run))}`);
-		lines.push(`- Plain detail: ${sanitizeInline(runPlainDetailCommand(run))}`);
+		lines.push(`- Inspect: ${sanitizeInline(runInspectCommand(result, run, options.commandCwd))}`);
+		lines.push(`- Plain detail: ${sanitizeInline(runPlainDetailCommand(result, run, options.commandCwd))}`);
 		lines.push(`- Status: ${formatMaybe(run.status)}`);
 		lines.push(`- Prompt: ${formatMaybe(run.prompt)}`);
 		lines.push(`- Preset: ${formatMaybe(run.preset)}`);
@@ -99,7 +110,7 @@ export function formatBestOfNRunHistory(result: BestOfNRunHistoryResult): string
 	return `${lines.join("\n").trimEnd()}\n`;
 }
 
-export function formatBestOfNRunDetail(result: BestOfNRunHistoryResult, run: BestOfNRunHistoryEntry): string {
+export function formatBestOfNRunDetail(result: BestOfNRunHistoryResult, run: BestOfNRunHistoryEntry, options: { commandCwd?: string } = {}): string {
 	const lines: string[] = ["# Compare run detail", "", `Root: ${sanitizeInline(result.root)}`, `Run: ${sanitizeInline(run.name)}`, ""];
 	for (const diagnostic of result.diagnostics) lines.push(`Warning: ${sanitizeInline(diagnostic)}`);
 	for (const diagnostic of run.diagnostics) lines.push(`Warning: ${sanitizeInline(diagnostic)}`);
@@ -110,8 +121,8 @@ export function formatBestOfNRunDetail(result: BestOfNRunHistoryResult, run: Bes
 	lines.push(`- Path: ${sanitizeInline(run.path)}`);
 	lines.push(`- Report: ${sanitizeInline(run.reportPath)}`);
 	lines.push(`- Preview limit: ${result.maxBytes} bytes`);
-	lines.push(`- Inspect: ${sanitizeInline(runInspectCommand(run))}`);
-	lines.push(`- Plain detail: ${sanitizeInline(runPlainDetailCommand(run))}`);
+	lines.push(`- Inspect: ${sanitizeInline(runInspectCommand(result, run, options.commandCwd))}`);
+	lines.push(`- Plain detail: ${sanitizeInline(runPlainDetailCommand(result, run, options.commandCwd))}`);
 	lines.push("- Browse recent: /compare-runs");
 	lines.push(`- Status: ${formatMaybe(run.status)}`);
 	lines.push(`- Prompt: ${formatMaybe(run.prompt)}`);
@@ -124,7 +135,7 @@ export function formatBestOfNRunDetail(result: BestOfNRunHistoryResult, run: Bes
 	const artifactGuidance = rawArtifactGuidance(run);
 	if (artifactGuidance) lines.push(`- Raw artifact guidance: ${sanitizeInline(artifactGuidance)}`);
 	lines.push("", "## Next steps");
-	for (const step of nextSteps(run)) lines.push(`- ${sanitizeInline(step)}`);
+	for (const step of nextSteps(result, run, options.commandCwd)) lines.push(`- ${sanitizeInline(step)}`);
 	lines.push("", "## Lineup", run.lineupText ? sanitizeForTerminal(run.lineupText, { preserveLineBreaks: true }) : "lineup.json is unavailable or invalid. See diagnostics.");
 	lines.push("", "## Report", run.reportText ? sanitizeForTerminal(run.reportText, { preserveLineBreaks: true }) : "report.md is unavailable. See diagnostics.");
 	lines.push("", "## Artifacts");
