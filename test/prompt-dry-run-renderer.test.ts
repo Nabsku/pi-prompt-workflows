@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { extractLineupOverrides } from "../args.js";
 import { formatPromptDryRun } from "../prompt-dry-run-renderer.js";
 import type { BestOfNPreflight } from "../best-of-n-preflight.js";
 import type { PromptDryRunResult } from "../prompt-dry-run.js";
@@ -207,12 +208,14 @@ test("compare preflight execute command preserves runtime cwd and lineup overrid
 	});
 	const rendered = formatPromptDryRun(ok({ comparePreflight: preflight, runtime: { restore: false, boomerang: false, cwd: "/tmp/other" } }));
 	assert.match(rendered, /Execute: \/best-of-n --cwd \/tmp\/other/);
-	assert.match(rendered, /--workers="/);
-	assert.match(rendered, /\\"agent\\":\\"coder\\"/);
-	assert.match(rendered, /--reviewers="/);
-	assert.match(rendered, /\\"agent\\":\\"critic\\"/);
-	assert.match(rendered, /--final-applier="/);
-	assert.match(rendered, /\\"agent\\":\\"apply\\"/);
+	assert.equal(rendered.includes('--workers=[{"agent":"coder","model":"m1","cwd":"/tmp/other"}]'), true);
+	assert.equal(rendered.includes('--reviewers=[{"agent":"critic","model":"m2","cwd":"/tmp/other"}]'), true);
+	assert.equal(rendered.includes('--final-applier={"agent":"apply","model":"m3"}'), true);
+	const command = rendered.match(/Execute: (\/best-of-n .+)/)?.[1] ?? "";
+	const parsed = extractLineupOverrides(command.replace(/^\/best-of-n\s+/, ""));
+	assert.deepEqual(parsed.errors, []);
+	assert.equal(parsed.actions.length, 3);
+	assert.equal(parsed.actions[0]?.slots[0]?.agent, "coder");
 });
 
 test("compare preflight execute command quotes runtime cwd values with spaces", () => {
