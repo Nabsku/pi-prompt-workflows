@@ -41,8 +41,19 @@ function formatDate(ms: number): string {
 	return new Date(ms).toISOString();
 }
 
-function runPlainDetailCommand(run: BestOfNRunHistoryEntry): string {
-	return `/compare-runs --plain --id ${run.name}`;
+function quoteSlashCommandArg(value: string): string {
+	if (!/[\s"'\\]/.test(value)) return value;
+	return JSON.stringify(value);
+}
+
+function cwdArg(result: BestOfNRunHistoryResult, commandCwd?: string): string {
+	const historyCwd = result.cwd;
+	if (!commandCwd || !historyCwd || historyCwd === commandCwd) return "";
+	return ` --cwd ${quoteSlashCommandArg(historyCwd)}`;
+}
+
+function runPlainDetailCommand(result: BestOfNRunHistoryResult, run: BestOfNRunHistoryEntry, commandCwd?: string): string {
+	return `/compare-runs --plain${cwdArg(result, commandCwd)} --id ${run.name}`;
 }
 
 function artifactExplanation(artifact: BestOfNArtifactEntry, maxBytes: number): string {
@@ -53,10 +64,10 @@ function artifactExplanation(artifact: BestOfNArtifactEntry, maxBytes: number): 
 	return `retained; full file path: ${artifact.path}.`;
 }
 
-function nextSteps(run: BestOfNRunHistoryEntry): string {
+function nextSteps(result: BestOfNRunHistoryResult, run: BestOfNRunHistoryEntry, commandCwd?: string): string {
 	const lines = [
 		`Open report: ${run.reportPath}`,
-		`Plain detail: ${runPlainDetailCommand(run)}`,
+		`Plain detail: ${runPlainDetailCommand(result, run, commandCwd)}`,
 		"Browse/refresh: /compare-runs, or press b then r in this TUI.",
 	];
 	if (run.keepArtifacts === false || run.artifacts.some((artifact) => artifact.status === "not-retained")) lines.push("Need raw worker/reviewer outputs? Rerun with --keep-artifacts.");
@@ -97,7 +108,7 @@ export interface CompareRunDetailViewModel {
 	};
 }
 
-export function createCompareRunDetailViewModel(result: BestOfNRunHistoryResult, run: BestOfNRunHistoryEntry): CompareRunDetailViewModel {
+export function createCompareRunDetailViewModel(result: BestOfNRunHistoryResult, run: BestOfNRunHistoryEntry, options: { commandCwd?: string } = {}): CompareRunDetailViewModel {
 	const summary = [
 		`Run: ${sanitizeForTerminal(run.name)}`,
 		`Path: ${sanitizeForTerminal(run.path)}`,
@@ -134,7 +145,7 @@ export function createCompareRunDetailViewModel(result: BestOfNRunHistoryResult,
 		run,
 		panes: {
 			summary,
-			nextSteps: nextSteps(run),
+			nextSteps: nextSteps(result, run, options.commandCwd),
 			lineup,
 			report,
 			artifacts,

@@ -318,6 +318,35 @@ test("default UI dry-run routes compare preflight through notification unless --
 	});
 });
 
+test("default UI dry-run shows full blocked compare preflight guidance", async () => {
+	await setup(async (_root, cwd, pi, ctx) => {
+		writePrompt(cwd, "compare", [
+			"---",
+			"model: anthropic/claude-sonnet-4-20250514",
+			"bestOfN:",
+			"  workers:",
+			"    - agent: worker",
+			"  reviewers:",
+			"    - agent: reviewer",
+			"  finalApplier:",
+			"    agent: reviewer",
+			"---",
+			"Task $@",
+		].join("\n"));
+		await pi.emit("session_start", {}, ctx);
+
+		const output = await captureStdout(() => pi.commands.get("dry-run-prompt")!.handler!("compare src/app.ts", ctx));
+
+		assert.equal(output, "");
+		assert.equal(pi.notifications.at(-1)?.type, "error");
+		assert.match(pi.notifications.at(-1)?.message ?? "", /## Compare preflight/);
+		assert.match(pi.notifications.at(-1)?.message ?? "", /Verdict: blocked/);
+		assert.match(pi.notifications.at(-1)?.message ?? "", /Fix before running/);
+		assert.match(pi.notifications.at(-1)?.message ?? "", /Compare prompts with finalApplier require worktree: true/);
+		assertNoExecutionSideEffects(pi);
+	});
+});
+
 
 test("exact plain dry-run of hidden project prompt-library commands previews without approval", async () => {
 	await setup(async (_root, cwd, pi, ctx) => {
