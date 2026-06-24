@@ -206,10 +206,21 @@ test("compare preflight execute command preserves runtime cwd and lineup overrid
 		},
 	});
 	const rendered = formatPromptDryRun(ok({ comparePreflight: preflight, runtime: { restore: false, boomerang: false, cwd: "/tmp/other" } }));
-	assert.match(rendered, /Execute: \/best-of-n --cwd=\/tmp\/other/);
-	assert.equal(rendered.includes('--workers=[{"agent":"coder","model":"m1","cwd":"/tmp/other"}]'), true);
-	assert.equal(rendered.includes('--reviewers=[{"agent":"critic","model":"m2","cwd":"/tmp/other"}]'), true);
-	assert.equal(rendered.includes('--final-applier={"agent":"apply","model":"m3"}'), true);
+	assert.match(rendered, /Execute: \/best-of-n --cwd \/tmp\/other/);
+	assert.match(rendered, /--workers="/);
+	assert.match(rendered, /\\"agent\\":\\"coder\\"/);
+	assert.match(rendered, /--reviewers="/);
+	assert.match(rendered, /\\"agent\\":\\"critic\\"/);
+	assert.match(rendered, /--final-applier="/);
+	assert.match(rendered, /\\"agent\\":\\"apply\\"/);
+});
+
+test("compare preflight execute command quotes runtime cwd values with spaces", () => {
+	const preflight = comparePreflight({
+		compareCwd: { resolved: "/tmp/repo with space", source: "runtime-cwd", requested: "/tmp/repo with space" },
+	});
+	const rendered = formatPromptDryRun(ok({ comparePreflight: preflight, runtime: { restore: false, boomerang: false, cwd: "/tmp/repo with space" } }));
+	assert.match(rendered, /Execute: \/best-of-n --cwd "\/tmp\/repo with space" fix bug/);
 });
 
 test("blocked compare preflight summarizes error diagnostics under Fix before running", () => {

@@ -11,12 +11,16 @@ function formatMaybe(value: unknown): string {
 	return sanitizeInline(String(value));
 }
 
+function quoteSlashCommandArg(value: string): string {
+	return /^[^\s"'\\]+$/.test(value) ? value : JSON.stringify(value);
+}
+
 function formatUsePresetCommand(promptName: string, presetName: string, dryRun: boolean, keepArtifacts = false): string {
 	const command = dryRun ? "dry-run-prompt" : promptName;
 	const promptArg = dryRun ? `${promptName} ` : "";
 	const plain = dryRun ? " --plain" : "";
 	const artifactRetention = keepArtifacts ? " --keep-artifacts" : "";
-	return `/${command} ${promptArg}--preset ${presetName}${plain}${artifactRetention} <task>`;
+	return `/${command} ${promptArg}--preset ${quoteSlashCommandArg(presetName)}${plain}${artifactRetention} <task>`;
 }
 
 function trustDescription(entry: BestOfNPresetDiscoveryEntry): string {
@@ -56,9 +60,10 @@ function formatPreset(entry: BestOfNPresetDiscoveryEntry): string[] {
 	lines.push(`- Reviewer lineup: ${formatLineup(entry.preset.reviewers)}`);
 	lines.push(`- Final applier: ${formatMaybe(entry.hasFinalApplier)}`);
 	lines.push("- Use:");
-	lines.push(`  - Dry run (read-only): ${formatUsePresetCommand("best-of-n", entry.name, true)}`);
-	lines.push(`  - Execute (retains evidence artifacts): ${formatUsePresetCommand("best-of-n", entry.name, false, true)}`);
-	lines.push(`  - Execute (summary-only, fewer local artifacts): ${formatUsePresetCommand("best-of-n", entry.name, false)}`);
+	lines.push("  - Replace `<compare-prompt>` with your compare prompt name, for example `best-of-n` or `best-of-n-smoke`.");
+	lines.push(`  - Dry run (read-only): ${formatUsePresetCommand("<compare-prompt>", entry.name, true)}`);
+	lines.push(`  - Execute (retains evidence artifacts): ${formatUsePresetCommand("<compare-prompt>", entry.name, false, true)}`);
+	lines.push(`  - Execute (summary-only, fewer local artifacts): ${formatUsePresetCommand("<compare-prompt>", entry.name, false)}`);
 	if (entry.description) lines.push(`- Description: ${sanitizeInline(entry.description)}`);
 	return lines;
 }

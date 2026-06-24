@@ -1686,8 +1686,10 @@ test("compare prompts handle partial-success policy, final-applier fallback, ove
 						isError: false,
 					};
 				},
-				assert(_pi: FakePi, phase: number) {
+				assert(pi: FakePi, phase: number) {
 					assert.equal(phase, 2);
+					const repoPath = join(root, "other-repo");
+					assert.match(pi.userMessages[0] ?? "", new RegExp(`Inspect: \\/compare-runs --cwd ${repoPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} --id .+`));
 				},
 			},
 		] as const;
