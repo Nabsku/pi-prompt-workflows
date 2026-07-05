@@ -2726,10 +2726,12 @@ test("loadPromptsWithModel validates bestOfN compare lineups and cutover diagnos
 
 test("reserved built-in command mirror is explicit", () => {
 	assert.deepEqual([...RESERVED_COMMAND_NAMES].sort(), [
+		"best-of-n-presets",
 		"best-of-n-runs",
 		"chain-prompts",
 		"changelog",
 		"compact",
+		"compare-presets",
 		"compare-runs",
 		"copy",
 		"dry-run-prompt",

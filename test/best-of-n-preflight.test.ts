@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BEST_OF_N_PREFLIGHT_SCHEMA_VERSION, createBestOfNPreflight, type BestOfNPreflight } from "../best-of-n-preflight.js";
@@ -249,5 +249,33 @@ test("createBestOfNPreflight validates compare cwd and worktree/final applier co
 		assert.equal(preflight.compareCwd.source, "runtime-cwd");
 		assert(preflight.diagnostics.some((diagnostic) => diagnostic.code === "compare-cwd-not-found"));
 		assert(preflight.diagnostics.some((diagnostic) => diagnostic.code === "compare-final-applier-requires-worktree"));
+	});
+});
+
+test("createBestOfNPreflight mirrors path-driven compare argument checks", () => {
+	withTempProject((projectRoot) => {
+		mkdirSync(projectRoot, { recursive: true });
+		const prompt = comparePrompt(projectRoot, { name: "parallel-patch-compare-at-path", content: "Ship $ARGUMENTS" });
+
+		const missingPath = createBestOfNPreflight({
+			prompt,
+			args: "",
+			contextCwd: projectRoot,
+			currentModelLabel: "session model",
+			pathArgumentPromptName: "parallel-patch-compare-at-path",
+		});
+		assert(missingPath.diagnostics.some((diagnostic) => diagnostic.code === "missing-path-argument"));
+
+		const missingTask = createBestOfNPreflight({
+			prompt,
+			args: projectRoot,
+			contextCwd: projectRoot,
+			currentModelLabel: "session model",
+			pathArgumentPromptName: "parallel-patch-compare-at-path",
+		});
+		assert.equal(missingTask.compareCwd.source, "path-argument");
+		assert.equal(missingTask.compareCwd.resolved, realpathSync(projectRoot));
+		assert.deepEqual(missingTask.task.parsed, []);
+		assert(missingTask.diagnostics.some((diagnostic) => diagnostic.code === "missing-implementation-task"));
 	});
 });
