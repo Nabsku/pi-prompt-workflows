@@ -12,7 +12,6 @@ import {
 	DEFAULT_SUBAGENT_NAME,
 	appendDelegatedLiveOutput,
 	clearDelegatedLiveState,
-	ensureSubagentRuntime,
 	getDelegatedLiveState,
 	PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT,
 	PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE,
@@ -172,7 +171,6 @@ async function prepareDelegatedTask(
 	override: SubagentOverride | undefined,
 	inheritedModel: Model<any> | undefined,
 	taskPreamble: string | undefined,
-	runtime: Awaited<ReturnType<typeof ensureSubagentRuntime>>,
 ): Promise<PreparedDelegatedTask> {
 	const requestedAgent = resolveDelegationName(task.prompt, override);
 	if (!requestedAgent) {
@@ -182,7 +180,7 @@ async function prepareDelegatedTask(
 	if (effectiveCwd !== ctx.cwd && !existsSync(effectiveCwd)) {
 		throw new Error(`cwd directory does not exist: ${effectiveCwd}`);
 	}
-	const agent = resolveDelegatedAgent(runtime, effectiveCwd, requestedAgent);
+	const agent = requestedAgent;
 	const preparationOptions = inheritedModel === undefined ? undefined : { inheritedModel };
 	const prepared = await preparePromptExecution(
 		task.prompt,
@@ -540,7 +538,7 @@ async function requestDelegatedRun(
 		if (!started && done) return; // already finished (e.g. response came synchronously)
 		if (!started) {
 			finish(() => reject(new Error(
-				`No subagent runtime responded for \`${requestLabel}\`. ` +
+				`No loaded pi-subagents bridge responded for \`${requestLabel}\`. ` +
 				`Ensure the subagent extension is loaded and has no name conflicts with other extensions.`,
 			)));
 			return;
@@ -551,7 +549,6 @@ async function requestDelegatedRun(
 export async function executeSubagentPromptStep(options: DelegatedPromptOptions): Promise<DelegatedPromptOutcome | undefined> {
 	const { pi, ctx, currentModel, override, signal, inheritedModel, taskPreamble, allowPartialFailures } = options;
 	const commands = typeof (pi as { getCommands?: () => RuntimeSkillCommand[] }).getCommands === "function" ? (pi as { getCommands: () => RuntimeSkillCommand[] }).getCommands() : [];
-	const runtime = await ensureSubagentRuntime(ctx.cwd);
 	const isParallelRequest = "parallel" in options;
 
 	const tasks = isParallelRequest
@@ -561,7 +558,7 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 
 	const preparedTasks: PreparedDelegatedTask[] = [];
 	for (const task of tasks) {
-		const preparedTask = await prepareDelegatedTask(task, ctx, commands, currentModel, override, inheritedModel, taskPreamble, runtime);
+		const preparedTask = await prepareDelegatedTask(task, ctx, commands, currentModel, override, inheritedModel, taskPreamble);
 		preparedTasks.push(preparedTask);
 	}
 

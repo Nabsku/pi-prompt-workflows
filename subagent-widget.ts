@@ -5,7 +5,7 @@ import {
 	type DelegatedSubagentLiveState,
 	type DelegatedSubagentTask,
 	type DelegatedSubagentTaskProgress,
-} from "./subagent-runtime.js";
+} from "./subagent-runtime.ts";
 
 export const DELEGATED_WIDGET_KEY = "prompt-subagent-progress";
 
