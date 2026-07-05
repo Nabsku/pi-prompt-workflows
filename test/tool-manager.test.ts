@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createToolManager } from "../tool-manager.js";
+import { createToolManager } from "../tool-manager.ts";
 
 interface FakeCommand {
 	description: string;
@@ -231,6 +231,35 @@ test("run-prompt treats non-string command payloads as typed input errors", asyn
 
 		assert.equal(result.content[0].text, "No command specified.");
 		assert.equal(result.isError, true);
+	});
+});
+
+test("manager reports whether a prompt command is queued", async () => {
+	await withTempHome(async () => {
+		const pi = new FakePi();
+		let storedCtx: any = {};
+		const manager = createToolManager(pi as never, {
+			isActive: () => false,
+			getStoredCtx: () => storedCtx,
+			setStoredCtx: (ctx) => {
+				storedCtx = ctx;
+			},
+			executeCommand: async () => {},
+		});
+		manager.registerCommand();
+
+		const command = pi.commands.get("prompt-tool");
+		assert.ok(command);
+		await command.handler("on", createNotifyCtx([]));
+		assert.equal(manager.hasQueuedCommand(), false);
+
+		const tool = pi.tools.get("run-prompt");
+		assert.ok(tool);
+		await tool.execute("tool-call", { command: "example" });
+		assert.equal(manager.hasQueuedCommand(), true);
+
+		await manager.processQueue(createNotifyCtx([]) as never, async () => {});
+		assert.equal(manager.hasQueuedCommand(), false);
 	});
 });
 

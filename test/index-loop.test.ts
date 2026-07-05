@@ -3,12 +3,12 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import promptModelExtension from "../index.js";
+import promptModelExtension from "../index.ts";
 import {
 	PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT,
 	PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT,
 	PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT,
-} from "../subagent-runtime.js";
+} from "../subagent-runtime.ts";
 
 const MODEL_ID = "claude-sonnet-4-20250514";
 const ACTIVE_MODEL = { provider: "anthropic", id: MODEL_ID };
@@ -201,6 +201,34 @@ function createContext(
 	};
 }
 
+test("initializes prompt commands from session cwd, not process cwd", async () => {
+	await withTempHome(async (root) => {
+		const processCwd = join(root, "process-cwd");
+		const sessionCwd = join(root, "session-cwd");
+		mkdirSync(join(processCwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(sessionCwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(processCwd, ".pi", "prompts", "process-only.md"), `---\nmodel: ${MODEL_ID}\n---\nprocess`);
+		writeFileSync(join(sessionCwd, ".pi", "prompts", "session-only.md"), `---\nmodel: ${MODEL_ID}\n---\nsession`);
+
+		const previousCwd = process.cwd();
+		try {
+			process.chdir(processCwd);
+			const pi = new FakePi();
+			promptModelExtension(pi as never);
+
+			assert.equal(pi.commands.has("process-only"), false);
+
+			const { ctx } = createContext(sessionCwd, pi);
+			await pi.emit("session_start", { reason: "startup" }, ctx);
+
+			assert.equal(pi.commands.has("session-only"), true);
+			assert.equal(pi.commands.has("process-only"), false);
+		} finally {
+			process.chdir(previousCwd);
+		}
+	});
+});
+
 function createBranchingContext(
 	cwd: string,
 	pi: FakePi,
@@ -316,21 +344,12 @@ function createBranchingContext(
 	};
 }
 
+async function withSubagentBridge(_root: string, run: () => Promise<void>) {
+	await run();
+}
+
 async function withSubagentRuntime(root: string, run: () => Promise<void>) {
-	const runtimeRoot = join(root, "runtime-subagent");
-	mkdirSync(runtimeRoot, { recursive: true });
-	writeFileSync(
-		join(runtimeRoot, "agents.js"),
-		"export function discoverAgents(){ return { agents: [{ name: 'delegate' }, { name: 'reviewer' }, { name: 'worker' }] }; }",
-	);
-	const previousRuntime = process.env.PI_SUBAGENT_RUNTIME_ROOT;
-	process.env.PI_SUBAGENT_RUNTIME_ROOT = runtimeRoot;
-	try {
-		await run();
-	} finally {
-		if (previousRuntime === undefined) delete process.env.PI_SUBAGENT_RUNTIME_ROOT;
-		else process.env.PI_SUBAGENT_RUNTIME_ROOT = previousRuntime;
-	}
+	await withSubagentBridge(root, run);
 }
 
 test("bare --loop with --no-converge respects no-converge and converges only on default", async () => {
@@ -1146,6 +1165,129 @@ test("queued run-prompt restores pending session state before executing queued c
 
 		await pi.emit("agent_end", {}, ctx);
 		assert.deepEqual(pi.setModelCalls, ["anthropic/loop-first", "anthropic/base-model", "anthropic/loop-second"]);
+	});
+});
+
+test("inline prompt restore true restores model and thinking on prompt turn agent_end", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "deslop.md"),
+			`---
+model: anthropic/target-model
+thinking: high
+restore: true
+---
+TASK:$@`,
+		);
+
+		const baseModel = { provider: "anthropic", id: "base-model" };
+		const targetModel = { provider: "anthropic", id: "target-model" };
+		const models = [baseModel, targetModel];
+
+		const pi = new FakePi();
+		pi.currentModel = baseModel;
+		promptModelExtension(pi as never);
+
+		let ctxRef: any;
+		let agentEndDuringPrompt = false;
+		const { ctx } = createContext(cwd, pi, models, {
+			waitForIdle: async () => {
+				agentEndDuringPrompt = true;
+				assert.deepEqual(pi.setModelCalls, ["anthropic/target-model"]);
+				assert.deepEqual(pi.thinkingCalls, ["high"]);
+				await pi.emit("agent_end", {}, ctxRef);
+				assert.deepEqual(pi.setModelCalls, ["anthropic/target-model", "anthropic/base-model"]);
+				assert.deepEqual(pi.thinkingCalls, ["high", "medium"]);
+			},
+		});
+		ctxRef = ctx;
+		await pi.emit("session_start", {}, ctx);
+
+		const deslop = pi.commands.get("deslop");
+		assert.ok(deslop);
+		await deslop.handler("demo", ctx);
+
+		assert.equal(agentEndDuringPrompt, true);
+		assert.deepEqual(pi.userMessages, ["TASK:demo"]);
+		assert.deepEqual(pi.currentModel, baseModel);
+		assert.equal(pi.getThinkingLevel(), "medium");
+
+		await pi.emit("agent_end", {}, ctx);
+		assert.deepEqual(pi.setModelCalls, ["anthropic/target-model", "anthropic/base-model"]);
+		assert.deepEqual(pi.thinkingCalls, ["high", "medium"]);
+	});
+});
+
+test("inline prompt restore false leaves model and thinking active after prompt turn agent_end", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "deslop.md"),
+			`---
+model: anthropic/target-model
+thinking: high
+restore: false
+---
+TASK:$@`,
+		);
+
+		const baseModel = { provider: "anthropic", id: "base-model" };
+		const targetModel = { provider: "anthropic", id: "target-model" };
+		const models = [baseModel, targetModel];
+
+		const pi = new FakePi();
+		pi.currentModel = baseModel;
+		promptModelExtension(pi as never);
+
+		let ctxRef: any;
+		const { ctx } = createContext(cwd, pi, models, {
+			waitForIdle: async () => {
+				await pi.emit("agent_end", {}, ctxRef);
+			},
+		});
+		ctxRef = ctx;
+		await pi.emit("session_start", {}, ctx);
+
+		const deslop = pi.commands.get("deslop");
+		assert.ok(deslop);
+		await deslop.handler("demo", ctx);
+
+		assert.deepEqual(pi.userMessages, ["TASK:demo"]);
+		assert.deepEqual(pi.currentModel, targetModel);
+		assert.equal(pi.getThinkingLevel(), "high");
+
+		await pi.emit("agent_end", {}, ctx);
+		assert.deepEqual(pi.setModelCalls, ["anthropic/target-model"]);
+		assert.deepEqual(pi.thinkingCalls, ["high"]);
+	});
+});
+
+test("idle agent_end does not read context model when no restore or tool command is pending", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const { ctx } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+
+		let modelReads = 0;
+		const idleCtx = Object.create(ctx, {
+			model: {
+				get() {
+					modelReads++;
+					throw new Error("idle agent_end read ctx.model");
+				},
+			},
+		});
+
+		await pi.emit("agent_end", {}, idleCtx);
+
+		assert.equal(modelReads, 0);
 	});
 });
 
@@ -2046,7 +2188,7 @@ test("session switch clears pending restore state", async () => {
 
 test("chain template chainContext summary prepends previous-step summary to second delegated step", async () => {
 	await withTempHome(async (root) => {
-		await withSubagentRuntime(root, async () => {
+		await withSubagentBridge(root, async () => {
 			const cwd = join(root, "project");
 			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 			writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: analyze -> fix\nchainContext: summary\n---\nignored');
@@ -2079,7 +2221,7 @@ test("chain template chainContext summary prepends previous-step summary to seco
 
 test("chain-prompts --chain-context prepends previous-step summary to second delegated step", async () => {
 	await withTempHome(async (root) => {
-		await withSubagentRuntime(root, async () => {
+		await withSubagentBridge(root, async () => {
 			const cwd = join(root, "project");
 			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 			writeFileSync(join(cwd, ".pi", "prompts", "analyze.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nANALYZE`);
@@ -2111,7 +2253,7 @@ test("chain-prompts --chain-context prepends previous-step summary to second del
 
 test("per-step --with-context only affects that delegated step", async () => {
 	await withTempHome(async (root) => {
-		await withSubagentRuntime(root, async () => {
+		await withSubagentBridge(root, async () => {
 			const cwd = join(root, "project");
 			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 			writeFileSync(join(cwd, ".pi", "prompts", "one.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nONE`);
@@ -2145,7 +2287,7 @@ test("per-step --with-context only affects that delegated step", async () => {
 
 test("first delegated chain step never receives a summary preamble", async () => {
 	await withTempHome(async (root) => {
-		await withSubagentRuntime(root, async () => {
+		await withSubagentBridge(root, async () => {
 			const cwd = join(root, "project");
 			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 			writeFileSync(join(cwd, ".pi", "prompts", "analyze.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nANALYZE`);
@@ -2176,7 +2318,7 @@ test("first delegated chain step never receives a summary preamble", async () =>
 
 test("non-delegated steps do not receive summary preambles with chain context enabled", async () => {
 	await withTempHome(async (root) => {
-		await withSubagentRuntime(root, async () => {
+		await withSubagentBridge(root, async () => {
 			const cwd = join(root, "project");
 			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 			writeFileSync(join(cwd, ".pi", "prompts", "scan.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSCAN`);
@@ -2209,7 +2351,7 @@ test("non-delegated steps do not receive summary preambles with chain context en
 
 test("delegated inheritContext chain steps skip summary preambles", async () => {
 	await withTempHome(async (root) => {
-		await withSubagentRuntime(root, async () => {
+		await withSubagentBridge(root, async () => {
 			const cwd = join(root, "project");
 			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 			writeFileSync(join(cwd, ".pi", "prompts", "scan.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSCAN`);
@@ -2240,7 +2382,7 @@ test("delegated inheritContext chain steps skip summary preambles", async () => 
 
 test("per-step loops contribute one combined step summary to the next step", async () => {
 	await withTempHome(async (root) => {
-		await withSubagentRuntime(root, async () => {
+		await withSubagentBridge(root, async () => {
 			const cwd = join(root, "project");
 			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 			writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "worker --loop 2 -> follow"\nchainContext: summary\n---\nignored');
@@ -2288,7 +2430,7 @@ test("per-step loops contribute one combined step summary to the next step", asy
 
 test("outer chain loop iterations reset summary scope", async () => {
 	await withTempHome(async (root) => {
-		await withSubagentRuntime(root, async () => {
+		await withSubagentBridge(root, async () => {
 			const cwd = join(root, "project");
 			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 			writeFileSync(
@@ -2640,7 +2782,7 @@ test("--fork flag implies --subagent and sets inheritContext", async () => {
 
 test("delegated single run injects result as user message", async () => {
 	await withTempHome(async (root) => {
-		await withSubagentRuntime(root, async () => {
+		await withSubagentBridge(root, async () => {
 			const cwd = join(root, "project");
 			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 			writeFileSync(join(cwd, ".pi", "prompts", "simplify.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSINGLE`);
@@ -2669,7 +2811,7 @@ test("delegated single run injects result as user message", async () => {
 
 test("delegated loop injects last iteration result as user message", async () => {
 	await withTempHome(async (root) => {
-		await withSubagentRuntime(root, async () => {
+		await withSubagentBridge(root, async () => {
 			const cwd = join(root, "project");
 			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 			writeFileSync(join(cwd, ".pi", "prompts", "simplify.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nLOOP`);
@@ -2703,7 +2845,7 @@ test("delegated loop injects last iteration result as user message", async () =>
 
 test("delegated loop and chain abort do not inject follow-up user messages", async () => {
 	await withTempHome(async (root) => {
-		await withSubagentRuntime(root, async () => {
+		await withSubagentBridge(root, async () => {
 			const cwd = join(root, "project");
 			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 			writeFileSync(join(cwd, ".pi", "prompts", "loop-abort.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nLOOP_ABORT`);
@@ -2739,7 +2881,7 @@ test("delegated loop and chain abort do not inject follow-up user messages", asy
 
 test("delegated loop error after prior success does not inject stale delegated text", async () => {
 	await withTempHome(async (root) => {
-		await withSubagentRuntime(root, async () => {
+		await withSubagentBridge(root, async () => {
 			const cwd = join(root, "project");
 			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 			writeFileSync(join(cwd, ".pi", "prompts", "loop-error.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nLOOP_ERROR`);
@@ -2780,7 +2922,7 @@ test("delegated loop error after prior success does not inject stale delegated t
 
 test("delegated chain error after prior success does not inject stale delegated text", async () => {
 	await withTempHome(async (root) => {
-		await withSubagentRuntime(root, async () => {
+		await withSubagentBridge(root, async () => {
 			const cwd = join(root, "project");
 			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 			writeFileSync(join(cwd, ".pi", "prompts", "first.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nFIRST`);
@@ -2822,7 +2964,7 @@ test("delegated chain error after prior success does not inject stale delegated 
 
 test("mixed delegated/inline chain injects only the last delegated text", async () => {
 	await withTempHome(async (root) => {
-		await withSubagentRuntime(root, async () => {
+		await withSubagentBridge(root, async () => {
 			const cwd = join(root, "project");
 			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 			writeFileSync(join(cwd, ".pi", "prompts", "scan.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSCAN`);
@@ -2862,7 +3004,7 @@ test("mixed delegated/inline chain injects only the last delegated text", async 
 
 test("delegated loop convergence still triggers and injects after convergence evaluation", async () => {
 	await withTempHome(async (root) => {
-		await withSubagentRuntime(root, async () => {
+		await withSubagentBridge(root, async () => {
 			const cwd = join(root, "project");
 			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 			writeFileSync(join(cwd, ".pi", "prompts", "simplify.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nCONVERGE`);
@@ -2918,7 +3060,7 @@ function singleResponse(request: any) {
 
 test("chain template worktree: true passes worktree flag to parallel subagent request", async () => {
 	await withTempHome(async (root) => {
-		await withSubagentRuntime(root, async () => {
+		await withSubagentBridge(root, async () => {
 			const cwd = join(root, "project");
 			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 			writeFileSync(join(cwd, ".pi", "prompts", "wt-pipeline.md"), '---\nchain: "parallel(scan-fe, scan-be) -> review"\nworktree: true\n---\nignored');
@@ -2950,7 +3092,7 @@ test("chain template worktree: true passes worktree flag to parallel subagent re
 
 test("chain-prompts --worktree passes worktree flag to parallel subagent request", async () => {
 	await withTempHome(async (root) => {
-		await withSubagentRuntime(root, async () => {
+		await withSubagentBridge(root, async () => {
 			const cwd = join(root, "project");
 			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 			writeFileSync(join(cwd, ".pi", "prompts", "scan-fe.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSCAN-FE`);
@@ -2981,7 +3123,7 @@ test("chain-prompts --worktree passes worktree flag to parallel subagent request
 
 test("chain template CLI --worktree overrides missing frontmatter worktree", async () => {
 	await withTempHome(async (root) => {
-		await withSubagentRuntime(root, async () => {
+		await withSubagentBridge(root, async () => {
 			const cwd = join(root, "project");
 			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 			writeFileSync(join(cwd, ".pi", "prompts", "no-wt.md"), '---\nchain: "parallel(scan-fe, scan-be)"\n---\nignored');
@@ -3027,7 +3169,7 @@ test("chain-prompts --worktree warns when chain has no parallel steps", async ()
 
 test("parallel chain loops treat delegated worktree diffs as changes", async () => {
 	await withTempHome(async (root) => {
-		await withSubagentRuntime(root, async () => {
+		await withSubagentBridge(root, async () => {
 			const cwd = join(root, "project");
 			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 			writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "parallel(scan-fe, scan-be)"\n---\nignored');
