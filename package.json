@@ -69,15 +69,20 @@
   "scripts": {
     "test": "tsx --test test/**/*.test.ts"
   },
-  "dependencies": {
-    "typebox": "^1.2.16"
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "^0.79.7",
-    "@earendil-works/pi-ai": "^0.79.7",
-    "@earendil-works/pi-coding-agent": "^0.79.7",
-    "@earendil-works/pi-tui": "^0.79.7",
-    "tsx": "^4.22.4"
+    "@earendil-works/pi-agent-core": "^0.80.3",
+    "@earendil-works/pi-ai": "^0.80.3",
+    "@earendil-works/pi-coding-agent": "^0.80.3",
+    "@earendil-works/pi-tui": "^0.80.3",
+    "tsx": "^4.22.4",
+    "typebox": "^1.3.2"
   },
   "pi": {
     "extensions": [
@@ -86,6 +91,9 @@
     "skills": [
       "./skills"
     ]
+  },
+  "dependencies": {
+    "minimatch": "^10.2.5"
   },
   "overrides": {
     "undici": "8.5.0",
