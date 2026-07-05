@@ -189,16 +189,14 @@ The inspector is read-only. It has no execute button and does not mutate the ses
 
 ## Prompt Discovery
 
-The extension scans the default prompt directories and the same local prompt paths Pi loads from `settings.json`:
+The extension scans the default prompt directories:
 
 - User defaults: `~/.pi/agent/prompts/`
+- User prompt library: `~/.pi/agent/prompt-library/`
 - Project defaults: `<cwd>/.pi/prompts/`
-- User settings: `~/.pi/agent/settings.json` `prompts` entries
-- Project settings: `<cwd>/.pi/settings.json` `prompts` entries
+- Project prompt library: `<cwd>/.pi/prompt-library/`
 
-Settings entries may point at directories or individual `.md` files. Absolute paths and `~/...` work. Relative user settings paths resolve from `~/.pi/agent`; relative project settings paths resolve from `<cwd>/.pi`. Pattern entries follow Pi's settings behavior: glob-style entries filter configured prompt paths, and `!`, `+`, or `-` entries exclude or force exact matches.
-
-Precedence follows Pi's local-resource order: project settings, project defaults, user settings, then user defaults. If the same file is reachable through both settings and a default directory, it is loaded once by canonical path. Malformed settings files or invalid configured paths produce warnings while the rest of discovery continues.
+Project prompts override user prompts when names collide. Prompt-library files are command-capable only when they use extension metadata such as `model`, `skill`, `skills`, `include`, `includes`, `chain`, or `bestOfN`; plain prompt-library files stay available as include fragments instead of becoming slash commands.
 
 ## Frontmatter Reference
 
