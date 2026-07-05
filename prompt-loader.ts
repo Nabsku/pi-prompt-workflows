@@ -15,7 +15,9 @@ import {
 const VALID_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
 export const RESERVED_COMMAND_NAMES = new Set([
 	"chain-prompts",
+	"compare-presets",
 	"compare-runs",
+	"best-of-n-presets",
 	"best-of-n-runs",
 	"print-prompt",
 	"dry-run-prompt",

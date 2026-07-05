@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve as resolvePath } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -813,6 +813,16 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		return [`## ${title}`, "", body?.trim() || "(none)", ""];
 	}
 
+	function validateWritableBestOfNRunRoot(compareCwd: string): string | undefined {
+		for (const path of [join(compareCwd, ".pi"), join(compareCwd, ".pi", "runs"), join(compareCwd, ".pi", "runs", "best-of-n")]) {
+			if (!existsSync(path)) continue;
+			const stat = lstatSync(path);
+			if (stat.isSymbolicLink()) return `Run root component ${path} is a symlink; refusing to write compare run artifacts.`;
+			if (!stat.isDirectory()) return `Run root component ${path} exists but is not a directory.`;
+		}
+		return undefined;
+	}
+
 	function writeBestOfNRunReport(options: {
 		compareCwd: string;
 		promptName: string;
@@ -833,6 +843,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		reviewerFailures?: string;
 		finalText?: string;
 	}): string {
+		const rootDiagnostic = validateWritableBestOfNRunRoot(options.compareCwd);
+		if (rootDiagnostic) throw new Error(rootDiagnostic);
 		const runDir = join(options.compareCwd, ".pi", "runs", "best-of-n", `${formatRunTimestamp()}-${slugifyRunSegment(options.promptName)}-${randomUUID().slice(0, 8)}`);
 		mkdirSync(runDir, { recursive: true });
 		writeFileSync(join(runDir, "lineup.json"), `${JSON.stringify({

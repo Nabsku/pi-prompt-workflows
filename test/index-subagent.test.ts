@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import promptModelExtension from "../index.ts";
@@ -1143,6 +1143,55 @@ test("compare prompt still sends completion when best-of-N report writes fail", 
 		assert.match(pi.userMessages[0]!, /\[Compare review complete: compare\]/);
 		assert.match(pi.userMessages[0]!, /Report: unavailable \(failed to write run artifacts\)/);
 		assert.match(pi.userMessages[0]!, /reviewer output/);
+	});
+});
+
+test("compare prompt refuses to write reports through symlinked run roots", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		const outsideRuns = join(root, "outside-runs");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(outsideRuns, { recursive: true });
+		symlinkSync(outsideRuns, join(cwd, ".pi", "runs"), "dir");
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "compare.md"),
+			[
+				"---",
+				"bestOfN:",
+				"  workers:",
+				"    - agent: delegate",
+				"  reviewers:",
+				"    - agent: reviewer",
+				"---",
+				"Fix: $@",
+			].join("\n"),
+		);
+
+		const pi = new FakePi();
+		const { ctx } = createContext(cwd, pi);
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+
+		let phase = 0;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+			const request = payload as any;
+			phase++;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [],
+				parallelResults: [
+					{ agent: phase === 1 ? "delegate" : "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: phase === 1 ? "worker output" : "reviewer output" }] }], isError: false },
+				],
+				isError: false,
+			});
+		});
+
+		await pi.commands.get("compare")!.handler("bug", ctx);
+		assert.equal(phase, 2);
+		assert.equal(pi.userMessages.length, 1);
+		assert.match(pi.userMessages[0]!, /Report: unavailable \(failed to write run artifacts\)/);
+		assert.deepEqual(readdirSync(outsideRuns), []);
 	});
 });
 

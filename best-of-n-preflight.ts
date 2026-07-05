@@ -296,10 +296,17 @@ export function createBestOfNPreflight(options: CreateBestOfNPreflightOptions): 
 		requestedCwd = options.prompt.cwd ?? options.contextCwd;
 		compareCwdSource = options.prompt.cwd ? "prompt-cwd" : "context-cwd";
 	}
-	if (options.pathArgumentPromptName && options.prompt.name === options.pathArgumentPromptName && taskArgs.length > 0) {
-		requestedCwd = taskArgs[0]!;
-		compareCwdSource = "path-argument";
-		taskArgs = taskArgs.slice(1);
+	if (options.pathArgumentPromptName && options.prompt.name === options.pathArgumentPromptName) {
+		if (taskArgs.length === 0) {
+			diagnostics.push(diagnostic("error", "missing-path-argument", `${options.pathArgumentPromptName} requires a repo path as the first argument.`, options.prompt.source, options.prompt.filePath));
+		} else {
+			requestedCwd = taskArgs[0]!;
+			compareCwdSource = "path-argument";
+			taskArgs = taskArgs.slice(1);
+			if (taskArgs.length === 0) {
+				diagnostics.push(diagnostic("error", "missing-implementation-task", `${options.pathArgumentPromptName} requires an implementation task after the repo path.`, options.prompt.source, options.prompt.filePath));
+			}
+		}
 	}
 	const compareCwd = canonicalizeDir(resolveCompareCwd(requestedCwd, options.contextCwd), diagnostics, "compare-cwd-not-found", "cwd directory does not exist");
 	const baseModelLabel = runtime.model ?? options.prompt.models[0] ?? options.currentModelLabel ?? "session model";
