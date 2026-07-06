@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.1](https://github.com/Nabsku/pi-prompt-workflows/compare/v0.16.0...v0.16.1) (2026-07-06)
+
+
+### Bug Fixes
+
+* align workflows extension with upstream v0.10.0 ([22e7ca3](https://github.com/Nabsku/pi-prompt-workflows/commit/22e7ca3ad547aff254dec479c69ee89528a98d21))
+
 ## [0.16.0](https://github.com/Nabsku/pi-prompt-workflows/compare/v0.15.0...v0.16.0) (2026-06-23)
 
 
