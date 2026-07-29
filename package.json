@@ -41,6 +41,7 @@
     "model-selection.ts",
     "notifications.ts",
     "prompt-execution.ts",
+    "prompt-budget.ts",
     "prompt-dry-run.ts",
     "prompt-dry-run-renderer.ts",
     "prompt-dry-run-tui.ts",

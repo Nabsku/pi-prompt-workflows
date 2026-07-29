@@ -449,3 +449,16 @@ test("running dry-run for a skill prompt exposes no side-effect hooks or pending
 		assert.equal("hooks" in result, false);
 	});
 });
+
+test("dry-run budgets the final rendered prompt after argument substitution", async () => {
+	await withTempHome(async (root) => {
+		const result = assertOk(await createPromptDryRun(
+			prompt({ content: "Task: $@", budget: { warnTokens: 2, maxTokens: 20 } }),
+			options(root, { rawArgs: "abcde" }),
+		));
+		assert.equal(result.content, "Task: abcde");
+		assert.equal(result.budget.bytes, 11);
+		assert.equal(result.budget.estimatedTokens, 3);
+		assert.equal(result.budget.verdict, "warning");
+	});
+});

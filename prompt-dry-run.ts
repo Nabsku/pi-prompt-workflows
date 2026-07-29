@@ -10,6 +10,7 @@ import {
 } from "./args.js";
 import { createBestOfNPreflight, type BestOfNPreflight } from "./best-of-n-preflight.js";
 import type { RegistryLike } from "./model-selection.js";
+import { evaluatePromptBudget, type PromptBudgetResult } from "./prompt-budget.js";
 import { preparePromptExecution } from "./prompt-execution.js";
 import { expandCwdPath, type PromptWithModel } from "./prompt-loader.js";
 import type { PromptIncludeGraph } from "./prompt-includes.js";
@@ -66,6 +67,7 @@ export interface PromptDryRunSuccess {
 	model?: Model<any>;
 	modelAlreadyActive: boolean;
 	warnings: string[];
+	budget: PromptBudgetResult;
 	skills: PromptDryRunSkillPreview[];
 	details: PromptDryRunDetails;
 	includeGraph?: PromptIncludeGraph;
@@ -369,6 +371,7 @@ export async function createPromptDryRun(
 			model: prepared.selectedModel.model,
 			modelAlreadyActive: prepared.selectedModel.alreadyActive,
 			warnings,
+			budget: evaluatePromptBudget(preflight.task.renderedTask ?? "", prompt.budget),
 			skills: [],
 			details: { skills: [] },
 			runtime,
@@ -444,6 +447,7 @@ export async function createPromptDryRun(
 		model: prepared.selectedModel.model,
 		modelAlreadyActive: prepared.selectedModel.alreadyActive,
 		warnings,
+		budget: evaluatePromptBudget(content, prompt.budget),
 		skills: skillPreviews,
 		includeGraph: effectivePrompt.includeGraph,
 		details: { skills: skillPreviews, includeGraph: effectivePrompt.includeGraph },

@@ -81,6 +81,16 @@ function appendArgs(lines: string[], args: string[]): void {
 	for (const arg of args) lines.push(`- ${sanitizeInline(arg)}`);
 }
 
+function appendBudget(lines: string[], result: Extract<PromptDryRunResult, { status: "ok" }>): void {
+	lines.push("", "## Prompt budget");
+	lines.push(`- Estimated tokens: ${formatScalar(result.budget.estimatedTokens)}`);
+	lines.push(`- UTF-8 bytes: ${formatScalar(result.budget.bytes)}`);
+	lines.push(`- Method: ${formatScalar(result.budget.method)} (estimate, not model-tokenizer exact)`);
+	lines.push(`- Verdict: ${formatScalar(result.budget.verdict)}`);
+	if (result.budget.config?.warnTokens !== undefined) lines.push(`- Warning threshold: ${formatScalar(result.budget.config.warnTokens)}`);
+	if (result.budget.config?.maxTokens !== undefined) lines.push(`- Maximum: ${formatScalar(result.budget.config.maxTokens)}`);
+}
+
 function appendCompareSlots(lines: string[], title: string, slots: BestOfNPreflightSlot[]): void {
 	lines.push("", `### ${title}`);
 	if (slots.length === 0) {
@@ -219,6 +229,7 @@ export function formatPromptDryRun(result: PromptDryRunResult): string {
 	appendWarnings(lines, result.warnings);
 	appendSkills(lines, result);
 	appendArgs(lines, result.args);
+	appendBudget(lines, result);
 	lines.push("", "## Prompt body", fencedBlock("markdown", result.content));
 	return `${lines.join("\n")}\n`;
 }

@@ -16,6 +16,7 @@ function ok(overrides: Partial<Extract<PromptDryRunResult, { status: "ok" }>> = 
 		model,
 		modelAlreadyActive: false,
 		warnings: [],
+		budget: { bytes: 15, estimatedTokens: 4, method: "utf8-bytes-divided-by-4", verdict: "unconfigured" },
 		skills: [],
 		details: { skills: [] },
 		runtime: { restore: false, boomerang: false },
