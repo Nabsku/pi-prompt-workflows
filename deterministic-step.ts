@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import type { PromptWithModel, DeterministicStep, DeterministicExecution, DeterministicEnv } from "./prompt-loader.ts";
+import type { StepExecutionOutcome } from "./prompt-execution.ts";
 
 export const PROMPT_TEMPLATE_DETERMINISTIC_MESSAGE_TYPE = "prompt-template-deterministic";
 export const PROMPT_TEMPLATE_DETERMINISTIC_COMPLETION_MESSAGE_TYPE = "prompt-template-deterministic-complete";
@@ -25,8 +26,9 @@ export interface DeterministicExecutionResult {
 	cwd: string;
 	nonInteractive: boolean;
 	resolvedScriptPath?: string;
-	exitCode: number;
+	exitCode: number | null;
 	signal?: NodeJS.Signals;
+	termination?: "cancelled" | "aborted";
 	stdout: string;
 	stdoutTotalChars: number;
 	stdoutTotalLines: number;
@@ -42,6 +44,37 @@ export interface DeterministicExecutionResult {
 export interface DeterministicPreambleOptions {
 	maxStdoutChars?: number;
 	maxStderrChars?: number;
+}
+
+export function normalizeDeterministicExecutionOutcome(
+	result: DeterministicExecutionResult,
+): StepExecutionOutcome<DeterministicExecutionResult> {
+	if (result.exitCode !== null && (typeof result.exitCode !== "number" || !Number.isInteger(result.exitCode))) {
+		throw new Error("Deterministic execution result is missing a structured exitCode.");
+	}
+	if (typeof result.timedOut !== "boolean") {
+		throw new Error("Deterministic execution result is missing structured timedOut state.");
+	}
+	if (result.termination !== undefined && result.termination !== "cancelled" && result.termination !== "aborted") {
+		throw new Error(`Deterministic execution result has unknown termination: ${String(result.termination)}`);
+	}
+	if (result.exitCode === 0) {
+		if (result.signal || result.timedOut || result.termination) {
+			throw new Error("Deterministic execution result has contradictory successful exit and failure termination state.");
+		}
+		return { status: "succeeded", result };
+	}
+	if (typeof result.exitCode === "number") {
+		if (result.signal || result.timedOut || result.termination) {
+			throw new Error("Deterministic execution result has contradictory exit code and termination state.");
+		}
+		return { status: "failed", result };
+	}
+	if (result.termination && (result.signal || result.timedOut)) {
+		throw new Error("Deterministic execution result has contradictory cancellation and process termination state.");
+	}
+	if (result.signal || result.timedOut || result.termination) return { status: "failed", result };
+	throw new Error("Deterministic execution result has unknown termination state.");
 }
 
 function createCapturedOutput(maxChars: number): CapturedOutput {
@@ -291,7 +324,7 @@ export async function runDeterministicStep(
 				cwd: resolvedCwd,
 				nonInteractive: step.nonInteractive,
 				resolvedScriptPath,
-				exitCode: exitCode ?? (timedOut ? 124 : 1),
+				exitCode,
 				signal: signal ?? undefined,
 				stdout: stdout.text,
 				stdoutTotalChars: stdout.totalChars,

@@ -4,7 +4,7 @@ import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
-import { checkPromptExecutionBudget, preparePromptExecution, PromptBudgetExceededError } from "./prompt-execution.js";
+import { captureStepExecutionOutcome, checkPromptExecutionBudget, preparePromptExecution, PromptBudgetExceededError, type StepExecutionOutcome } from "./prompt-execution.js";
 import type { PromptWithModel } from "./prompt-loader.js";
 import { notify } from "./notifications.js";
 import { buildSkillLoadedMessage, getRequestedSkills, resolvePromptSkills, type RuntimeSkillCommand } from "./prompt-skills.js";
@@ -708,4 +708,11 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 			ctx.ui.setWorkingMessage();
 		}
 	}
+}
+
+/** Adaptive-runtime adapter; executeSubagentPromptStep keeps its legacy throw semantics. */
+export async function executeSubagentPromptStepOutcome(
+	options: DelegatedPromptOptions,
+): Promise<StepExecutionOutcome<DelegatedPromptOutcome | undefined>> {
+	return captureStepExecutionOutcome(() => executeSubagentPromptStep(options));
 }
