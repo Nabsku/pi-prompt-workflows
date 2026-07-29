@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { normalizeDeterministicExecutionOutcome, runDeterministicStep } from "../deterministic-step.ts";
 import promptModelExtension from "../index.ts";
 import {
 	PROMPT_TEMPLATE_DETERMINISTIC_COMPLETION_MESSAGE_TYPE,
@@ -248,5 +249,61 @@ test("deterministic prompts reject runtime loop overrides in v1", async () => {
 		assert.equal(pi.customMessages.length, 0);
 		assert.equal(pi.userMessages.length, 0);
 		assert.match(notifications.join("\n"), /do not support runtime --loop/i);
+	});
+});
+
+test("deterministic runner reports cancellation as a structured failed outcome", async () => {
+	await withTempHome(async (root) => {
+		const controller = new AbortController();
+		setTimeout(() => controller.abort(), 20);
+		const result = await runDeterministicStep(
+			{ filePath: join(root, "step.md") },
+			{ execution: { kind: "command", command: process.execPath, args: ["-e", "setTimeout(() => {}, 10000)"], shell: false }, handoff: "never", nonInteractive: true },
+			root,
+			controller.signal,
+		);
+		assert.equal(result.termination, "cancelled");
+		assert.equal(normalizeDeterministicExecutionOutcome(result).status, "failed");
+	});
+});
+
+test("deterministic cancellation kills a SIGTERM-resistant descendant before resolving", { skip: process.platform === "win32" }, async () => {
+	await withTempHome(async (root) => {
+		const pidFile = join(root, "pids.json");
+		const delayedWrite = join(root, "descendant-wrote");
+		const controller = new AbortController();
+		const script = [
+			"const { spawn } = require('node:child_process');",
+			"const fs = require('node:fs');",
+			"process.on('SIGTERM', () => {});",
+			`const descendant = spawn(process.execPath, ['-e', ${JSON.stringify("const fs = require('node:fs'); process.on('SIGTERM', () => {}); setTimeout(() => fs.writeFileSync(" + JSON.stringify(delayedWrite) + ", 'bad'), 250); setInterval(() => {}, 1000);")}], { stdio: 'ignore' });`,
+			`fs.writeFileSync(${JSON.stringify(pidFile)}, JSON.stringify({ parent: process.pid, descendant: descendant.pid }));`,
+			"setInterval(() => {}, 1000);",
+		].join("\n");
+		const execution = runDeterministicStep(
+			{ filePath: join(root, "step.md") },
+			{ execution: { kind: "command", command: process.execPath, args: ["-e", script], shell: false }, handoff: "never", nonInteractive: true },
+			root,
+			controller.signal,
+		);
+		const deadline = Date.now() + 2_000;
+		while (!existsSync(pidFile) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+		assert.ok(existsSync(pidFile), "child did not publish process identities");
+		const pids = JSON.parse(readFileSync(pidFile, "utf8")) as { parent: number; descendant: number };
+		controller.abort();
+		const result = await execution;
+		assert.equal(result.termination, "cancelled");
+		assert.equal(result.cleanupScope, "process-group");
+		assert.equal(result.processGroupExtinct, true);
+		assert.equal(existsSync(delayedWrite), false, "descendant wrote after cancellation");
+		for (const pid of [pids.parent, pids.descendant]) {
+			const goneDeadline = Date.now() + 2_000;
+			let alive = true;
+			while (alive && Date.now() < goneDeadline) {
+				try { process.kill(pid, 0); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") alive = false; else throw error; }
+				if (alive) await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+			assert.equal(alive, false, `process ${pid} survived cancellation`);
+		}
 	});
 });

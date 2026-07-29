@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import type { PromptWithModel, DeterministicStep, DeterministicExecution, DeterministicEnv } from "./prompt-loader.ts";
@@ -9,7 +9,9 @@ export const PROMPT_TEMPLATE_DETERMINISTIC_COMPLETION_MESSAGE_TYPE = "prompt-tem
 
 const DEFAULT_MAX_CAPTURE_STDOUT_CHARS = 16_000;
 const DEFAULT_MAX_CAPTURE_STDERR_CHARS = 16_000;
-const DEFAULT_TIMEOUT_KILL_AFTER_MS = 1_000;
+const PROCESS_GROUP_POLL_MS = 10;
+const PROCESS_GROUP_CLEANUP_DEADLINE_MS = 8_000;
+const PROCESS_GROUP_PROBE_TIMEOUT_MS = 250;
 
 interface CapturedOutput {
 	text: string;
@@ -39,6 +41,9 @@ export interface DeterministicExecutionResult {
 	stderrTruncated: boolean;
 	durationMs: number;
 	timedOut: boolean;
+	cleanupScope: "process-group" | "direct-child";
+	processGroupExtinct?: boolean;
+	cleanupError?: string;
 }
 
 export interface DeterministicPreambleOptions {
@@ -246,13 +251,65 @@ function spawnProcess(command: string, args: string[], options: { cwd: string; s
 		shell: options.shell ?? false,
 		env: options.env,
 		stdio: ["ignore", "pipe", "pipe"],
+		detached: process.platform !== "win32",
 	});
+}
+
+function signalProcessTree(child: ReturnType<typeof spawnProcess>, signal: NodeJS.Signals): "process-group" | "direct-child" {
+	const pid = child.pid;
+	if (process.platform !== "win32" && typeof pid === "number" && Number.isSafeInteger(pid) && pid > 1) {
+		try {
+			process.kill(-pid, signal);
+			return "process-group";
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ESRCH") return "process-group";
+		}
+	}
+	try { child.kill(signal); } catch { /* The child already exited. */ }
+	return "direct-child";
+}
+
+function processGroupExists(pid: number): { exists: boolean; probeError?: string } {
+	try {
+		process.kill(-pid, 0);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ESRCH") return { exists: false };
+		return { exists: true, probeError: error instanceof Error ? error.message : String(error) };
+	}
+	// A killed descendant can remain as a zombie until its external reaper runs.
+	// Zombies cannot execute or write, so they are operationally extinct. Use only
+	// read-only inspection and never signal the group after the leader closes.
+	if (process.platform !== "win32") {
+		const inspected = spawnSync("ps", ["-o", "stat=", "-g", String(pid)], { encoding: "utf8", timeout: PROCESS_GROUP_PROBE_TIMEOUT_MS });
+		if (inspected.status === 0) {
+			const states = inspected.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
+			if (states.length > 0 && states.every((state) => state.startsWith("Z"))) return { exists: false };
+		}
+		else return { exists: true, probeError: inspected.error?.message ?? `ps exited with status ${String(inspected.status)}` };
+	}
+	return { exists: true };
+}
+
+async function waitForProcessGroupExtinction(pid: number): Promise<void> {
+	const deadline = performance.now() + PROCESS_GROUP_CLEANUP_DEADLINE_MS;
+	let lastProbeError: string | undefined;
+	for (;;) {
+		const probe = processGroupExists(pid);
+		if (!probe.exists) return;
+		if (probe.probeError) lastProbeError = probe.probeError;
+		if (performance.now() >= deadline) {
+			const detail = lastProbeError ? `; process inspection repeatedly failed: ${lastProbeError}` : "";
+			throw new Error(`Deterministic process group ${pid} did not become extinct within ${PROCESS_GROUP_CLEANUP_DEADLINE_MS}ms${detail}`);
+		}
+		await new Promise((resolveWait) => setTimeout(resolveWait, PROCESS_GROUP_POLL_MS));
+	}
 }
 
 export async function runDeterministicStep(
 	prompt: Pick<PromptWithModel, "filePath">,
 	step: DeterministicStep,
 	cwd: string,
+	signal?: AbortSignal,
 ): Promise<DeterministicExecutionResult> {
 	const startedAt = Date.now();
 	const execution = step.execution;
@@ -270,7 +327,23 @@ export async function runDeterministicStep(
 	const stdout = createCapturedOutput(DEFAULT_MAX_CAPTURE_STDOUT_CHARS);
 	const stderr = createCapturedOutput(DEFAULT_MAX_CAPTURE_STDERR_CHARS);
 	let timedOut = false;
-	let timeoutKillHandle: NodeJS.Timeout | undefined;
+	let cancelled = false;
+	let terminationRequested = false;
+	let cleanupScope: "process-group" | "direct-child" = process.platform === "win32" ? "direct-child" : "process-group";
+	const terminate = () => {
+		if (terminationRequested) return;
+		terminationRequested = true;
+		cleanupScope = signalProcessTree(child, "SIGTERM");
+		// Retain authority through the live spawned leader: all destructive group
+		// signaling happens synchronously here, never from a delayed post-close timer.
+		if (cleanupScope === "process-group") signalProcessTree(child, "SIGKILL");
+	};
+	const cancel = () => {
+		cancelled = true;
+		terminate();
+	};
+	if (signal?.aborted) cancel();
+	else signal?.addEventListener("abort", cancel, { once: true });
 
 	child.stdout.on("data", (chunk) => {
 		appendCapturedOutput(stdout, chunk.toString());
@@ -282,10 +355,7 @@ export async function runDeterministicStep(
 	const timeoutHandle = step.timeoutMs
 		? setTimeout(() => {
 			timedOut = true;
-			child.kill("SIGTERM");
-			timeoutKillHandle = setTimeout(() => {
-				child.kill("SIGKILL");
-			}, DEFAULT_TIMEOUT_KILL_AFTER_MS);
+			terminate();
 		}, step.timeoutMs)
 		: undefined;
 
@@ -294,8 +364,8 @@ export async function runDeterministicStep(
 		child.on("error", (error) => {
 			if (settled) return;
 			settled = true;
+			signal?.removeEventListener("abort", cancel);
 			if (timeoutHandle) clearTimeout(timeoutHandle);
-			if (timeoutKillHandle) clearTimeout(timeoutKillHandle);
 			resolveResult({
 				execution,
 				cwd: resolvedCwd,
@@ -312,20 +382,41 @@ export async function runDeterministicStep(
 				stderrTruncated: stderr.truncated,
 				durationMs: Date.now() - startedAt,
 				timedOut,
+				cleanupScope,
 			});
 		});
-		child.on("close", (exitCode, signal) => {
+		child.on("close", async (exitCode, signalName) => {
 			if (settled) return;
 			settled = true;
+			signal?.removeEventListener("abort", cancel);
 			if (timeoutHandle) clearTimeout(timeoutHandle);
-			if (timeoutKillHandle) clearTimeout(timeoutKillHandle);
+			if (terminationRequested && cleanupScope === "process-group" && typeof child.pid === "number") {
+				try {
+					await waitForProcessGroupExtinction(child.pid);
+				} catch (error) {
+					const cleanupError = error instanceof Error ? error.message : String(error);
+					appendCapturedOutput(stderr, `${stderr.totalChars > 0 ? "\n" : ""}[cleanup] ${cleanupError}`);
+					resolveResult({
+						execution, cwd: resolvedCwd, nonInteractive: step.nonInteractive, resolvedScriptPath,
+						exitCode: null, termination: cancelled ? "cancelled" : undefined,
+						stdout: stdout.text, stdoutTotalChars: stdout.totalChars,
+						stdoutTotalLines: capturedLineCount(stdout), stdoutTruncated: stdout.truncated,
+						stderr: stderr.text, stderrTotalChars: stderr.totalChars,
+						stderrTotalLines: capturedLineCount(stderr), stderrTruncated: stderr.truncated,
+						durationMs: Date.now() - startedAt, timedOut, cleanupScope,
+						processGroupExtinct: false, cleanupError,
+					});
+					return;
+				}
+			}
 			resolveResult({
 				execution,
 				cwd: resolvedCwd,
 				nonInteractive: step.nonInteractive,
 				resolvedScriptPath,
 				exitCode,
-				signal: signal ?? undefined,
+				signal: !cancelled && !timedOut ? signalName ?? undefined : undefined,
+				termination: cancelled ? "cancelled" : undefined,
 				stdout: stdout.text,
 				stdoutTotalChars: stdout.totalChars,
 				stdoutTotalLines: capturedLineCount(stdout),
@@ -336,6 +427,8 @@ export async function runDeterministicStep(
 				stderrTruncated: stderr.truncated,
 				durationMs: Date.now() - startedAt,
 				timedOut,
+				cleanupScope,
+				processGroupExtinct: terminationRequested && cleanupScope === "process-group" ? true : undefined,
 			});
 		});
 	});

@@ -77,6 +77,7 @@ export interface DelegatedPromptOutcome {
 	agent: string;
 	preparedTasks: PreparedDelegatedTask[];
 	parallelResults?: DelegatedPromptParallelResult[];
+	messages?: Message[];
 }
 
 function extractTextFromBlocks(content: AssistantMessage["content"]): string {
@@ -693,6 +694,7 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 			text,
 			agent: preparedTasks[0]!.agent,
 			preparedTasks,
+			messages,
 		};
 	} catch (error) {
 		const cause = error instanceof Error ? error : new Error(String(error));
