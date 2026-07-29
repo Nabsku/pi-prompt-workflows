@@ -1143,3 +1143,20 @@ test("validatePromptTemplates reports configured budgets and fails static maximu
 		assert.match(report, /over: ~2 tokens \[exceeded\] max=1/);
 	});
 });
+
+test("validatePromptTemplates defers hard budget failure for unresolved model conditionals", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const promptsDir = join(cwd, ".pi", "prompts");
+		mkdirSync(promptsDir, { recursive: true });
+		writeFileSync(
+			join(promptsDir, "conditional.md"),
+			"---\nmodel: openai/gpt-test\nbudget:\n  maxTokens: 1\n---\n<if-model is=\"openai/*\">x<else>this alternate branch is much longer</if-model>",
+		);
+
+		const result = validatePromptTemplates(cwd);
+		assert.equal(result.ok, true);
+		assert.equal(result.budgets?.[0]?.verdict, "exceeded");
+		assert.equal(result.diagnostics.some((item) => item.code === "prompt-budget-exceeded"), false);
+	});
+});

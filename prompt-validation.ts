@@ -569,7 +569,7 @@ export function validatePromptTemplates(cwd: string, options: PromptValidationOp
 		if (!prompt.budget) continue;
 		const budget = evaluatePromptBudget(prompt.content, prompt.budget);
 		budgets.push({ promptName: prompt.name, filePath: prompt.filePath, ...budget });
-		if (budget.verdict === "exceeded") {
+		if (budget.verdict === "exceeded" && !prompt.content.includes("<if-model")) {
 			result.diagnostics.push(createValidationDiagnostic(
 				"prompt-budget-exceeded",
 				prompt.filePath,
