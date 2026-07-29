@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import type { PromptBudgetConfig } from "./prompt-budget.js";
 import { parseChainDeclaration } from "./chain-parser.js";
 import {
 	extractPromptInlineIncludes,
@@ -85,6 +86,7 @@ export interface PromptWithModel {
 	description: string;
 	content: string;
 	models: string[];
+	budget?: PromptBudgetConfig;
 	includes?: string[];
 	chain?: string;
 	chainContext?: "summary";
@@ -201,6 +203,39 @@ function normalizeStringField(
 
 function isFrontmatterRecord(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizePromptBudget(
+	value: unknown,
+	filePath: string,
+	source: PromptSource,
+	diagnostics: PromptLoaderDiagnostic[],
+): { ok: true; budget?: PromptBudgetConfig } | { ok: false } {
+	if (value === undefined) return { ok: true };
+	if (!isFrontmatterRecord(value)) {
+		diagnostics.push(createDiagnostic("invalid-budget", filePath, source, `Skipping prompt template at ${filePath}: frontmatter field "budget" must be an object.`));
+		return { ok: false };
+	}
+	if (Object.keys(value).some((key) => key !== "warnTokens" && key !== "maxTokens")) {
+		diagnostics.push(createDiagnostic("invalid-budget", filePath, source, `Skipping prompt template at ${filePath}: frontmatter field "budget" only supports "warnTokens" and "maxTokens".`));
+		return { ok: false };
+	}
+	const validLimit = (limit: unknown) => limit === undefined || (Number.isSafeInteger(limit) && Number(limit) > 0);
+	if (!validLimit(value.warnTokens) || !validLimit(value.maxTokens)) {
+		diagnostics.push(createDiagnostic("invalid-budget", filePath, source, `Skipping prompt template at ${filePath}: budget limits must be positive safe integers.`));
+		return { ok: false };
+	}
+	const warnTokens = value.warnTokens as number | undefined;
+	const maxTokens = value.maxTokens as number | undefined;
+	if (warnTokens === undefined && maxTokens === undefined) {
+		diagnostics.push(createDiagnostic("invalid-budget", filePath, source, `Skipping prompt template at ${filePath}: budget must set "warnTokens" and/or "maxTokens".`));
+		return { ok: false };
+	}
+	if (warnTokens !== undefined && maxTokens !== undefined && warnTokens > maxTokens) {
+		diagnostics.push(createDiagnostic("invalid-budget", filePath, source, `Skipping prompt template at ${filePath}: budget.warnTokens cannot exceed budget.maxTokens.`));
+		return { ok: false };
+	}
+	return { ok: true, budget: { ...(warnTokens !== undefined ? { warnTokens } : {}), ...(maxTokens !== undefined ? { maxTokens } : {}) } };
 }
 
 function isValidModelSelectionSpec(spec: string): boolean {
@@ -2092,6 +2127,9 @@ function loadPromptsWithModelFromDir(
 				const models = chain ? [] : (parsedModels ?? []);
 				const rotate = chain ? false : normalizeRotate(frontmatter.rotate, fullPath, source, diagnostics);
 				const hidden = normalizeHidden(frontmatter.hidden, fullPath, source, diagnostics);
+				const budgetResult = normalizePromptBudget(frontmatter.budget, fullPath, source, diagnostics);
+				if (!budgetResult.ok) continue;
+				const budget = budgetResult.budget;
 
 				const name = entry.name.slice(0, -3);
 				if (RESERVED_COMMAND_NAMES.has(name)) {
@@ -2204,6 +2242,7 @@ function loadPromptsWithModelFromDir(
 					loop !== undefined ||
 					converge === false ||
 					boomerang === true ||
+					budget !== undefined ||
 					includeConfigIsCommandCapable ||
 					safeParallel !== undefined ||
 					deterministic !== undefined ||
@@ -2246,6 +2285,7 @@ function loadPromptsWithModelFromDir(
 					description,
 					content,
 					models,
+					budget,
 					hidden: hidden || undefined,
 					...(includes !== undefined ? { includes } : {}),
 					chain: chain || undefined,
