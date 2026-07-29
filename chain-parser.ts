@@ -315,7 +315,7 @@ function parseStructuredChainDeclaration(chain: unknown[], limitsValue?: unknown
 	}
 	if (chain.length === 0) return fail("structured chain must contain at least one step");
 	const steps: StructuredChainStep[] = [];
-	const allowed = new Set(["prompt", "run", "when", "onSuccess", "onFailure", "onBlocked"]);
+	const allowed = new Set(["id", "prompt", "run", "when", "onSuccess", "onFailure", "onBlocked"]);
 	for (let index = 0; index < chain.length; index++) {
 		const raw = chain[index];
 		if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return fail(`step ${index + 1} must be an object`);
@@ -332,7 +332,9 @@ function parseStructuredChainDeclaration(chain: unknown[], limitsValue?: unknown
 		const target = targetValue.trim();
 		const when = Object.hasOwn(record, "when") ? record.when : "always";
 		if (when !== "always" && when !== "changed" && when !== "succeeded" && when !== "failed") return fail(`step ${index + 1} has unknown gate ${JSON.stringify(when)}`);
-		const step: StructuredChainStep = { id: target, kind, target, when };
+		const rawId = Object.hasOwn(record, "id") ? record.id : target;
+		if (typeof rawId !== "string" || rawId.trim() === "") return fail(`step ${index + 1} id must be a non-empty string`);
+		const step: StructuredChainStep = { id: rawId.trim(), kind, target, when };
 		for (const key of ["onSuccess", "onFailure", "onBlocked"] as const) {
 			if (record[key] === undefined) continue;
 			if (typeof record[key] !== "string" || record[key].trim() === "") return fail(`step ${index + 1} ${key} target must be a non-empty string`);
@@ -342,7 +344,7 @@ function parseStructuredChainDeclaration(chain: unknown[], limitsValue?: unknown
 	}
 	const ids = new Set<string>();
 	for (const step of steps) {
-		if (ids.has(step.id)) return fail(`duplicate structured chain target ${JSON.stringify(step.id)}`);
+		if (ids.has(step.id)) return fail(`duplicate structured chain step ID ${JSON.stringify(step.id)}`);
 		ids.add(step.id);
 	}
 	const edges = new Map<string, string[]>();

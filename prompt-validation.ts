@@ -1,4 +1,6 @@
 import { resolve as resolvePath } from "node:path";
+import { execFileSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { loadBestOfNPresetCatalog, type ResolvedBestOfNPreset } from "./best-of-n-presets.js";
 import { substituteArgs } from "./args.js";
 import { parseChainDeclaration, type ChainStep, type ChainStepOrParallel } from "./chain-parser.js";
@@ -7,6 +9,9 @@ import { collectPromptIncludeGraphs, type PromptIncludeGraph, type PromptInclude
 import { collectPromptSourceRecords, discoverFilesystemSkills, loadPromptsWithModel, readSkillContent, resolveSkillPath, type PromptLoaderDiagnostic, type PromptSource, type PromptSourceRecord, type PromptWithModel } from "./prompt-loader.js";
 import { buildSkillLoadedMessage, getRequestedSkills, resolvePromptSkills } from "./prompt-skills.js";
 import { minimumTemplateConditionalContent, renderTemplateConditionals } from "./template-conditionals.js";
+import { createAdaptivePreflight, type AdaptivePreflight } from "./adaptive-preflight.js";
+import { createAdaptiveChainState, routeAdaptiveChain, type AdaptiveChainState, type ChainObservation } from "./adaptive-chain.js";
+import { capSanitizedText, capSanitizedUtf8Bytes, sanitizeForTerminal, utf8ByteLength } from "./render-safe.js";
 
 export interface RegisteredPromptSkill {
 	skillName: string;
@@ -15,6 +20,16 @@ export interface RegisteredPromptSkill {
 
 export interface PromptValidationOptions {
 	registeredSkills?: RegisteredPromptSkill[];
+}
+
+/** Read-only structured-chain preflight attached to the validation report. */
+export interface PromptValidationAdaptiveSummary {
+	/** Effective command name after normal prompt-catalog precedence. */
+	promptName: string;
+	/** Source-attributed wrapper path. */
+	filePath: string;
+	/** Bounded graph/target analysis; runtime inputs are revalidated on execution. */
+	preflight: AdaptivePreflight;
 }
 
 export interface PromptValidationIncludeGraph extends PromptIncludeGraph {
@@ -45,6 +60,7 @@ export interface PromptValidationResult {
 	diagnostics: PromptLoaderDiagnostic[];
 	includeGraphs: PromptValidationIncludeGraph[];
 	budgets?: PromptValidationBudgetSummary[];
+	adaptiveChains?: PromptValidationAdaptiveSummary[];
 }
 
 const INCLUDE_RELATED_DIAGNOSTIC_CODES = new Set([
@@ -101,7 +117,7 @@ function uniqueSkillNames(skills: string[] | undefined): string[] {
 }
 
 function sanitizeReportValue(value: string): string {
-	return JSON.stringify(value).slice(1, -1);
+	return capSanitizedText(sanitizeForTerminal(JSON.stringify(value).slice(1, -1)), 2000, { marker: "… [field omitted]" });
 }
 
 interface RegisteredSkillCandidate {
@@ -403,6 +419,97 @@ function validateComparePrompts(cwd: string, result: PromptValidationResult, pro
 	}
 }
 
+export const VALIDATION_GIT_PROBE_DEADLINE_MS = 10_000;
+export const VALIDATION_GIT_PROBE_MAX_UNIQUE_CWDS = 64;
+const VALIDATION_GIT_PROBE_MAX_CALL_MS = 2_000;
+type GitProbeResult = "git" | "not-git" | "inconclusive";
+interface GitProbeContext { readonly expiresAt: number; readonly cache: Map<string, GitProbeResult>; probes: number; limitFailure?: "deadline" | "cap"; }
+
+function canonicalProbeCwd(cwd: string): string {
+	const normalized = resolvePath(cwd);
+	try { return realpathSync(normalized); } catch { return normalized; }
+}
+
+function isGitRepository(cwd: string, context: GitProbeContext): GitProbeResult {
+	const canonical = canonicalProbeCwd(cwd);
+	const cached = context.cache.get(canonical); if (cached) return cached;
+	if (context.probes >= VALIDATION_GIT_PROBE_MAX_UNIQUE_CWDS) { context.limitFailure = "cap"; return "inconclusive"; }
+	const remaining = Math.floor(context.expiresAt - performance.now());
+	if (remaining <= 0) { context.limitFailure = "deadline"; return "inconclusive"; }
+	context.probes++;
+	try {
+		const output = execFileSync("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.pager=cat", "rev-parse", "--is-inside-work-tree"], { cwd: canonical, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: Math.min(VALIDATION_GIT_PROBE_MAX_CALL_MS, remaining), maxBuffer: 4096, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "Never", GIT_PAGER: "cat", PAGER: "cat" } }).trim() === "true" ? "git" : "not-git";
+		context.cache.set(canonical, output); return output;
+	} catch (cause: any) {
+		const timedOut = cause?.code === "ETIMEDOUT" || cause?.signal === "SIGTERM" && cause?.status === null;
+		const result = timedOut || performance.now() >= context.expiresAt ? "inconclusive" : "not-git";
+		if (result === "inconclusive") context.limitFailure = "deadline";
+		context.cache.set(canonical, result); return result;
+	}
+}
+
+const ADAPTIVE_GATE_ANALYSIS_CAP = 4096;
+
+function collectChangedGatePredecessors(steps: readonly import("./chain-parser.js").StructuredChainStep[], limits: import("./chain-parser.js").ChainLimits): { complete: boolean; predecessors: Map<string, Set<string>> } {
+	const predecessors = new Map<string, Set<string>>();
+	const queue: Array<{ state: AdaptiveChainState; selected: string }> = [];
+	const seen = new Set<string>();
+	try {
+		const initial = routeAdaptiveChain(steps, limits, createAdaptiveChainState());
+		if (initial.action) queue.push({ state: initial.state, selected: initial.action.step.id });
+		while (queue.length > 0) {
+			if (seen.size >= ADAPTIVE_GATE_ANALYSIS_CAP) return { complete: false, predecessors };
+			const current = queue.shift()!;
+			// Earlier observation values are irrelevant once this action is selected;
+			// the router's future is determined by selected/visited IDs plus its next observation.
+			const key = `${current.selected}\0${current.state.visited.join("\0")}`;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			for (const outcome of ["succeeded", "failed", "blocked"] as const) for (const changed of [false, true]) {
+				let next;
+				try { next = routeAdaptiveChain(steps, limits, current.state, { outcome, changed } satisfies ChainObservation); } catch { continue; }
+				for (const decision of next.decisions) {
+					if (decision.matchedGate !== "changed" || decision.selectedTarget === null) continue;
+					let suppliers = predecessors.get(decision.selectedTarget);
+					if (!suppliers) predecessors.set(decision.selectedTarget, suppliers = new Set());
+					suppliers.add(current.selected);
+				}
+				if (next.action) queue.push({ state: next.state, selected: next.action.step.id });
+			}
+		}
+		return { complete: true, predecessors };
+	} catch {
+		return { complete: false, predecessors };
+	}
+}
+
+function effectiveAdaptiveActionCwd(wrapper: LoadedPrompt, step: import("./chain-parser.js").StructuredChainStep, prompts: ReturnType<typeof loadPromptsWithModel>["prompts"], cwd: string): string {
+	const target = prompts.get(step.target);
+	return (step.kind === "run" ? target?.deterministic?.cwd : target?.cwd) ?? wrapper.cwd ?? cwd;
+}
+
+function validateAdaptiveChains(cwd: string, result: PromptValidationResult, prompts: ReturnType<typeof loadPromptsWithModel>["prompts"]): void {
+	const gitProbes: GitProbeContext = { expiresAt: performance.now() + VALIDATION_GIT_PROBE_DEADLINE_MS, cache: new Map(), probes: 0 };
+	let probeLimitReported = false;
+	for (const prompt of prompts.values()) {
+		if (!prompt.adaptiveChain) continue;
+		const preflight = createAdaptivePreflight(prompt, prompts, cwd);
+		(result.adaptiveChains ??= []).push({ promptName: prompt.name, filePath: prompt.filePath, preflight });
+		for (const issue of preflight.diagnostics.slice(0, 100)) {
+			result.diagnostics.push(createValidationDiagnostic("invalid-adaptive-chain", prompt.filePath, prompt.source, `Adaptive chain ${JSON.stringify(prompt.name)}: ${issue}`));
+		}
+		const analysis = collectChangedGatePredecessors(prompt.adaptiveChain.steps, prompt.adaptiveChain.limits);
+		if (!analysis.complete) result.diagnostics.push(createValidationDiagnostic("adaptive-changed-gate-analysis-inconclusive", prompt.filePath, prompt.source, `Adaptive chain ${JSON.stringify(prompt.name)} changed-gate predecessor analysis exceeded its bounded reachability cap or could not be completed; validation fails closed.`));
+		for (const [gateId, predecessorIds] of analysis.predecessors) for (const predecessorId of predecessorIds) {
+			const predecessor = prompt.adaptiveChain.steps.find((step) => step.id === predecessorId)!;
+			const effectiveCwd = effectiveAdaptiveActionCwd(prompt, predecessor, prompts, cwd);
+			const probe = isGitRepository(effectiveCwd, gitProbes);
+			if (probe === "not-git") result.diagnostics.push(createValidationDiagnostic("adaptive-changed-requires-git", prompt.filePath, prompt.source, `Adaptive chain ${JSON.stringify(prompt.name)} changed gate ${JSON.stringify(gateId)} can observe selected predecessor ${JSON.stringify(predecessorId)} (${predecessor.kind}:${predecessor.target}), but its runtime-effective cwd ${JSON.stringify(effectiveCwd)} is not a readable Git worktree. Runtime snapshotting would fail closed.`));
+			else if (probe === "inconclusive" && !probeLimitReported) { probeLimitReported = true; result.diagnostics.push(createValidationDiagnostic("adaptive-git-probe-inconclusive", prompt.filePath, prompt.source, `Adaptive changed-gate Git validation failed closed because its aggregate ${VALIDATION_GIT_PROBE_DEADLINE_MS}ms deadline or ${VALIDATION_GIT_PROBE_MAX_UNIQUE_CWDS}-cwd probe cap was reached.`)); }
+		}
+	}
+}
+
 function validatePromptSkills(cwd: string, result: PromptValidationResult, prompts: ReturnType<typeof loadPromptsWithModel>["prompts"], options: PromptValidationOptions) {
 	const registeredSkills = collectRegisteredSkillCandidates(options.registeredSkills);
 	const filesystemSkillNames = collectFilesystemSkillNames(cwd);
@@ -555,7 +662,7 @@ function collectValidationSourceSummary(sourceRecords: PromptSourceRecord[], inv
 }
 
 export function validatePromptTemplates(cwd: string, options: PromptValidationOptions = {}): PromptValidationResult {
-	const loaded = loadPromptsWithModel(cwd, true);
+	const loaded = loadPromptsWithModel(cwd, true, { includeAdaptiveChains: true });
 	const sourceRecordResult = collectPromptSourceRecords(cwd, true);
 	const includeGraphs = collectValidationIncludeGraphs(sourceRecordResult.records, loaded);
 	const budgets: PromptValidationBudgetSummary[] = [];
@@ -566,6 +673,7 @@ export function validatePromptTemplates(cwd: string, options: PromptValidationOp
 		diagnostics: [...loaded.diagnostics],
 		includeGraphs,
 		budgets,
+		adaptiveChains: [],
 	};
 
 	for (const prompt of loaded.prompts.values()) {
@@ -609,6 +717,7 @@ export function validatePromptTemplates(cwd: string, options: PromptValidationOp
 	}
 
 	validatePromptChains(cwd, result, loaded.prompts);
+	validateAdaptiveChains(cwd, result, loaded.prompts);
 	validateComparePrompts(cwd, result, loaded.prompts);
 	validatePromptSkills(cwd, result, loaded.prompts, options);
 	result.ok = result.diagnostics.length === 0;
@@ -715,26 +824,44 @@ function formatBudgetSection(budgets: PromptValidationBudgetSummary[]): string[]
 	return lines;
 }
 
+function formatAdaptiveSection(chains: PromptValidationAdaptiveSummary[]): string[] {
+	if (chains.length === 0) return [];
+	const lines = ["Adaptive chains (read-only preflight snapshot; runtime revalidates):"];
+	for (const chain of [...chains].sort((a, b) => lexicalCompare(a.promptName, b.promptName))) {
+		const preflight = chain.preflight;
+		lines.push(`- ${sanitizeReportValue(chain.promptName)} [${preflight.status}] steps=${preflight.steps.length} calls=${preflight.callBounds.minimum}..${preflight.callBounds.maximum} analysis=${preflight.analysis.complete ? "complete" : "inconclusive"}`);
+	}
+	return lines;
+}
+
 export function formatPromptValidationReport(result: PromptValidationResult): string {
 	const includeGraphLines = formatIncludeGraphSection(result.includeGraphs);
 	const sourceSummaryLine = formatSourceSummary(result.sourceSummary);
 	const budgetLines = formatBudgetSection(result.budgets ?? []);
+	const adaptiveLines = formatAdaptiveSection(result.adaptiveChains ?? []);
+	let reportLines: string[];
 	if (result.ok) {
-		return [
+		reportLines = [
 			`[pi-prompt-workflows] Prompt validation passed: ${result.promptCount} prompt template(s) loaded.`,
 			sourceSummaryLine,
 			...budgetLines,
+			...adaptiveLines,
 			...includeGraphLines,
-		].join("\n");
+		];
+	} else {
+		const diagnostics = sortDiagnostics(result.diagnostics);
+		const lines = diagnostics.map((diagnostic) => `- ${sanitizeReportValue(diagnostic.code)} (${sanitizeReportValue(diagnostic.source)}) ${sanitizeReportValue(diagnostic.filePath)}: ${sanitizeReportValue(diagnostic.message)}`);
+		reportLines = [
+			`[pi-prompt-workflows] Prompt validation failed: ${diagnostics.length} issue(s) found across ${result.promptCount} loaded prompt template(s).`,
+			sourceSummaryLine,
+			...budgetLines,
+			...adaptiveLines,
+			...lines,
+			...includeGraphLines,
+		];
 	}
-
-	const diagnostics = sortDiagnostics(result.diagnostics);
-	const lines = diagnostics.map((diagnostic) => `- ${sanitizeReportValue(diagnostic.code)} (${sanitizeReportValue(diagnostic.source)}) ${sanitizeReportValue(diagnostic.filePath)}: ${sanitizeReportValue(diagnostic.message)}`);
-	return [
-		`[pi-prompt-workflows] Prompt validation failed: ${diagnostics.length} issue(s) found across ${result.promptCount} loaded prompt template(s).`,
-		sourceSummaryLine,
-		...budgetLines,
-		...lines,
-		...includeGraphLines,
-	].join("\n");
+	const maxLines = 400;
+	if (reportLines.length > maxLines) reportLines = [...reportLines.slice(0, maxLines - 1), `… [omitted ${reportLines.length - maxLines + 1} report lines]`];
+	const joined = reportLines.join("\n");
+	return capSanitizedUtf8Bytes(joined, 65536, { preserveLineBreaks: true, originalBytes: utf8ByteLength(joined), marker: "… [validation report omitted]" });
 }

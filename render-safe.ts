@@ -89,6 +89,28 @@ export function capSanitizedText(value: unknown, maxChars: number, options: Trun
 	return `${unicodeSafeSlice(sanitized, limit - marker.length)}${marker}`;
 }
 
+/** Cap sanitized UTF-8 output exactly, including the omission marker. */
+export function capSanitizedUtf8Bytes(value: unknown, maxBytes: number, options: TruncateForTerminalOptions = {}): string {
+	const sanitized = sanitizeForTerminal(value, options);
+	const limit = Math.max(0, Math.floor(maxBytes));
+	if (utf8ByteLength(sanitized) <= limit) return sanitized;
+	const marker = sanitizeForTerminal(options.marker ?? truncationMarker(options.originalBytes ?? utf8ByteLength(String(value ?? ""))), options);
+	if (utf8ByteLength(marker) >= limit) return utf8SafePrefix(marker, limit);
+	return `${utf8SafePrefix(sanitized, limit - utf8ByteLength(marker))}${marker}`;
+}
+
+function utf8SafePrefix(value: string, maxBytes: number): string {
+	let output = "";
+	let used = 0;
+	for (const char of value) {
+		const bytes = utf8ByteLength(char);
+		if (used + bytes > maxBytes) break;
+		output += char;
+		used += bytes;
+	}
+	return output;
+}
+
 /** Slice by JavaScript UTF-16 code units without leaving an unpaired surrogate. */
 function unicodeSafeSlice(value: string, maxCodeUnits: number): string {
 	let end = Math.min(value.length, Math.max(0, maxCodeUnits));

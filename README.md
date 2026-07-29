@@ -1201,6 +1201,69 @@ Each iteration gets fresh context, a different model, and its own thinking level
 
 Without `loop`, `rotate` has no effect and comma-separated `model` keeps normal fallback behavior.
 
+## Adaptive Chains
+
+Adaptive chains are a structured, deterministic alternative to legacy string chains. They select one action at a time from normalized execution evidence; they never parse model prose and do not support arbitrary expressions.
+
+```yaml
+---
+description: Implement, test, repair once, then review final changes
+chain:
+  - id: implement
+    prompt: adaptive-implement
+  - id: review-implementation
+    prompt: adaptive-review
+    when: changed
+  - id: test
+    run: adaptive-test
+    onSuccess: done
+    onFailure: fix
+  - id: fix
+    prompt: adaptive-fix
+  - id: review-fix
+    prompt: adaptive-review
+    when: changed
+  - id: retest
+    run: adaptive-test
+    onSuccess: done
+    onFailure: done
+    onBlocked: done
+  - id: done
+    run: adaptive-status
+limits:
+  maxSteps: 7
+  maxModelCalls: 4
+---
+```
+
+Each list item sets exactly one of `prompt` or `run`. `id` is optional: when omitted, the trimmed target name is the stable generated ID. Use an explicit non-empty `id` when a target appears more than once, as above. IDs must be unique. `onSuccess`, `onFailure`, and `onBlocked` name step IDs; omitting the matching transition falls through to the next declared step, and falling through after the last step ends the chain. Gates are `always` (default), `changed`, `succeeded`, and `failed`. Outcomes are normalized by the runtime to `succeeded`, `failed`, `blocked`, or `skipped`; `blocked` is an explicit guardrail/refusal outcome, not text inferred from an answer. Gate-skipped steps execute nothing.
+
+`limits` is optional but always effective. Defaults are `maxSteps: 10` and `maxModelCalls: 5`; author values must be positive safe integers and cannot exceed the hard caps `maxSteps: 100` and `maxModelCalls: 50`. Every selected prompt consumes exactly one model call. Selected `run` actions and gate-skipped actions consume zero. Prompt targets that can expand into multiple top-level calls are rejected: nested/adaptive/parallel chains, loops, delegated/subagent or inherited-context prompts, `parallel`, boomerang, compare/final-applier modes, and deterministic handoffs. A `run` target must be deterministic with `handoff: never`; a `prompt` target must not be deterministic.
+
+### Verified changed-state semantics
+
+Adaptive execution snapshots the effective Git worktree before and after each selected action and compares the final repository-visible state. This is not based on tool-call or child self-report. The comparison covers HEAD identity, the complete index tree, staged/index entries, tracked worktree content, symlinks, and all untracked files reported by Git. Pre-dirty work is preserved: an action counts as changed only if the before and after snapshots differ, so mutate-then-restore is unchanged while modifying an already-dirty file is changed. A readable Git worktree is required wherever changed evidence is needed. Every capture has one aggregate 10-second monotonic deadline shared by all bounded Git calls; optional locks, fsmonitor, pagers, external diff helpers, and interactive prompting are suppressed. Snapshot/read/race/timeout errors fail closed; dirty submodules are rejected rather than guessed at. Validation deduplicates canonical effective cwd probes and applies one aggregate 10-second deadline plus a 64-unique-cwd cap, failing closed when either bound is reached.
+
+### Preflight, operation, and troubleshooting
+
+Use these read-only commands before execution:
+
+```text
+/validate-prompts
+/print-prompt adaptive-fix-review --plain <task>
+/dry-run-prompt adaptive-fix-review --plain <task>
+```
+
+The plain report and Pi TUI inspector show the bounded graph, gates/transitions, target kinds, effective cwd/model/skills/includes/budgets, completing-path call and token bounds, reachable exhaustion, and whether graph analysis was complete. Static analysis is capped at 4,096 enqueued states; exceeding it is reported as **inconclusive** and blocks preflight rather than presenting conservative bounds as exact. Validation and dry-run are read-only snapshots: they do not execute commands, capture full runtime snapshots, approve trust, switch models, or send messages. Runtime reloads/re-resolves targets and revalidates models, skills, budgets, cwd, target mode, limits, and Git snapshots before dispatch, so files or availability can change after preview.
+
+Only one adaptive chain is allowed in flight for the extension. Cancellation is checked before routing, before dispatch, after snapshots, and after an action; the partial report is retained. Child command cleanup uses the deterministic runner's TERM-then-KILL behavior. On Unix this targets the managed child/process group where available, but no API can guarantee cleanup of a daemon that deliberately detaches itself. Windows uses the platform's available child termination fallback and cannot promise Unix signal/process-group semantics. Snapshot failure, malformed/reloaded targets, missing targets, unsupported modes, and report errors fail closed instead of bypassing routing checks.
+
+Packaged starters are `examples/adaptive-fix-review.md` (plus its hidden companion targets) and `examples/adaptive-validation-review.md`. Copy the complete adaptive example set so target names resolve. Their deterministic checks are hardened read-only Git commands: `git --no-pager diff --no-ext-diff --no-textconv --check` and `git --no-optional-locks -c core.fsmonitor=false status --porcelain=v1`. They disable configured external diff/textconv/pager helpers and fsmonitor/index-refresh side effects, never invoke package lifecycle/config hooks, and never hand off to another model. Prompt/model steps can edit by design: implementation and fix prompts may mutate the worktree, while the companion review prompt explicitly requests findings only.
+
+To migrate `chain: analyze -> fix -> review`, replace the scalar with a list of `{prompt: ...}` entries. With no gates/transitions, natural fallthrough preserves sequential intent, but adaptive limits and Git snapshot requirements still apply. Keep legacy string chains when you need their supported looping, delegation, parallel groups, shared arguments, or chain-context behavior; structured adaptive chains deliberately do not emulate those multi-call modes.
+
+Common failures: `target missing` means copy/install the companion prompt; `kind mismatch` means use `run` only for deterministic `handoff: never` targets; `changed requires Git` means run from or set an effective cwd inside a Git worktree; `analysis inconclusive` means simplify branching; limit exhaustion means increase a configured limit within the hard cap or shorten the path. Project/user, hidden, duplicate, reserved-name, and prompt-library trust precedence is exactly the normal effective prompt catalog—hidden affects discovery, not target authority.
+
 ## Chaining Templates
 
 `/chain-prompts` runs multiple templates in sequence. Each step uses its own model, skill, and thinking level, while conversation context flows between them:
