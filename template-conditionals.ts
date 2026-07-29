@@ -274,6 +274,15 @@ function renderNodes(nodes: Node[], model: ResolvedModelRef): string {
 	return output;
 }
 
+function containsConditional(nodes: Node[]): boolean {
+	return nodes.some((node) => node.type === "if");
+}
+
+export function hasValidModelConditionals(content: string): boolean {
+	const parsed = parseNodes(content);
+	return parsed.ok && containsConditional(parsed.nodes);
+}
+
 export function renderTemplateConditionals(
 	content: string,
 	model: ResolvedModelRef,
