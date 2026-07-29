@@ -809,11 +809,11 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		});
 	}
 
-	function fallbackReportLineupSlots(slots: DelegationLineupSlot[]): ReportLineupSlot[] {
+	function fallbackReportLineupSlots(slots: DelegationLineupSlot[], baseTask: string, taskArgs: string[], baseModel: Model<any>): ReportLineupSlot[] {
 		return slots.map((slot) => ({
 			...slot,
-			effectiveModel: slot.model ?? "unknown",
-			effectiveTask: slot.task ?? slot.taskSuffix ?? "",
+			effectiveModel: slot.model ?? `${baseModel.provider}/${baseModel.id}`,
+			effectiveTask: buildLineupSlotTask(baseTask, slot, taskArgs),
 		}));
 	}
 
@@ -898,6 +898,11 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			preset: options.presetName,
 			commit: options.commitMode,
 			keepArtifacts: options.keepArtifacts,
+			artifactsProduced: {
+				workers: options.workerPairs.length,
+				reviewers: options.reviewerPairs.length,
+				finalApplier: Boolean(options.finalText),
+			},
 			args: options.taskArgs,
 			workers: options.workers.map(serializeLineupSlot),
 			reviewers: options.reviewers.map(serializeLineupSlot),
@@ -1506,9 +1511,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				return;
 			}
 		}
-		const fallbackWorkers = fallbackReportLineupSlots(normalizedWorkers);
-		const fallbackReviewers = fallbackReportLineupSlots(normalizedReviewers);
-		const fallbackFinalApplier = normalizedFinalApplier ? fallbackReportLineupSlots([normalizedFinalApplier])[0] : undefined;
+		const fallbackWorkers = fallbackReportLineupSlots(normalizedWorkers, sharedTask, taskArgs, baseModel);
+		const fallbackReviewers = fallbackReportLineupSlots(normalizedReviewers, sharedTask, taskArgs, baseModel);
+		const fallbackFinalApplier = normalizedFinalApplier ? fallbackReportLineupSlots([normalizedFinalApplier], sharedTask, taskArgs, baseModel)[0] : undefined;
 
 		try {
 			let workerResult;
@@ -3045,7 +3050,15 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					continue;
 				}
 				if (selection?.action !== "selected") break;
-				const detailAction = await inspectCompareRunInTui(ctx, options, selection.runId, searchCwd);
+				let detailAction = await inspectCompareRunInTui(ctx, options, selection.runId, searchCwd);
+				while (detailAction?.action === "refresh") {
+					currentHistory = collectBestOfNRunHistory(searchCwd, pickerOptions);
+					if (!currentHistory.entries.some((entry) => entry.name === selection.runId)) {
+						notify(ctx, `Compare run ${selection.runId} vanished or is no longer readable; refreshed run history.`, "warning");
+						break;
+					}
+					detailAction = await inspectCompareRunInTui(ctx, options, selection.runId, searchCwd);
+				}
 				if (detailAction?.action === "back" || detailAction?.action === "refresh") {
 					currentHistory = collectBestOfNRunHistory(searchCwd, pickerOptions);
 					continue;
