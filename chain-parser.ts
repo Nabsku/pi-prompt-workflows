@@ -24,6 +24,31 @@ export interface ParsedChainDeclaration {
 	invalidSegments: string[];
 }
 
+export type ChainOutcome = "succeeded" | "failed" | "blocked" | "skipped";
+export type ChainGate = "always" | "changed" | "succeeded" | "failed";
+export interface ChainLimits { readonly maxSteps: number; readonly maxModelCalls: number }
+export interface StructuredChainStep {
+	id: string;
+	kind: "prompt" | "run";
+	target: string;
+	when: ChainGate;
+	onSuccess?: string;
+	onFailure?: string;
+	onBlocked?: string;
+}
+export interface ParsedStructuredChainDeclaration {
+	steps: StructuredChainStep[];
+	limits: ChainLimits;
+	invalidSegments: string[];
+}
+
+export const DEFAULT_CHAIN_LIMITS: Readonly<ChainLimits> = Object.freeze({ maxSteps: 10, maxModelCalls: 5 });
+export const MAX_CHAIN_LIMITS: Readonly<ChainLimits> = Object.freeze({ maxSteps: 100, maxModelCalls: 50 });
+
+export function normalizeChainOutcome(value: unknown): ChainOutcome | undefined {
+	return value === "succeeded" || value === "failed" || value === "blocked" || value === "skipped" ? value : undefined;
+}
+
 interface SegmentToken {
 	start: number;
 	end: number;
@@ -273,7 +298,80 @@ export function parseChainSteps(args: string): ParsedChainSteps {
 	return { steps, sharedArgs: parseCommandArgs(argsPart), invalidSegments };
 }
 
-export function parseChainDeclaration(chain: string): ParsedChainDeclaration {
+function parseStructuredChainDeclaration(chain: unknown[], limitsValue?: unknown): ParsedStructuredChainDeclaration {
+	const defaultLimits = (): ChainLimits => ({ ...DEFAULT_CHAIN_LIMITS });
+	const fail = (message: string): ParsedStructuredChainDeclaration => ({ steps: [], limits: defaultLimits(), invalidSegments: [message] });
+	let limits = defaultLimits();
+	if (chain.length > MAX_CHAIN_LIMITS.maxSteps) return fail(`structured chain must contain no more than ${MAX_CHAIN_LIMITS.maxSteps} declared steps`);
+	if (limitsValue !== undefined) {
+		if (limitsValue === null || typeof limitsValue !== "object" || Array.isArray(limitsValue)) return fail("limits must be an object");
+		const raw = limitsValue as Record<string, unknown>;
+		for (const key of Object.keys(raw)) if (key !== "maxSteps" && key !== "maxModelCalls") return fail(`unknown limits field ${JSON.stringify(key)}`);
+		const maxSteps = Object.hasOwn(raw, "maxSteps") ? raw.maxSteps : DEFAULT_CHAIN_LIMITS.maxSteps;
+		const maxModelCalls = Object.hasOwn(raw, "maxModelCalls") ? raw.maxModelCalls : DEFAULT_CHAIN_LIMITS.maxModelCalls;
+		if (!Number.isSafeInteger(maxSteps) || Number(maxSteps) < 1 || Number(maxSteps) > MAX_CHAIN_LIMITS.maxSteps) return fail(`limits.maxSteps must be a positive safe integer no greater than ${MAX_CHAIN_LIMITS.maxSteps}`);
+		if (!Number.isSafeInteger(maxModelCalls) || Number(maxModelCalls) < 1 || Number(maxModelCalls) > MAX_CHAIN_LIMITS.maxModelCalls) return fail(`limits.maxModelCalls must be a positive safe integer no greater than ${MAX_CHAIN_LIMITS.maxModelCalls}`);
+		limits = { maxSteps: Number(maxSteps), maxModelCalls: Number(maxModelCalls) };
+	}
+	if (chain.length === 0) return fail("structured chain must contain at least one step");
+	const steps: StructuredChainStep[] = [];
+	const allowed = new Set(["prompt", "run", "when", "onSuccess", "onFailure", "onBlocked"]);
+	for (let index = 0; index < chain.length; index++) {
+		const raw = chain[index];
+		if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return fail(`step ${index + 1} must be an object`);
+		const record = raw as Record<string, unknown>;
+		for (const key of Object.keys(record)) {
+			if (!allowed.has(key)) return fail(key.startsWith("on") ? `unknown outcome transition ${JSON.stringify(key)}` : `unknown structured chain field ${JSON.stringify(key)}`);
+		}
+		const hasPrompt = Object.hasOwn(record, "prompt");
+		const hasRun = Object.hasOwn(record, "run");
+		if (hasPrompt === hasRun) return fail(`step ${index + 1} must set exactly one of prompt or run`);
+		const kind = hasPrompt ? "prompt" : "run";
+		const targetValue = record[kind];
+		if (typeof targetValue !== "string" || targetValue.trim() === "") return fail(`step ${index + 1} ${kind} target must be a non-empty string`);
+		const target = targetValue.trim();
+		const when = Object.hasOwn(record, "when") ? record.when : "always";
+		if (when !== "always" && when !== "changed" && when !== "succeeded" && when !== "failed") return fail(`step ${index + 1} has unknown gate ${JSON.stringify(when)}`);
+		const step: StructuredChainStep = { id: target, kind, target, when };
+		for (const key of ["onSuccess", "onFailure", "onBlocked"] as const) {
+			if (record[key] === undefined) continue;
+			if (typeof record[key] !== "string" || record[key].trim() === "") return fail(`step ${index + 1} ${key} target must be a non-empty string`);
+			step[key] = record[key].trim();
+		}
+		steps.push(step);
+	}
+	const ids = new Set<string>();
+	for (const step of steps) {
+		if (ids.has(step.id)) return fail(`duplicate structured chain target ${JSON.stringify(step.id)}`);
+		ids.add(step.id);
+	}
+	const edges = new Map<string, string[]>();
+	for (let index = 0; index < steps.length; index++) {
+		const step = steps[index];
+		const targets = [step.onSuccess, step.onFailure, step.onBlocked].filter((target): target is string => target !== undefined);
+		for (const target of targets) {
+			if (!ids.has(target)) return fail(`step ${JSON.stringify(step.id)} references unknown target ${JSON.stringify(target)}`);
+			if (target === step.id) return fail(`step ${JSON.stringify(step.id)} has a self-transition`);
+		}
+		if ((targets.length < 3 || step.when !== "always") && index + 1 < steps.length) targets.push(steps[index + 1].id);
+		edges.set(step.id, [...new Set(targets)]);
+	}
+	const visiting = new Set<string>(); const visited = new Set<string>();
+	const cyclic = (id: string): boolean => { if (visiting.has(id)) return true; if (visited.has(id)) return false; visiting.add(id); for (const next of edges.get(id) ?? []) if (cyclic(next)) return true; visiting.delete(id); visited.add(id); return false; };
+	if (cyclic(steps[0].id)) return fail("structured chain contains a cycle");
+	const reachable = new Set<string>();
+	const visit = (id: string) => { if (reachable.has(id)) return; reachable.add(id); for (const next of edges.get(id) ?? []) visit(next); };
+	visit(steps[0].id);
+	const unreachable = steps.find((step) => !reachable.has(step.id));
+	if (unreachable) return fail(`structured chain has unreachable target ${JSON.stringify(unreachable.id)}`);
+	return { steps, limits, invalidSegments: [] };
+}
+
+export function parseChainDeclaration(chain: string): ParsedChainDeclaration;
+export function parseChainDeclaration(chain: unknown[], limits?: unknown): ParsedStructuredChainDeclaration;
+export function parseChainDeclaration(chain: string | unknown[], limits?: unknown): ParsedChainDeclaration | ParsedStructuredChainDeclaration;
+export function parseChainDeclaration(chain: string | unknown[], limits?: unknown): ParsedChainDeclaration | ParsedStructuredChainDeclaration {
+	if (Array.isArray(chain)) return parseStructuredChainDeclaration(chain, limits);
 	const invalidSegments: string[] = [];
 	const steps: ChainStepOrParallel[] = [];
 

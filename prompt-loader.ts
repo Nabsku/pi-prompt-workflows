@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import type { PromptBudgetConfig } from "./prompt-budget.js";
-import { parseChainDeclaration } from "./chain-parser.js";
+import { parseChainDeclaration, type ChainLimits, type StructuredChainStep } from "./chain-parser.js";
 import {
 	extractPromptInlineIncludes,
 	hasPromptIncludeDirectives,
@@ -89,6 +89,7 @@ export interface PromptWithModel {
 	budget?: PromptBudgetConfig;
 	includes?: string[];
 	chain?: string;
+	adaptiveChain?: { steps: StructuredChainStep[]; limits: ChainLimits };
 	chainContext?: "summary";
 	restore: boolean;
 	hidden?: boolean;
@@ -130,6 +131,11 @@ export interface PromptLoaderDiagnostic {
 export interface LoadPromptsWithModelResult {
 	prompts: Map<string, PromptWithModel>;
 	diagnostics: PromptLoaderDiagnostic[];
+}
+
+export interface LoadPromptsWithModelOptions {
+	/** Include parsed adaptive-chain wrappers for adaptive-aware consumers. Defaults to false. */
+	includeAdaptiveChains?: boolean;
 }
 
 export interface PromptSourceRecord {
@@ -1512,15 +1518,16 @@ function normalizeChain(
 	filePath: string,
 	source: PromptSource,
 	diagnostics: PromptLoaderDiagnostic[],
-): string | undefined {
+): string | unknown[] | undefined {
 	if (value === undefined) return undefined;
+	if (Array.isArray(value)) return value;
 	if (typeof value !== "string") {
 		diagnostics.push(
 			createDiagnostic(
 				"invalid-chain",
 				filePath,
 				source,
-				`Ignoring invalid chain value in ${filePath}: frontmatter field "chain" must be a string.`,
+				`Ignoring invalid chain value in ${filePath}: frontmatter field "chain" must be a legacy string or structured array.`,
 			),
 		);
 		return undefined;
@@ -1739,7 +1746,7 @@ function resolvePromptSymlinkEntryKind(
 const MODEL_CONDITIONAL_DIRECTIVE_PATTERN = /<if-model(?:\s|>)|<else(?:\s|>)|<\/if-model\s*>|<\/else(?:\s|>)/;
 
 function isPromptCapable(input: {
-	chain?: string;
+	chain?: unknown;
 	hasModelField: boolean;
 	hasExtensionSpecificConfig: boolean;
 }): boolean {
@@ -1749,7 +1756,7 @@ function isPromptCapable(input: {
 function calculatePromptCapable(input: {
 	frontmatter: Record<string, unknown>;
 	body: string;
-	chain?: string;
+	chain?: unknown;
 	hasExtensionSpecificConfig?: boolean;
 	ignoreBodyIncludes?: boolean;
 }): boolean {
@@ -1877,13 +1884,15 @@ function loadPromptsWithModelFromDir(
 				const includesResult = normalizePromptIncludes(frontmatter, fullPath, source, diagnostics);
 				if (!includesResult.ok) continue;
 				const includes = includesResult.includes;
-				const chain = normalizeChain(frontmatter.chain, fullPath, source, diagnostics);
-				const hasBodyIncludeDirectives = chain ? false : hasPromptIncludeDirectives(body);
+				const rawChain = normalizeChain(frontmatter.chain, fullPath, source, diagnostics);
+				const chain = typeof rawChain === "string" ? rawChain : undefined;
+				let adaptiveChain: PromptWithModel["adaptiveChain"];
+				const hasBodyIncludeDirectives = rawChain ? false : hasPromptIncludeDirectives(body);
 				const hasModelConditionalDirectives = MODEL_CONDITIONAL_DIRECTIVE_PATTERN.test(body);
-				if (rootKind === "prompt-library" && !chain && includes === undefined && !hasBodyIncludeDirectives && !hasModelConditionalDirectives && !hasPromptLibraryCommandMarker(frontmatter)) {
+				if (rootKind === "prompt-library" && !rawChain && includes === undefined && !hasBodyIncludeDirectives && !hasModelConditionalDirectives && !hasPromptLibraryCommandMarker(frontmatter)) {
 					continue;
 				}
-				if (chain && includesResult.declaredKey) {
+				if (rawChain && includesResult.declaredKey) {
 					diagnostics.push(
 						createDiagnostic(
 							"invalid-includes-chain",
@@ -1897,19 +1906,22 @@ function loadPromptsWithModelFromDir(
 				let parsedChainDeclarationResult:
 					| ReturnType<typeof parseChainDeclaration>
 					| undefined;
-				const chainContext = chain ? normalizeChainContext(frontmatter.chainContext, fullPath, source, diagnostics) : undefined;
-				if (chain) {
-					parsedChainDeclarationResult = parseChainDeclaration(chain);
+				const chainContext = rawChain ? normalizeChainContext(frontmatter.chainContext, fullPath, source, diagnostics) : undefined;
+				if (rawChain) {
+					parsedChainDeclarationResult = parseChainDeclaration(rawChain, Array.isArray(rawChain) ? frontmatter.limits : undefined);
 					if (parsedChainDeclarationResult.invalidSegments.length > 0 || parsedChainDeclarationResult.steps.length === 0) {
 						diagnostics.push(
 							createDiagnostic(
 								"invalid-chain-declaration",
 								fullPath,
 								source,
-								`Skipping prompt template at ${fullPath}: invalid chain declaration segment ${JSON.stringify(parsedChainDeclarationResult.invalidSegments[0] ?? chain)}.`,
+								`Skipping prompt template at ${fullPath}: invalid chain declaration segment ${JSON.stringify(parsedChainDeclarationResult.invalidSegments[0] ?? rawChain)}.`,
 							),
 						);
 						continue;
+					}
+					if (Array.isArray(rawChain) && "limits" in parsedChainDeclarationResult) {
+						adaptiveChain = { steps: parsedChainDeclarationResult.steps, limits: parsedChainDeclarationResult.limits };
 					}
 				}
 				let subagent = normalizeSubagent(frontmatter.subagent, fullPath, source, diagnostics);
@@ -1952,7 +1964,7 @@ function loadPromptsWithModelFromDir(
 				let safeFinalApplier = finalApplier;
 				let safePreset = preset;
 				let safeCommit = commit;
-				if (chain && subagent !== undefined) {
+				if (rawChain && subagent !== undefined) {
 					diagnostics.push(
 						createDiagnostic(
 							"invalid-subagent-chain",
@@ -1963,7 +1975,7 @@ function loadPromptsWithModelFromDir(
 					);
 					subagent = undefined;
 				}
-				if (chain && deterministic !== undefined) {
+				if (rawChain && deterministic !== undefined) {
 					diagnostics.push(
 						createDiagnostic(
 							"invalid-deterministic-chain",
@@ -1974,7 +1986,7 @@ function loadPromptsWithModelFromDir(
 					);
 					deterministic = undefined;
 				}
-				if (chain && (safeWorkers !== undefined || safeReviewers !== undefined || safeFinalApplier !== undefined || safePreset !== undefined || safeCommit !== undefined)) {
+				if (rawChain && (safeWorkers !== undefined || safeReviewers !== undefined || safeFinalApplier !== undefined || safePreset !== undefined || safeCommit !== undefined)) {
 					diagnostics.push(
 						createDiagnostic(
 							"invalid-lineup-chain",
@@ -2026,7 +2038,7 @@ function loadPromptsWithModelFromDir(
 					);
 				}
 				let safeParallel = parallel;
-				if (safeParallel !== undefined && chain) {
+				if (safeParallel !== undefined && rawChain) {
 					diagnostics.push(
 						createDiagnostic(
 							"invalid-parallel",
@@ -2108,7 +2120,7 @@ function loadPromptsWithModelFromDir(
 					);
 					continue;
 				}
-				if (!chain && subagent === undefined && !hasLineup && cwd) {
+				if (!rawChain && subagent === undefined && !hasLineup && cwd) {
 					if (deterministic) {
 						deterministic = { ...deterministic, ...(deterministic.cwd ? {} : { cwd }) };
 					} else {
@@ -2123,15 +2135,15 @@ function loadPromptsWithModelFromDir(
 					}
 				}
 				const hasModelField = Object.hasOwn(frontmatter, "model");
-				const parsedModels = chain ? [] : normalizeModelSpecs(frontmatter.model, fullPath, source, diagnostics);
-				if (!chain && hasModelField && !parsedModels) continue;
-				const models = chain ? [] : (parsedModels ?? []);
-				const rotate = chain ? false : normalizeRotate(frontmatter.rotate, fullPath, source, diagnostics);
+				const parsedModels = rawChain ? [] : normalizeModelSpecs(frontmatter.model, fullPath, source, diagnostics);
+				if (!rawChain && hasModelField && !parsedModels) continue;
+				const models = rawChain ? [] : (parsedModels ?? []);
+				const rotate = rawChain ? false : normalizeRotate(frontmatter.rotate, fullPath, source, diagnostics);
 				const hidden = normalizeHidden(frontmatter.hidden, fullPath, source, diagnostics);
 				const budgetResult = normalizePromptBudget(frontmatter.budget, fullPath, source, diagnostics);
 				if (!budgetResult.ok) continue;
 				const budget = budgetResult.budget;
-				if (budget && chain) {
+				if (budget && rawChain) {
 					diagnostics.push(createDiagnostic("invalid-budget-chain", fullPath, source, "Prompt budgets belong on executable chain step templates, not chain wrappers."));
 					continue;
 				}
@@ -2150,7 +2162,7 @@ function loadPromptsWithModelFromDir(
 				}
 
 				const safeInheritContext = subagent !== undefined && inheritContext;
-				const safeCwd = (chain || subagent !== undefined || hasLineup) ? cwd : undefined;
+				const safeCwd = (rawChain || subagent !== undefined || hasLineup) ? cwd : undefined;
 				const description = normalizeStringField("description", frontmatter.description, fullPath, source, diagnostics) ?? "";
 				if (hasLineup && (Object.hasOwn(frontmatter, "skill") || Object.hasOwn(frontmatter, "skills"))) {
 					diagnostics.push(
@@ -2163,13 +2175,13 @@ function loadPromptsWithModelFromDir(
 					);
 					continue;
 				}
-				const skillResult = chain ? { ok: true as const } : normalizePromptSkills(frontmatter, fullPath, source, diagnostics);
+				const skillResult = rawChain ? { ok: true as const } : normalizePromptSkills(frontmatter, fullPath, source, diagnostics);
 				if (!skillResult.ok) continue;
 				const skill = skillResult.skill;
 				const skills = skillResult.skills;
 				let thinking: ThinkingLevel | undefined;
 				let thinkingLevels: ThinkingLevel[] | undefined;
-				if (!chain) {
+				if (!rawChain) {
 					if (rotate && typeof frontmatter.thinking === "string" && frontmatter.thinking.includes(",")) {
 						thinkingLevels = normalizeThinkingLevels(frontmatter.thinking, models.length, fullPath, source, diagnostics);
 					} else {
@@ -2181,7 +2193,7 @@ function loadPromptsWithModelFromDir(
 				const loop = normalizeLoop(frontmatter.loop, fullPath, source, diagnostics);
 				const converge = normalizeConverge(frontmatter.converge, fullPath, source, diagnostics);
 				let boomerang = normalizeBoomerang(frontmatter.boomerang, fullPath, source, diagnostics);
-				if (chain && boomerang) {
+				if (rawChain && boomerang) {
 					diagnostics.push(
 						createDiagnostic(
 							"invalid-boomerang-chain",
@@ -2262,11 +2274,11 @@ function loadPromptsWithModelFromDir(
 				const promptCapable = calculatePromptCapable({
 					frontmatter,
 					body: content,
-					chain,
+					chain: rawChain,
 					hasExtensionSpecificConfig,
 					ignoreBodyIncludes: rootKind === "prompt-library" && includes === undefined,
 				});
-				const shouldRenderIncludes = !chain && (includes !== undefined || (hasBodyIncludeDirectives && promptCapable));
+				const shouldRenderIncludes = !rawChain && (includes !== undefined || (hasBodyIncludeDirectives && promptCapable));
 				if (shouldRenderIncludes) {
 					const renderedIncludes = renderPromptIncludes({
 						promptName: name,
@@ -2298,6 +2310,7 @@ function loadPromptsWithModelFromDir(
 					hidden: hidden || undefined,
 					...(includes !== undefined ? { includes } : {}),
 					chain: chain || undefined,
+					adaptiveChain,
 					chainContext,
 					restore,
 					skill,
@@ -2453,7 +2466,7 @@ function collectPromptSourceRecordsFromDir(
 
 				if (RESERVED_COMMAND_NAMES.has(promptName)) {
 					const hidden = normalizeHidden(frontmatter.hidden, fullPath, source, diagnostics);
-					const rawChain = typeof frontmatter.chain === "string" && frontmatter.chain.trim() ? frontmatter.chain.trim() : undefined;
+					const rawChain = normalizeChain(frontmatter.chain, fullPath, source, diagnostics);
 					const hasIncludeMetadata = Object.hasOwn(frontmatter, "include") || Object.hasOwn(frontmatter, "includes");
 					const promptCapable = calculatePromptCapable({
 						frontmatter,
@@ -2667,11 +2680,16 @@ export function collectPromptSourceRecords(cwd: string, includePlainPrompts = tr
 	return { records: [...recordMap.values()].flat(), inventoryRecords, diagnostics: dedupeDiagnostics([...diagnostics, ...loaderResult.diagnostics]) };
 }
 
-export function loadPromptsWithModel(cwd: string, includePlainPrompts = false): LoadPromptsWithModelResult {
+export function loadPromptsWithModel(
+	cwd: string,
+	includePlainPrompts = false,
+	options: LoadPromptsWithModelOptions = {},
+): LoadPromptsWithModelResult {
 	const promptMap = new Map<string, PromptWithModel>();
 	const diagnostics: PromptLoaderDiagnostic[] = [];
 
 	function addPrompt(prompt: PromptWithModel) {
+		if (prompt.adaptiveChain && options.includeAdaptiveChains !== true) return;
 		const existing = promptMap.get(prompt.name);
 		if (!existing) {
 			promptMap.set(prompt.name, prompt);
