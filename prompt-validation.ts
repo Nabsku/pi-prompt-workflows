@@ -570,30 +570,34 @@ export function validatePromptTemplates(cwd: string, options: PromptValidationOp
 
 	for (const prompt of loaded.prompts.values()) {
 		if (!prompt.budget) continue;
-		let staticContent = substituteArgs(prompt.content, []);
+		const substitutedBody = substituteArgs(prompt.content, []);
 		let skillPreamble: string | undefined;
 		if (prompt.subagent) {
 			const commands = (options.registeredSkills ?? []).map((skill) => ({ name: skill.skillName, source: "skill", sourceInfo: { path: skill.skillPath } }));
 			const resolved = resolvePromptSkills(getRequestedSkills(prompt), cwd, commands);
 			if (resolved.kind === "ready" && resolved.skills.length > 0) {
 				skillPreamble = buildSkillLoadedMessage(resolved.skills).content;
-				staticContent = `${skillPreamble}\n\n---\n\n${staticContent}`;
 			}
 		}
-		const budget = evaluatePromptBudget(staticContent, prompt.budget);
-		budgets.push({ promptName: prompt.name, filePath: prompt.filePath, ...budget });
-		const substitutedBody = substituteArgs(prompt.content, []);
+		const minimumConditionalBody = minimumTemplateConditionalContent(substitutedBody);
 		const configuredModels = prompt.models.map((spec) => {
 			const slash = spec.indexOf("/");
 			return slash > 0 ? { provider: spec.slice(0, slash), id: spec.slice(slash + 1) } : undefined;
 		});
-		const conditionalCandidates = configuredModels.length > 0 && configuredModels.every((model) => model !== undefined)
+		const candidateBodies = configuredModels.length > 0 && configuredModels.every((model) => model !== undefined)
 			? configuredModels.map((model) => renderTemplateConditionals(substitutedBody, model!).content)
-			: [minimumTemplateConditionalContent(substitutedBody)].filter((content): content is string => content !== undefined);
-		const conditionalCanFit = conditionalCandidates.some((body) => {
-			const content = skillPreamble ? `${skillPreamble}\n\n---\n\n${body}` : body;
-			return evaluatePromptBudget(content, prompt.budget).verdict !== "exceeded";
-		});
+			: minimumConditionalBody !== undefined ? [minimumConditionalBody] : [substitutedBody];
+		const candidateBudgets = candidateBodies.map((body) => evaluatePromptBudget(
+			skillPreamble ? `${skillPreamble}\n\n---\n\n${body}` : body,
+			prompt.budget,
+		));
+		const budget = candidateBudgets.reduce((minimum, candidate) =>
+			candidate.estimatedTokens < minimum.estimatedTokens || (candidate.estimatedTokens === minimum.estimatedTokens && candidate.bytes < minimum.bytes)
+				? candidate
+				: minimum,
+		);
+		budgets.push({ promptName: prompt.name, filePath: prompt.filePath, ...budget });
+		const conditionalCanFit = minimumConditionalBody !== undefined && budget.verdict !== "exceeded";
 		if (budget.verdict === "exceeded" && !conditionalCanFit) {
 			result.diagnostics.push(createValidationDiagnostic(
 				"prompt-budget-exceeded",
