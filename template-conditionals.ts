@@ -283,19 +283,36 @@ export function hasValidModelConditionals(content: string): boolean {
 	return parsed.ok && containsConditional(parsed.nodes);
 }
 
-function renderMinimumNodes(nodes: Node[]): string {
-	return nodes.map((node) => {
-		if (node.type === "text") return node.value;
-		const truthy = renderMinimumNodes(node.truthy);
-		const falsy = renderMinimumNodes(node.falsy);
-		return Buffer.byteLength(truthy, "utf8") <= Buffer.byteLength(falsy, "utf8") ? truthy : falsy;
-	}).join("");
+function collectConditionalModelParts(nodes: Node[], providers: Set<string>, ids: Set<string>): void {
+	for (const node of nodes) {
+		if (node.type !== "if") continue;
+		for (const spec of node.specs) {
+			const slash = spec.indexOf("/");
+			if (slash === -1) ids.add(spec);
+			else {
+				providers.add(spec.slice(0, slash));
+				if (!spec.endsWith("/*")) ids.add(spec.slice(slash + 1));
+			}
+		}
+		collectConditionalModelParts(node.truthy, providers, ids);
+		collectConditionalModelParts(node.falsy, providers, ids);
+	}
 }
 
 export function minimumTemplateConditionalContent(content: string): string | undefined {
 	const parsed = parseNodes(content);
 	if (!parsed.ok || !containsConditional(parsed.nodes)) return undefined;
-	return renderMinimumNodes(parsed.nodes);
+	const providers = new Set<string>(["__other_provider__"]);
+	const ids = new Set<string>(["__other_model__"]);
+	collectConditionalModelParts(parsed.nodes, providers, ids);
+	let minimum: string | undefined;
+	for (const provider of providers) {
+		for (const id of ids) {
+			const rendered = renderNodes(parsed.nodes, { provider, id });
+			if (minimum === undefined || Buffer.byteLength(rendered, "utf8") < Buffer.byteLength(minimum, "utf8")) minimum = rendered;
+		}
+	}
+	return minimum;
 }
 
 export function renderTemplateConditionals(
