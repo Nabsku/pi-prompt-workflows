@@ -45,6 +45,26 @@ The prompt body can use placeholders:
 - `$1`, `$2` — specific positional arguments
 - `${@:1}` — argument 1 and everything after
 
+## Prompt Budgets
+
+Use an opt-in budget to make rendered prompt size visible and fail closed above an explicit maximum:
+
+```yaml
+---
+budget:
+  warnTokens: 1200
+  maxTokens: 1800
+---
+$@
+```
+
+- Counts are deterministic estimates: `ceil(UTF-8 bytes / 4)`, not model-tokenizer-exact values.
+- `warnTokens` warns and continues; `maxTokens` aborts before model switching, message sending, or subagent delegation.
+- `/validate-prompts` reports static estimates; `/print-prompt <name> --plain ...` reports the final rendered estimate after includes, conditionals, and arguments.
+- Dry-run source estimates identify the root prompt, resolved includes, and loaded skills. They are diagnostic and not additive.
+- Put budgets on executable chain step templates, not chain wrappers.
+- Deterministic prompts do not support budgets because their command runs before an optional LLM handoff.
+
 ## Deterministic Steps (Pre-LLM Execution)
 
 Run a command or script before the LLM turn. The model only sees the output if you want it to.
