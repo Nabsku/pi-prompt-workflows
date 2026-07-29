@@ -23,6 +23,7 @@ export interface PromptDryRunTuiViewModel {
 	panes: {
 		prompt: string;
 		metadata: string;
+		budget: string;
 		compare: string;
 		skills: string;
 		includes: string;
@@ -82,6 +83,23 @@ function formatSkills(result: PromptDryRunResult): string {
 		} else {
 			lines.push("  full skill content hidden; rerun with --show-skills to preview it");
 		}
+	}
+	return lines.join("\n");
+}
+
+function formatBudget(result: PromptDryRunResult): string {
+	if (result.status !== "ok") return "Prompt budget unavailable for failed dry-run.";
+	const lines = [
+		`Estimated tokens: ${result.budget.estimatedTokens}`,
+		`UTF-8 bytes: ${result.budget.bytes}`,
+		`Method: ${result.budget.method} (estimate, not model-tokenizer exact)`,
+		`Verdict: ${result.budget.verdict}`,
+	];
+	if (result.budget.config?.warnTokens !== undefined) lines.push(`Warning threshold: ${result.budget.config.warnTokens}`);
+	if (result.budget.config?.maxTokens !== undefined) lines.push(`Maximum: ${result.budget.config.maxTokens}`);
+	if (result.budget.sources?.length) {
+		lines.push("", "Source estimates (diagnostic, not additive):");
+		for (const source of result.budget.sources) lines.push(`- ${source.kind} ${source.label}: ~${source.estimatedTokens} tokens`);
 	}
 	return lines.join("\n");
 }
@@ -165,6 +183,7 @@ export function createPromptDryRunTuiViewModel(result: PromptDryRunResult, plain
 		panes: {
 			prompt,
 			metadata,
+			budget: formatBudget(result),
 			compare: formatCompare(result),
 			skills: formatSkills(result),
 			includes: formatIncludes(result),
@@ -259,7 +278,7 @@ export class PromptDryRunPicker implements Component {
 	invalidate(): void {}
 }
 
-const PANE_NAMES = ["Prompt", "Metadata", "Compare", "Skills", "Includes", "Warnings", "Raw"] as const;
+const PANE_NAMES = ["Prompt", "Metadata", "Budget", "Compare", "Skills", "Includes", "Warnings", "Raw"] as const;
 type PaneName = typeof PANE_NAMES[number];
 
 export class PromptDryRunInspector implements Component {

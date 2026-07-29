@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
 import {
@@ -10,10 +10,10 @@ import {
 } from "./args.js";
 import { createBestOfNPreflight, type BestOfNPreflight } from "./best-of-n-preflight.js";
 import type { RegistryLike } from "./model-selection.js";
-import { evaluatePromptBudget, type PromptBudgetResult } from "./prompt-budget.js";
+import { evaluatePromptBudget, estimatePromptTokens, type PromptBudgetResult, type PromptBudgetSourceEstimate } from "./prompt-budget.js";
 import { preparePromptExecution } from "./prompt-execution.js";
 import { expandCwdPath, type PromptWithModel } from "./prompt-loader.js";
-import type { PromptIncludeGraph } from "./prompt-includes.js";
+import { stripPromptPartialFrontmatter, type PromptIncludeGraph } from "./prompt-includes.js";
 import { getRequestedSkills, resolvePromptSkills, type RuntimeSkillCommand } from "./prompt-skills.js";
 import { DEFAULT_SUBAGENT_NAME } from "./subagent-runtime.js";
 
@@ -259,6 +259,40 @@ function previewSkills(
 	}));
 }
 
+function promptBudgetSources(
+	prompt: PromptWithModel,
+	skills: Array<{ skillName: string; skillPath: string; skillContent: string }>,
+): PromptBudgetSourceEstimate[] {
+	const sources: PromptBudgetSourceEstimate[] = [];
+	const rootContent = prompt.includeGraph?.root.rawBody;
+	if (rootContent !== undefined) {
+		sources.push({ kind: "prompt", label: prompt.name, filePath: prompt.filePath, ...estimatePromptTokens(rootContent) });
+	}
+	const seen = new Set<string>();
+	for (const node of prompt.includeGraph?.nodes ?? []) {
+		if (node.kind !== "partial" || node.status !== "ok" || !node.filePath || seen.has(node.filePath)) continue;
+		seen.add(node.filePath);
+		try {
+			const content = stripPromptPartialFrontmatter(readFileSync(node.filePath, "utf8"));
+			sources.push({ kind: "include", label: node.filePath, filePath: node.filePath, ...estimatePromptTokens(content) });
+		} catch {
+			// Include diagnostics already report source read failures; attribution is best-effort metadata.
+		}
+	}
+	for (const skill of skills) {
+		sources.push({ kind: "skill", label: skill.skillName, filePath: skill.skillPath, ...estimatePromptTokens(skill.skillContent) });
+	}
+	return sources;
+}
+
+function evaluateDryRunBudget(
+	content: string,
+	prompt: PromptWithModel,
+	skills: Array<{ skillName: string; skillPath: string; skillContent: string }> = [],
+): PromptBudgetResult {
+	return { ...evaluatePromptBudget(content, prompt.budget), sources: promptBudgetSources(prompt, skills) };
+}
+
 function parseDryRunArgs(prompt: PromptWithModel, rawArgs: string | undefined, args: string[] | undefined) {
 	if (rawArgs === undefined) {
 		return {
@@ -371,7 +405,7 @@ export async function createPromptDryRun(
 			model: prepared.selectedModel.model,
 			modelAlreadyActive: prepared.selectedModel.alreadyActive,
 			warnings,
-			budget: evaluatePromptBudget(preflight.task.renderedTask ?? "", prompt.budget),
+			budget: evaluateDryRunBudget(preflight.task.renderedTask ?? "", prompt),
 			skills: [],
 			details: { skills: [] },
 			runtime,
@@ -431,7 +465,8 @@ export async function createPromptDryRun(
 	}
 	if (prepared.warning) warnings.push(prepared.warning);
 
-	const skillPreviews = skillResolution.kind === "ready" ? previewSkills(skillResolution.skills, options.showSkills === true) : [];
+	const resolvedSkills = skillResolution.kind === "ready" ? skillResolution.skills : [];
+	const skillPreviews = previewSkills(resolvedSkills, options.showSkills === true);
 	let content = prepared.content;
 	if (delegated && effectivePrompt.parallel && effectivePrompt.parallel > 1) {
 		content = Array.from({ length: effectivePrompt.parallel }, (_, index) => `[Parallel subagent ${index + 1}/${effectivePrompt.parallel}]\n\n${prepared.content}`).join("\n\n");
@@ -447,7 +482,7 @@ export async function createPromptDryRun(
 		model: prepared.selectedModel.model,
 		modelAlreadyActive: prepared.selectedModel.alreadyActive,
 		warnings,
-		budget: evaluatePromptBudget(content, prompt.budget),
+		budget: evaluateDryRunBudget(content, prompt, resolvedSkills),
 		skills: skillPreviews,
 		includeGraph: effectivePrompt.includeGraph,
 		details: { skills: skillPreviews, includeGraph: effectivePrompt.includeGraph },

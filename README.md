@@ -30,6 +30,7 @@ No more manually switching models, copying standard instructions between prompts
 - **Multiple skills**: inject one skill with `skill`, many skills with `skills`, or constrained wildcard groups like `golang-*`.
 - **Dry-run preview**: inspect the exact rendered prompt body, metadata, warnings, and optional skill content before execution.
 - **Pi-native TUI**: browse templates and inspect dry-run output interactively in Pi TUI mode without typing template names.
+- **Prompt budgets**: inspect approximate rendered-token cost, set warning thresholds, and fail closed above an explicit maximum.
 - **Execution control**: loops, model rotation, fresh context, boomerang collapse, delegated subagents, chains, and best-of-N compare prompts.
 
 ## Differences from upstream
@@ -210,6 +211,26 @@ Include graph:
 
 Include graph statuses are concise: `[ok]` means the prompt or edge resolved successfully, `[skipped]` means the loader skipped that prompt because include processing failed or was invalid, and `[failed]` marks a failed edge or root diagnostic. Prompts skipped for missing, cyclic, or invalid includes still appear in the include graph with `[skipped]`, failed include edges, and diagnostic codes such as `include-not-found` or `include-cycle`.
 
+## Prompt budgets
+
+Prompt budgets make prompt size visible and optionally enforce a hard maximum before model switching, message sending, or subagent delegation:
+
+```yaml
+---
+model: claude-sonnet-4-20250514
+budget:
+  warnTokens: 1200
+  maxTokens: 1800
+---
+Review this change: $@
+```
+
+`warnTokens` emits a warning and continues. `maxTokens` fails closed when the final rendered prompt exceeds the limit. Both values are optional positive integers, at least one is required, and `warnTokens` cannot exceed `maxTokens`.
+
+Token counts are deterministic estimates calculated as `ceil(UTF-8 bytes / 4)`; they are intentionally labeled as estimates rather than model-tokenizer-exact counts. Runtime enforcement uses the rendered prompt after include expansion, model conditionals, and argument substitution. `/validate-prompts` reports static rendered estimates for configured templates and rejects a template already above its maximum before runtime arguments are added. `/print-prompt` and `/dry-run-prompt` report the exact runtime estimate, verdict, thresholds, and diagnostic source estimates for the root prompt, resolved includes, and loaded skills. Source estimates are not additive because includes can be nested or repeated and runtime rendering can change content.
+
+Budgets are opt-in. A prompt without `budget` continues to run normally while dry-run still shows its unconfigured size estimate. Put budgets on executable chain step templates rather than chain wrappers. Deterministic prompts reject budget frontmatter because their command runs before an optional LLM handoff.
+
 ## Dry-run and TUI preview
 
 Use `/print-prompt` or `/dry-run-prompt` to preview what a prompt template would send before it executes. The preview uses the same include rendering, model conditionals, argument substitution, skill resolution, loop metadata, delegation metadata, and runtime flags as normal execution, but it does not switch models, send user messages, run deterministic commands, or start subagents.
@@ -243,6 +264,7 @@ TUI behavior:
 - `--plain` forces the stdout/plain report even in TUI mode;
 - unsupported templates, such as deterministic or chain templates, show the same diagnostic as the plain path;
 - full skill content remains hidden unless the dry-run result was created with `--show-skills`;
+- the inspector always includes a static `Budget` pane with the rendered estimate, verdict, thresholds, and source estimates;
 - the inspector always includes a static `Includes` pane. Prompts with include metadata or inline include directives show the include graph captured during dry-run rendering; prompts without includes show `No includes.`.
 
 The inspector is read-only. It has no execute button and does not mutate the session.
@@ -273,6 +295,7 @@ All fields are optional. Templates that don't use any extension features (no `mo
 | `includes` | — | List of shared `.md` partials to insert into the prompt. See [Prompt includes](#prompt-includes). |
 | `include` | — | Shortcut for a single partial, equivalent to `includes: [file.md]`. See [Prompt includes](#prompt-includes). |
 | `description` | — | Short text shown next to the command in autocomplete. |
+| `budget` | — | Optional `{ warnTokens, maxTokens }` rendered-prompt budget. Counts use the deterministic UTF-8 byte estimate described in [Prompt budgets](#prompt-budgets). `maxTokens` aborts before model/message/subagent side effects. Not supported on chain wrappers or deterministic prompts. |
 | `hidden` | `false` | Hide a command-capable prompt from slash-command registration and the TUI picker while keeping it addressable by exact `/print-prompt` / `/dry-run-prompt` name and usable as an internal chain step. Visibility metadata alone does not make a plain file command-capable. |
 | `chain` | — | Declares a reusable pipeline of templates (`step -> step`). When set, the body is ignored. See [Chain Templates](#chain-templates). |
 | `chainContext` | — | Chain templates only. Set to `summary` so delegated steps receive a compact summary of what previous steps did. Steps with `inheritContext: true` are excluded. See [Chain context for delegated steps](#chain-context-for-delegated-steps). |
