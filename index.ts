@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve as resolvePath } from "node:path";
-import type { Model } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Message, Model } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
@@ -20,10 +20,12 @@ import {
 import { DEFAULT_COMPARE_FINAL_APPLIER_TASK, DEFAULT_COMPARE_REVIEWER_TASK } from "./compare-defaults.js";
 import { loadBestOfNPresetCatalog, applyPresetDefaultModel, getBestOfNPresetCandidatePaths, type ResolvedBestOfNPreset } from "./best-of-n-presets.js";
 import { parseChainSteps, parseChainDeclaration, type ChainStep, type ChainStepOrParallel, type ParallelChainStep } from "./chain-parser.js";
+import { executeAdaptiveChain } from "./adaptive-runtime.js";
+import { captureGitWorktreeSnapshot, compareGitWorktreeSnapshots } from "./git-worktree-snapshot.js";
 import { generateBoomerangSummary, generateChainStepSummary, generateIterationSummary, didIterationMakeChanges, getIterationEntries, wasIterationAborted } from "./loop-utils.js";
 import { selectModelCandidate } from "./model-selection.js";
 import { notify, summarizePromptDiagnostics, diagnosticsFingerprint } from "./notifications.js";
-import { checkPromptExecutionBudget, preparePromptExecution, PromptBudgetExceededError, renderPromptForResolvedModel } from "./prompt-execution.js";
+import { checkPromptExecutionBudget, normalizePromptCompletionOutcome, preparePromptExecution, PromptBudgetExceededError, renderPromptForResolvedModel } from "./prompt-execution.js";
 import {
 	buildPromptCommandDescription,
 	expandCwdPath,
@@ -48,6 +50,7 @@ import {
 	PROMPT_TEMPLATE_DETERMINISTIC_COMPLETION_MESSAGE_TYPE,
 	PROMPT_TEMPLATE_DETERMINISTIC_MESSAGE_TYPE,
 	buildDeterministicPreamble,
+	normalizeDeterministicExecutionOutcome,
 	runDeterministicStep,
 	shouldHandoffToLlm,
 } from "./deterministic-step.js";
@@ -121,6 +124,8 @@ interface ExecutionErrorState {
 interface PromptStepResult {
 	changed: boolean;
 	text?: string;
+	terminalAssistantMessage?: AssistantMessage;
+	aborted?: boolean;
 }
 
 interface PromptTurnRestore {
@@ -131,11 +136,24 @@ interface PromptTurnRestore {
 export default function promptModelExtension(pi: ExtensionAPI) {
 	let prompts = new Map<string, PromptWithModel>();
 	let chainPrompts = new Map<string, PromptWithModel>();
+	let adaptivePrompts = new Map<string, PromptWithModel>();
 	let previousModel: Model<any> | undefined;
 	let previousThinking: ThinkingLevel | undefined;
 	let pendingSkillMessage: PendingSkillMessage | undefined;
 	let runtimeModel: Model<any> | undefined;
-	let chainActive = false;
+	let workflowOwner: symbol | null = null;
+	const isWorkflowActive = () => workflowOwner !== null;
+	function claimWorkflowOwner(label: string): symbol | undefined {
+		if (workflowOwner !== null) return undefined;
+		const owner = Symbol(label);
+		workflowOwner = owner;
+		return owner;
+	}
+	function releaseWorkflowOwner(owner: symbol): boolean {
+		if (workflowOwner !== owner) return false;
+		workflowOwner = null;
+		return true;
+	}
 	let loopState: LoopState | null = null;
 	let freshCollapse: FreshCollapse | null = null;
 	let boomerangCollapse: BoomerangCollapse | null = null;
@@ -147,7 +165,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	const UNLIMITED_LOOP_CAP = 999;
 
 	const toolManager = createToolManager(pi, {
-		isActive: () => !!(loopState || chainActive),
+		isActive: () => !!(loopState || isWorkflowActive()),
 		getStoredCtx: () => storedCommandCtx,
 		setStoredCtx: (ctx) => {
 			storedCommandCtx = ctx;
@@ -291,15 +309,27 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		});
 	}
 
+	function registerAdaptivePromptCommand(name: string, prompt: PromptWithModel) {
+		pi.registerCommand(name, {
+			description: buildPromptCommandDescription(prompt),
+			handler: async (args, ctx) => { await runAdaptivePromptCommand(name, args, ctx); },
+		});
+	}
+
 	function refreshPrompts(cwd: string, ctx?: ExtensionContext) {
 		const result = loadPromptsWithModel(cwd);
-		const chainResult = loadPromptsWithModel(cwd, true);
+		const chainResult = loadPromptsWithModel(cwd, true, { includeAdaptiveChains: true });
 		prompts = result.prompts;
 		chainPrompts = chainResult.prompts;
+		adaptivePrompts = new Map([...chainResult.prompts].filter(([, prompt]) => prompt.adaptiveChain !== undefined));
 
 		for (const [name, prompt] of prompts) {
 			if (prompt.hidden) continue;
 			registerPromptCommand(name);
+		}
+		for (const [name, prompt] of adaptivePrompts) {
+			if (prompt.hidden) continue;
+			registerAdaptivePromptCommand(name, prompt);
 		}
 
 		const summary = summarizePromptDiagnostics(result.diagnostics);
@@ -347,6 +377,14 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		return "parallel" in step;
 	}
 
+	function terminalAssistantMessage(messages: readonly Message[]): AssistantMessage | undefined {
+		for (let index = messages.length - 1; index >= 0; index--) {
+			const message = messages[index];
+			if (message?.role === "assistant") return message as AssistantMessage;
+		}
+		return undefined;
+	}
+
 	async function executePromptStep(
 		prompt: PromptWithModel,
 		args: string[],
@@ -357,6 +395,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		taskPreamble?: string,
 		loopContext?: string,
 		promptTurnRestore?: PromptTurnRestore,
+		adaptiveAbortStatus?: (status: "failed" | "blocked") => void,
 		): Promise<PromptStepResult | "aborted"> {
 		if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return "aborted";
 
@@ -434,10 +473,16 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					notify(ctx, `Prompt \`${prompt.name}\` is not configured for delegated execution.`, "error");
 					return "aborted";
 				}
-				return { changed: delegated.changed, text: delegated.text };
+				return {
+					changed: delegated.changed,
+					text: delegated.text,
+				};
 			} catch (error) {
 				notify(ctx, error instanceof Error ? error.message : String(error), "error");
-				if (error instanceof PromptBudgetExceededError) return "aborted";
+				if (error instanceof PromptBudgetExceededError) {
+					adaptiveAbortStatus?.("blocked");
+					return "aborted";
+				}
 				return { changed: false };
 			}
 		}
@@ -467,6 +512,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		if (budgetCheck.warning) notify(ctx, budgetCheck.warning, "warning");
 		if (budgetCheck.message) {
 			notify(ctx, budgetCheck.message, "error");
+			adaptiveAbortStatus?.("blocked");
 			return "aborted";
 		}
 
@@ -500,8 +546,39 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		await ctx.waitForIdle();
 
 		const entries = getIterationEntries(ctx, startId);
-		if (wasIterationAborted(entries)) return "aborted";
-		return { changed: didIterationMakeChanges(entries) };
+		const terminal = terminalAssistantMessage(entries.flatMap((entry) => entry.type === "message" && entry.message.role === "assistant" ? [entry.message as AssistantMessage] : []));
+		return { changed: didIterationMakeChanges(entries), terminalAssistantMessage: terminal, aborted: wasIterationAborted(entries) };
+	}
+
+	async function executeOrdinaryPrompt(
+		name: string,
+		prompt: PromptWithModel,
+		args: string[],
+		ctx: ExtensionCommandContext,
+		currentModel: Model<any> | undefined,
+		override?: SubagentOverride,
+		adaptiveAbortStatus?: (status: "failed" | "blocked") => void,
+	): Promise<PromptStepResult | "aborted"> {
+		const savedThinking = pi.getThinkingLevel();
+		const isDelegatedPrompt = shouldDelegatePrompt(prompt, override);
+		const promptTurnRestore = !isDelegatedPrompt && prompt.restore
+			? { originalModel: currentModel, originalThinking: savedThinking }
+			: undefined;
+		const boomerangTargetId = prompt.boomerang ? ctx.sessionManager.getLeafId() : null;
+		const result = await executePromptStep(prompt, args, ctx, currentModel, override, undefined, undefined, undefined, promptTurnRestore, adaptiveAbortStatus);
+		if (result === "aborted" || result.aborted) return result;
+		if (isDelegatedPrompt && result.text) {
+			const parentStartId = ctx.sessionManager.getLeafId();
+			pi.sendUserMessage(`[Delegated result: ${name}]\n\n${result.text}`);
+			await waitForTurnStart(ctx);
+			await ctx.waitForIdle();
+			const parentEntries = getIterationEntries(ctx, parentStartId);
+			result.terminalAssistantMessage = terminalAssistantMessage(parentEntries.flatMap((entry) =>
+				entry.type === "message" && entry.message.role === "assistant" ? [entry.message as AssistantMessage] : []));
+			result.aborted = wasIterationAborted(parentEntries);
+		}
+		if (prompt.boomerang) await collapseBoomerangPrompt(ctx, name, boomerangTargetId);
+		return result;
 	}
 
 	async function restoreSessionState(
@@ -2106,7 +2183,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		chainContextEnabled = false,
 		chainTemplateWorktree = false,
 		cliWorktree = false,
+		owner?: symbol,
 	) {
+		if (owner !== undefined && workflowOwner !== owner) throw new Error("Prompt workflow ownership was lost before chain execution");
 		let worktreeEnabled = chainTemplateWorktree || cliWorktree;
 		if (worktreeEnabled && !steps.some(isParallelChainStep)) {
 			notify(ctx, `--worktree ignored: chain has no parallel() steps`, "warning");
@@ -2180,7 +2259,6 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		const originalThinking = pi.getThinkingLevel();
 		let currentModel = originalModel;
 		let currentThinking = originalThinking;
-		chainActive = true;
 		pendingSkillMessage = undefined;
 		const effectiveMax = totalIterations ?? UNLIMITED_LOOP_CAP;
 		const isUnlimited = totalIterations === null;
@@ -2432,7 +2510,6 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			);
 
 			pendingSkillMessage = undefined;
-			chainActive = false;
 			loopState = null;
 			freshCollapse = null;
 			boomerangCollapse = null;
@@ -2648,7 +2725,122 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		notify(ctx, plainReport, "info");
 	}
 
+	async function runAdaptivePromptCommand(name: string, args: string, ctx: ExtensionCommandContext) {
+		const owner = claimWorkflowOwner(`adaptive:${name}`);
+		if (!owner) {
+			notify(ctx, `Adaptive chain ${name} cannot start while another prompt workflow is active.`, "error");
+			return;
+		}
+		let wrapper: PromptWithModel | undefined;
+		let savedModel: Model<any> | undefined;
+		let savedThinking: ThinkingLevel | undefined;
+		let executionStarted = false;
+		try {
+			refreshPrompts(ctx.cwd, ctx);
+			wrapper = adaptivePrompts.get(name);
+			if (!wrapper?.adaptiveChain || wrapper.hidden) {
+				notify(ctx, `Adaptive chain "${name}" is no longer available`, "error");
+				return;
+			}
+
+			const runtime = extractSubagentOverride(args);
+			const runtimeCwd = runtime.cwd ? expandCwdPath(runtime.cwd) : undefined;
+			if (runtime.cwd && !runtimeCwd) {
+				notify(ctx, "Invalid --cwd path: must be absolute", "error");
+				return;
+			}
+
+			const runtimeLoop = extractLoopCount(runtime.args);
+			const unsupportedRuntime = runtime.override || runtime.fork || runtime.preset || runtimeLoop;
+			if (unsupportedRuntime) {
+				notify(ctx, "Adaptive chains do not support --subagent, --fork, --preset, or --loop: these modes can expand one router action into multiple top-level model calls, and exact call reservation is not implemented.", "error");
+				return;
+			}
+
+			for (const step of wrapper.adaptiveChain.steps) {
+				const target = chainPrompts.get(step.target);
+				if (!target || target.chain || target.adaptiveChain) {
+					notify(ctx, `Adaptive chain target ${JSON.stringify(step.target)} is missing or uses an unsupported nested/parallel chain.`, "error");
+					return;
+				}
+				if (step.kind === "prompt") {
+					const expandsCalls = target.deterministic || target.subagent || target.inheritContext || target.parallel || target.loop !== undefined || target.boomerang || target.workers || target.reviewers || target.finalApplier || target.preset;
+					if (expandsCalls) {
+						notify(ctx, `Adaptive prompt target ${JSON.stringify(step.target)} uses a delegated, loop, boomerang, compare/final-applier, deterministic, or parallel mode. Multi-call modes are unsupported until the router can reserve their exact top-level model calls.`, "error");
+						return;
+					}
+				} else if (!target.deterministic) {
+					notify(ctx, `Adaptive run target ${JSON.stringify(step.target)} is not deterministic.`, "error");
+					return;
+				} else if (target.deterministic.handoff !== "never") {
+					notify(ctx, `Adaptive run target ${JSON.stringify(step.target)} requests a delegated handoff. Multi-call modes are unsupported until the router can reserve exact top-level model calls.`, "error");
+					return;
+				}
+			}
+
+			if (!(await ensureProjectPromptLibraryApproved(wrapper, ctx))) return;
+			storedCommandCtx = ctx;
+			const stepArgs = parseCommandArgs(runtime.args);
+			savedModel = getCurrentModel(ctx);
+			savedThinking = pi.getThinkingLevel();
+			executionStarted = true;
+			const fallbackCwd = wrapper.cwd ?? ctx.cwd;
+			const report = await executeAdaptiveChain(wrapper.adaptiveChain, {
+				signal: ctx.signal,
+				resolvePrompt(target) {
+					const prompt = chainPrompts.get(target);
+					return prompt && !prompt.chain && !prompt.adaptiveChain && !prompt.deterministic ? prompt : undefined;
+				},
+				resolveRun(target) {
+					const prompt = chainPrompts.get(target);
+					return prompt?.deterministic && !prompt.chain && !prompt.adaptiveChain ? prompt : undefined;
+				},
+				resolveSnapshotCwd(step, prompt) {
+					return resolvePath(runtimeCwd ?? (step.kind === "run" ? prompt.deterministic?.cwd : prompt.cwd) ?? fallbackCwd);
+				},
+				async executePrompt(prompt) {
+					const effective = { ...prompt, ...(runtimeCwd ? { cwd: runtimeCwd } : {}), ...(runtime.model ? { models: [runtime.model] } : {}) };
+					let abortStatus: "failed" | "blocked" = "failed";
+					const result = await executeOrdinaryPrompt(prompt.name, effective, stepArgs, ctx, getCurrentModel(ctx), undefined, (status) => { abortStatus = status; });
+					if (result === "aborted") return { status: abortStatus, error: new Error(`Adaptive prompt step ${prompt.name} did not complete`) };
+					if (!result.terminalAssistantMessage) {
+						const error = new Error(`Adaptive prompt step ${prompt.name} produced no terminal assistant message`);
+						notify(ctx, error.message, "error");
+						return { status: "failed", error };
+					}
+					try { return normalizePromptCompletionOutcome(result.terminalAssistantMessage); }
+					catch (error) { notify(ctx, error instanceof Error ? error.message : String(error), "error"); return { status: "failed", error }; }
+				},
+				async executeRun(prompt) {
+					const deterministic = { ...prompt.deterministic!, cwd: runtimeCwd ?? prompt.deterministic!.cwd ?? fallbackCwd };
+					return normalizeDeterministicExecutionOutcome(await runDeterministicStep(prompt, deterministic, ctx.cwd, ctx.signal));
+				},
+				captureSnapshot(_step, cwd) { return captureGitWorktreeSnapshot(cwd); },
+				compareSnapshots: compareGitWorktreeSnapshots,
+				onDecision(decision) {
+					const target = decision.selectedTarget ?? "complete";
+					notify(ctx, `Adaptive chain ${name}: ${decision.reason} ${target}`, "info");
+				},
+			});
+			notify(ctx, `Adaptive chain ${name} completed: ${report.actions.length} action(s)`, "info");
+		} catch (error) {
+			notify(ctx, `Adaptive chain ${name} failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+		} finally {
+			if (workflowOwner === owner) {
+				try {
+					if (executionStarted && wrapper?.restore) await restoreSessionState(ctx, savedModel, savedThinking, getCurrentModel(ctx), pi.getThinkingLevel());
+				} finally {
+					releaseWorkflowOwner(owner);
+				}
+			}
+		}
+	}
+
 	async function runPromptCommand(name: string, args: string, ctx: ExtensionCommandContext) {
+		if (isWorkflowActive()) {
+			notify(ctx, `Prompt ${name} cannot start while an adaptive chain is active.`, "error");
+			return;
+		}
 		storedCommandCtx = ctx;
 		refreshPrompts(ctx.cwd, ctx);
 		const prompt = prompts.get(name);
@@ -2778,33 +2970,14 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			...promptOverrides,
 		};
 		const savedModel = getCurrentModel(ctx);
-		const savedThinking = pi.getThinkingLevel();
-		const isDelegatedPrompt = shouldDelegatePrompt(effectivePrompt, subagent.override);
-		const promptTurnRestore = !isDelegatedPrompt && prompt.restore
-			? { originalModel: savedModel, originalThinking: savedThinking }
-			: undefined;
-		const boomerangTargetId = effectivePrompt.boomerang ? ctx.sessionManager.getLeafId() : null;
-		const stepResult = await executePromptStep(
+		await executeOrdinaryPrompt(
+			name,
 			effectivePrompt,
 			parseCommandArgs(argsWithoutSubagent),
 			ctx,
 			savedModel,
 			subagent.override,
-			undefined,
-			undefined,
-			undefined,
-			promptTurnRestore,
 		);
-		if (stepResult === "aborted") return;
-		if (isDelegatedPrompt && stepResult.text) {
-			pi.sendUserMessage(`[Delegated result: ${name}]\n\n${stepResult.text}`);
-			await waitForTurnStart(ctx);
-			await ctx.waitForIdle();
-		}
-
-		if (effectivePrompt.boomerang) {
-			await collapseBoomerangPrompt(ctx, name, boomerangTargetId);
-		}
 	}
 
 	function resetSessionScopedState(ctx: ExtensionContext) {
@@ -2831,7 +3004,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (event) => {
 		let systemPrompt = event.systemPrompt;
 
-		if (toolManager.isEnabled() && !loopState && !chainActive) {
+		if (toolManager.isEnabled() && !loopState && !isWorkflowActive()) {
 			const toolGuidance = toolManager.getGuidance();
 			const guidance = toolGuidance
 				? `The run-prompt tool is available for running prompt template commands. ${toolGuidance}`
@@ -2858,7 +3031,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {
-		if (chainActive) return;
+		if (isWorkflowActive()) return;
 		if (loopState) return;
 
 		const restoreModel = previousModel;
@@ -2908,6 +3081,12 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	});
 
 	async function runChainCommand(args: string, ctx: ExtensionCommandContext) {
+		const owner = claimWorkflowOwner("legacy:chain-prompts");
+		if (!owner) {
+			notify(ctx, "A legacy chain cannot start while another prompt workflow is active.", "error");
+			return;
+		}
+		try {
 		storedCommandCtx = ctx;
 		refreshPrompts(ctx.cwd, ctx);
 
@@ -2945,7 +3124,11 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			extracted.chainContext,
 			false,
 			worktreeExtraction.worktree,
+			owner,
 		);
+		} finally {
+			releaseWorkflowOwner(owner);
+		}
 	}
 
 	function parseCompareRunPickerAction(value: unknown, history: BestOfNRunHistoryResult): CompareRunHistoryTuiResult | undefined {
