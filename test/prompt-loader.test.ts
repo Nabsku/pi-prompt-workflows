@@ -1936,7 +1936,7 @@ test("loadPromptsWithModel diagnoses invalid chain frontmatter values", () => {
 
 		const result = loadPromptsWithModel(cwd);
 		const diagnosticText = result.diagnostics.map((item) => item.message).join("\n");
-		assert.match(diagnosticText, /frontmatter field "chain" must be a string/i);
+		assert.match(diagnosticText, /frontmatter field "chain" must be a legacy string or structured array/i);
 		assert.match(diagnosticText, /frontmatter field "chain" must be a non-empty string/i);
 	});
 });
@@ -2826,5 +2826,91 @@ test("loadPromptsWithModel parses valid prompt budgets and rejects invalid budge
 		assert.equal(result.diagnostics.filter((item) => item.code === "invalid-deterministic-loop").length, 1);
 		assert.equal(result.diagnostics.filter((item) => item.code === "invalid-budget-chain").length, 1);
 		assert.equal(result.diagnostics.filter((item) => item.code === "invalid-budget-deterministic").length, 1);
+	});
+});
+
+test("loadPromptsWithModel excludes structured chains by default and includes them only for adaptive-aware consumers", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "adaptive.md"), ["---", "chain:", "  - prompt: implement", "  - run: npm test", "  - prompt: review", "    when: changed", "limits:", "  maxSteps: 5", "  maxModelCalls: 3", "---", "ignored"].join("\n"));
+		const defaultResult = loadPromptsWithModel(cwd);
+		assert.equal(defaultResult.prompts.has("adaptive"), false);
+		assert.equal(defaultResult.diagnostics.length, 0);
+
+		const result = loadPromptsWithModel(cwd, false, { includeAdaptiveChains: true });
+		const prompt = result.prompts.get("adaptive");
+		assert.ok(prompt);
+		assert.equal(prompt.chain, undefined);
+		assert.deepEqual(prompt.adaptiveChain, {
+			limits: { maxSteps: 5, maxModelCalls: 3 },
+			steps: [{ id: "implement", kind: "prompt", target: "implement", when: "always" }, { id: "npm test", kind: "run", target: "npm test", when: "always" }, { id: "review", kind: "prompt", target: "review", when: "changed" }],
+		});
+		assert.equal(result.diagnostics.length, 0);
+	});
+});
+
+test("loadPromptsWithModel skips invalid structured chains visibly", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "bad-adaptive.md"), "---\nchain:\n  - prompt: implement\n    when: maybe\nlimits:\n  maxSteps: 5\n---\nignored");
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.has("bad-adaptive"), false);
+		assert.equal(result.diagnostics.some((item) => item.code === "invalid-chain-declaration" && /unknown gate/i.test(item.message)), true);
+	});
+});
+
+test("reserved structured-chain source inventory matches string-chain wrapper classification", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "model.md"), "---\nchain:\n  - prompt: implement\n---\n@include missing.md");
+		writeFileSync(join(cwd, ".pi", "prompts", "settings.md"), "---\nchain: implement\n---\n@include missing.md");
+
+		const result = collectPromptSourceRecords(cwd);
+		for (const name of ["model", "settings"]) {
+			const record = result.inventoryRecords.find((item) => item.promptName === name);
+			assert.ok(record);
+			assert.equal(record.isChainWrapper, true);
+			assert.equal(record.hasInlineIncludes, false);
+			assert.equal(record.hasIncludesPlaceholder, false);
+		}
+	});
+});
+
+test("loadPromptsWithModel keeps legacy and adaptive chain fields discriminated", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "legacy.md"), "---\nchain: implement -> review\n---\nignored");
+		writeFileSync(join(cwd, ".pi", "prompts", "adaptive.md"), "---\nchain:\n  - prompt: implement\n---\nignored");
+		const result = loadPromptsWithModel(cwd, false, { includeAdaptiveChains: true });
+		assert.equal(result.prompts.get("legacy")?.chain, "implement -> review");
+		assert.equal(result.prompts.get("legacy")?.adaptiveChain, undefined);
+		assert.equal(result.prompts.get("adaptive")?.chain, undefined);
+		assert.ok(result.prompts.get("adaptive")?.adaptiveChain);
+	});
+});
+
+test("loadPromptsWithModel rejects oversized structured declarations", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		const steps = Array.from({ length: 101 }, (_, index) => `  - prompt: step-${index}`).join("\n");
+		writeFileSync(join(cwd, ".pi", "prompts", "oversized.md"), `---\nchain:\n${steps}\n---\nignored`);
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.has("oversized"), false);
+		assert.equal(result.diagnostics.some((item) => item.code === "invalid-chain-declaration" && /no more than 100/i.test(item.message)), true);
+	});
+});
+
+test("invalid chain type diagnostic names both accepted declaration shapes", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "invalid.md"), "---\nchain: 42\nmodel: test/model\n---\nbody");
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.diagnostics.some((item) => item.code === "invalid-chain" && /legacy string or structured array/i.test(item.message)), true);
 	});
 });
