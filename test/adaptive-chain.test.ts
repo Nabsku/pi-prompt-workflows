@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createAdaptiveChainState, routeAdaptiveChain } from "../adaptive-chain.ts";
+import { createAdaptiveChainState, routeAdaptiveChain, type ChainObservation } from "../adaptive-chain.ts";
 import type { ChainLimits, StructuredChainStep } from "../chain-parser.ts";
 
 const limits: ChainLimits = { maxSteps: 10, maxModelCalls: 5 };
@@ -233,4 +233,31 @@ test("terminates cleanly at natural chain completion and rejects impossible prog
 	assert.equal(done.state.status, "completed");
 	assert.equal(done.decisions[0].reason, "chain-complete");
 	assert.throws(() => routeAdaptiveChain(steps, limits, done.state, { outcome: "succeeded", changed: false }), /impossible progress/i);
+});
+
+test("packaged fix-review graph routes success past fix and failure through fix review retest", () => {
+	const steps: StructuredChainStep[] = [
+		prompt("implement"), prompt("review-implementation", { when: "changed" }),
+		run("test", { onSuccess: "done", onFailure: "fix" }), prompt("fix"),
+		prompt("review-fix", { when: "changed" }), run("retest", { onSuccess: "done", onFailure: "done", onBlocked: "done" }), run("done"),
+	];
+	const graphLimits = { maxSteps: 7, maxModelCalls: 4 };
+	const route = (observations: ChainObservation[]) => {
+		let result = routeAdaptiveChain(steps, graphLimits, createAdaptiveChainState());
+		const selected = [result.action!.step.id]; const skipped: string[] = [];
+		for (const observation of observations) {
+			result = routeAdaptiveChain(steps, graphLimits, result.state, observation);
+			skipped.push(...result.decisions.filter((decision) => decision.reason === "gate-not-matched").map((decision) => decision.selectedTarget!));
+			if (result.action) selected.push(result.action.step.id);
+		}
+		return { result, selected, skipped };
+	};
+	const success = route([{ outcome: "succeeded", changed: true }, { outcome: "succeeded", changed: false }, { outcome: "succeeded", changed: false }, { outcome: "succeeded", changed: false }]);
+	assert.deepEqual(success.selected, ["implement", "review-implementation", "test", "done"]);
+	assert.deepEqual(success.skipped, []);
+	assert.equal(success.result.state.status, "completed");
+	const failure = route([{ outcome: "succeeded", changed: false }, { outcome: "failed", changed: false }, { outcome: "succeeded", changed: true }, { outcome: "succeeded", changed: false }, { outcome: "succeeded", changed: false }, { outcome: "succeeded", changed: false }]);
+	assert.deepEqual(failure.selected, ["implement", "test", "fix", "review-fix", "retest", "done"]);
+	assert.deepEqual(failure.skipped, ["review-implementation"]);
+	assert.equal(failure.result.state.status, "completed");
 });
