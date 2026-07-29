@@ -1254,3 +1254,15 @@ test("validatePromptTemplates includes registered delegated skills in static bud
 		assert.equal(result.diagnostics.some((item) => item.code === "prompt-budget-exceeded"), true);
 	});
 });
+
+test("validatePromptTemplates evaluates conditionals against pinned models", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const promptsDir = join(cwd, ".pi", "prompts");
+		mkdirSync(promptsDir, { recursive: true });
+		writeFileSync(join(promptsDir, "pinned.md"), `---\nmodel: openai/gpt-fixed\nbudget:\n  maxTokens: 3\n---\n<if-model is="openai/gpt-fixed">${"x".repeat(40)}<else>x</if-model>`);
+
+		const result = validatePromptTemplates(cwd);
+		assert.equal(result.diagnostics.some((item) => item.code === "prompt-budget-exceeded"), true);
+	});
+});
