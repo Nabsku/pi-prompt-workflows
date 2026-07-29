@@ -1777,6 +1777,7 @@ function hasPromptLibraryCommandMarker(frontmatter: Record<string, unknown>): bo
 		"model",
 		"skill",
 		"skills",
+		"budget",
 		"subagent",
 		"parallel",
 		"deterministic",

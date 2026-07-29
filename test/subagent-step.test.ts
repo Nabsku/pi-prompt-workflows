@@ -155,6 +155,28 @@ test("executeSubagentPromptStep returns delegated change info", async () => {
 	});
 });
 
+test("executeSubagentPromptStep enforces budgets after assembling delegated preambles", async () => {
+	await withDelegationBridge(async (root) => {
+		const pi = createPi();
+		const ctx = createCtx(root);
+		let requests = 0;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, () => { requests += 1; });
+
+		await assert.rejects(
+			executeSubagentPromptStep({
+				pi,
+				prompt: { ...prompt, content: "x", budget: { maxTokens: 2 } },
+				args: [],
+				ctx,
+				currentModel: ctx.model,
+				taskPreamble: "this chain context makes the outbound task exceed its configured budget",
+			}),
+			/exceeds configured maximum of 2/i,
+		);
+		assert.equal(requests, 0);
+	});
+});
+
 test("executeSubagentPromptStep forwards prompt cwd to delegated request", async () => {
 	await withDelegationBridge(async (root) => {
 		const pi = createPi();

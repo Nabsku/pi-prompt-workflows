@@ -4,7 +4,7 @@ import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
-import { preparePromptExecution } from "./prompt-execution.js";
+import { checkPromptExecutionBudget, preparePromptExecution } from "./prompt-execution.js";
 import type { PromptWithModel } from "./prompt-loader.js";
 import { notify } from "./notifications.js";
 import { buildSkillLoadedMessage, getRequestedSkills, resolvePromptSkills, type RuntimeSkillCommand } from "./prompt-skills.js";
@@ -213,6 +213,9 @@ async function prepareDelegatedTask(
 	if (task.taskPrefix) {
 		taskText = `${task.taskPrefix}\n\n${taskText}`;
 	}
+	const budgetCheck = checkPromptExecutionBudget(task.prompt, taskText);
+	if (budgetCheck.warning) notify(ctx, budgetCheck.warning, "warning");
+	if (budgetCheck.message) throw new Error(budgetCheck.message);
 
 	return {
 		promptName: task.prompt.name,

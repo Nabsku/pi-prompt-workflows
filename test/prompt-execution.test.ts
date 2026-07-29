@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { preparePromptExecution } from "../prompt-execution.js";
+import { checkPromptExecutionBudget, preparePromptExecution } from "../prompt-execution.js";
 import { loadPromptsWithModel } from "../prompt-loader.js";
 
 const model = { provider: "anthropic", id: "claude-sonnet-4-20250514" };
@@ -243,24 +243,12 @@ test("preparePromptExecution treats explicitly undefined inherited model as miss
 	assert.match(prepared?.message ?? "", /has no `model` configured and there is no active session model/i);
 });
 
-test("preparePromptExecution blocks prompt budgets above the configured maximum", async () => {
-	const result = await preparePromptExecution(
-		{ name: "bounded", content: "12345678", models: [], budget: { maxTokens: 1 } },
-		[],
-		model as never,
-		registry as never,
-	);
-	assert.ok(result && "message" in result);
-	assert.match(result.message, /estimated 2 tokens exceeds configured maximum of 1/i);
+test("checkPromptExecutionBudget blocks the exact outbound task above the configured maximum", () => {
+	const result = checkPromptExecutionBudget({ name: "bounded", budget: { maxTokens: 1 } }, "12345678");
+	assert.match(result.message ?? "", /estimated 2 tokens exceeds configured maximum of 1/i);
 });
 
-test("preparePromptExecution warns at the prompt budget warning threshold", async () => {
-	const result = await preparePromptExecution(
-		{ name: "bounded", content: "12345678", models: [], budget: { warnTokens: 2, maxTokens: 4 } },
-		[],
-		model as never,
-		registry as never,
-	);
-	assert.ok(result && !("message" in result));
+test("checkPromptExecutionBudget warns at the prompt budget warning threshold", () => {
+	const result = checkPromptExecutionBudget({ name: "bounded", budget: { warnTokens: 2, maxTokens: 4 } }, "12345678");
 	assert.match(result.warning ?? "", /estimated 2 tokens reached warning threshold of 2/i);
 });
