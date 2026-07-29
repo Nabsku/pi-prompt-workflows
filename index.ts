@@ -23,7 +23,7 @@ import { parseChainSteps, parseChainDeclaration, type ChainStep, type ChainStepO
 import { generateBoomerangSummary, generateChainStepSummary, generateIterationSummary, didIterationMakeChanges, getIterationEntries, wasIterationAborted } from "./loop-utils.js";
 import { selectModelCandidate } from "./model-selection.js";
 import { notify, summarizePromptDiagnostics, diagnosticsFingerprint } from "./notifications.js";
-import { preparePromptExecution, renderPromptForResolvedModel } from "./prompt-execution.js";
+import { checkPromptExecutionBudget, preparePromptExecution, renderPromptForResolvedModel } from "./prompt-execution.js";
 import {
 	buildPromptCommandDescription,
 	expandCwdPath,
@@ -458,6 +458,17 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			notify(ctx, prepared.warning, "warning");
 		}
 
+		const effectiveContent = combinedTaskPreamble
+			? `${combinedTaskPreamble}\n\n${prepared.content}`
+			: prepared.content;
+		const content = loopContext ? `[${loopContext}]\n\n${effectiveContent}` : effectiveContent;
+		const budgetCheck = checkPromptExecutionBudget(prompt, content);
+		if (budgetCheck.warning) notify(ctx, budgetCheck.warning, "warning");
+		if (budgetCheck.message) {
+			notify(ctx, budgetCheck.message, "error");
+			return "aborted";
+		}
+
 		if (!prepared.selectedModel.alreadyActive) {
 			const switched = await pi.setModel(prepared.selectedModel.model);
 			if (!switched) {
@@ -483,10 +494,6 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 
 		const startId = ctx.sessionManager.getLeafId();
-		const effectiveContent = combinedTaskPreamble
-			? `${combinedTaskPreamble}\n\n${prepared.content}`
-			: prepared.content;
-		const content = loopContext ? `[${loopContext}]\n\n${effectiveContent}` : effectiveContent;
 		pi.sendUserMessage(content);
 		await waitForTurnStart(ctx);
 		await ctx.waitForIdle();

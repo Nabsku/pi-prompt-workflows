@@ -464,5 +464,20 @@ test("dry-run budgets the final rendered prompt after argument substitution", as
 		assert.equal(result.budget.bytes, 11);
 		assert.equal(result.budget.estimatedTokens, 3);
 		assert.equal(result.budget.verdict, "warning");
+		assert.deepEqual(result.budget.sources?.map((source) => source.kind), ["prompt"]);
+	});
+});
+
+test("dry-run preserves budget details when the rendered prompt exceeds the maximum", async () => {
+	await withTempHome(async (root) => {
+		const result = assertOk(await createPromptDryRun(
+			prompt({ content: "Task: $@", budget: { maxTokens: 2 } }),
+			options(root, { rawArgs: "abcde" }),
+		));
+		assert.equal(result.content, "Task: abcde");
+		assert.equal(result.budget.estimatedTokens, 3);
+		assert.equal(result.budget.verdict, "exceeded");
+		assert.deepEqual(result.budget.config, { maxTokens: 2 });
+		assert.deepEqual(result.budget.sources?.map((source) => source.kind), ["prompt"]);
 	});
 });

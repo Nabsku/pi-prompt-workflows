@@ -264,10 +264,8 @@ function promptBudgetSources(
 	skills: Array<{ skillName: string; skillPath: string; skillContent: string }>,
 ): PromptBudgetSourceEstimate[] {
 	const sources: PromptBudgetSourceEstimate[] = [];
-	const rootContent = prompt.includeGraph?.root.rawBody;
-	if (rootContent !== undefined) {
-		sources.push({ kind: "prompt", label: prompt.name, filePath: prompt.filePath, ...estimatePromptTokens(rootContent) });
-	}
+	const rootContent = prompt.includeGraph?.root.rawBody ?? prompt.content;
+	sources.push({ kind: "prompt", label: prompt.name, filePath: prompt.filePath, ...estimatePromptTokens(rootContent) });
 	const seen = new Set<string>();
 	for (const node of prompt.includeGraph?.nodes ?? []) {
 		if (node.kind !== "partial" || node.status !== "ok" || !node.filePath || seen.has(node.filePath)) continue;
