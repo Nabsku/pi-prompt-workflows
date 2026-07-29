@@ -37,6 +37,7 @@
     "best-of-n-run-history-tui.ts",
     "chain-parser.ts",
     "adaptive-chain.ts",
+    "adaptive-runtime.ts",
     "git-worktree-snapshot.ts",
     "compare-defaults.ts",
     "loop-utils.ts",
