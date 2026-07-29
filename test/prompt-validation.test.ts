@@ -1200,3 +1200,28 @@ test("validatePromptTemplates includes delegated skill payloads in static budget
 		assert.equal(result.diagnostics.some((item) => item.code === "prompt-budget-exceeded"), true);
 	});
 });
+
+test("validatePromptTemplates rejects guaranteed conditional overages", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const promptsDir = join(cwd, ".pi", "prompts");
+		mkdirSync(promptsDir, { recursive: true });
+		writeFileSync(join(promptsDir, "conditional-over.md"), "---\nmodel: openai/gpt-test\nbudget:\n  maxTokens: 2\n---\nunconditional oversized prefix <if-model is=\"openai/*\">x<else>y</if-model>");
+
+		const result = validatePromptTemplates(cwd);
+		assert.equal(result.diagnostics.some((item) => item.code === "prompt-budget-exceeded"), true);
+	});
+});
+
+test("validatePromptTemplates classifies budget-only library files as commands", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const libraryDir = join(cwd, ".pi", "prompt-library");
+		mkdirSync(libraryDir, { recursive: true });
+		writeFileSync(join(libraryDir, "budget-only.md"), "---\nbudget:\n  maxTokens: 20\n---\nsmall body");
+
+		const result = validatePromptTemplates(cwd);
+		assert.equal(result.sourceSummary.projectLibraryCommands, 1);
+		assert.equal(result.sourceSummary.projectLibraryFragments, 0);
+	});
+});

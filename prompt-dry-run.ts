@@ -358,6 +358,10 @@ export async function createPromptDryRun(
 
 	if (prompt.chain) return errorResult(prompt, DRY_RUN_CHAIN_UNSUPPORTED, warnings, runtime);
 	if (hasCompareLineup(prompt)) {
+		const compareSkillResolution = resolvePromptSkills(getRequestedSkills(prompt), options.cwd, options.commands ?? []);
+		if (compareSkillResolution.kind === "error") return errorResult(prompt, compareSkillResolution.error, warnings, runtime);
+		const compareSkills = compareSkillResolution.kind === "ready" ? compareSkillResolution.skills : [];
+		const compareSkillPreamble = compareSkills.length > 0 ? buildSkillLoadedMessage(compareSkills).content : undefined;
 		if (parsed.runtimeCwd) {
 			const runtimeCwd = expandCwdPath(parsed.runtimeCwd);
 			if (!runtimeCwd) return errorResult(prompt, "Invalid --cwd path: must be absolute", warnings, runtime);
@@ -428,7 +432,10 @@ export async function createPromptDryRun(
 			] : []),
 		].join("\n")] : [];
 		const lineupTasks = [...workerTasks, ...reviewerTasks, ...finalApplierTasks];
-		const budget = evaluateDryRunBudget(lineupTasks.length > 0 ? lineupTasks : (preflight.task.renderedTask ?? ""), prompt);
+		const budgetLineupTasks = compareSkillPreamble
+			? lineupTasks.map((task) => `${compareSkillPreamble}\n\n---\n\n${task}`)
+			: lineupTasks;
+		const budget = evaluateDryRunBudget(budgetLineupTasks.length > 0 ? budgetLineupTasks : (preflight.task.renderedTask ?? ""), prompt, compareSkills);
 		if (budget.verdict === "exceeded") {
 			preflight.diagnostics.push({ severity: "error", code: "prompt-budget-exceeded", message: `Compare lineup task estimated ${budget.estimatedTokens} tokens exceeds configured maximum of ${budget.config?.maxTokens}.`, source: prompt.source, filePath: prompt.filePath });
 		} else if (budget.verdict === "warning") {
@@ -437,6 +444,7 @@ export async function createPromptDryRun(
 		warnings.push(...preflight.diagnostics.filter((diagnostic) => diagnostic.severity === "warning").map((diagnostic) => diagnostic.message));
 		const errors = preflight.diagnostics.filter((diagnostic) => diagnostic.severity === "error").map((diagnostic) => diagnostic.message);
 		if (errors.length > 0) return errorResult(prompt, errors.join("\n"), warnings, runtime, preflight, budget);
+		const compareSkillPreviews = previewSkills(compareSkills, options.showSkills === true);
 		return {
 			status: "ok",
 			promptName: prompt.name,
@@ -446,8 +454,8 @@ export async function createPromptDryRun(
 			modelAlreadyActive: prepared.selectedModel.alreadyActive,
 			warnings,
 			budget,
-			skills: [],
-			details: { skills: [] },
+			skills: compareSkillPreviews,
+			details: { skills: compareSkillPreviews },
 			runtime,
 			comparePreflight: preflight,
 		};

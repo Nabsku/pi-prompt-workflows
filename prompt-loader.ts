@@ -2526,6 +2526,7 @@ function collectPromptSourceRecordsFromDir(
 						converge === false ||
 						boomerang === true ||
 						thinking !== undefined ||
+						Object.hasOwn(frontmatter, "budget") ||
 						Object.hasOwn(frontmatter, "subagent") ||
 						Object.hasOwn(frontmatter, "parallel") ||
 						Object.hasOwn(frontmatter, "deterministic") ||
