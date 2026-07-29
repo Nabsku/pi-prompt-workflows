@@ -1431,6 +1431,8 @@ Releases are managed with [Release Please](https://github.com/googleapis/release
 
 - Prompt files are reloaded on session start and whenever an extension-owned command runs. If you add a new prompt file mid-session, run any extension command (like `/chain-prompts`), start a new session, or reload pi to pick it up.
 - Model restore state is in-memory. Closing pi mid-response loses it.
+- Adaptive-chain preflight graph analysis is deterministically capped at 4,096 enqueued states. If that limit is reached, preflight fails closed with an inconclusive-analysis diagnostic and reports only conservative, unavailable-as-exact bounds; the execution router and its configured `maxSteps`/`maxModelCalls` limits are unchanged.
+- Adaptive preflight is a read-only snapshot of skills, referenced files, model availability, and estimated prompt costs. Runtime revalidates those inputs before execution; preflight output is not an immutable approval or availability guarantee.
 - In chains, model-less steps inherit the chain-start model snapshot, not the previous step's model. This is intentional for deterministic behavior.
 - Delegated `subagent` prompts require [pi-subagents](https://github.com/nicobailon/pi-subagents/).
 - `run-prompt` must be explicitly enabled with `/prompt-tool on`.

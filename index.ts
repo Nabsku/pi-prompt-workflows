@@ -20,7 +20,8 @@ import {
 import { DEFAULT_COMPARE_FINAL_APPLIER_TASK, DEFAULT_COMPARE_REVIEWER_TASK } from "./compare-defaults.js";
 import { loadBestOfNPresetCatalog, applyPresetDefaultModel, getBestOfNPresetCandidatePaths, type ResolvedBestOfNPreset } from "./best-of-n-presets.js";
 import { parseChainSteps, parseChainDeclaration, type ChainStep, type ChainStepOrParallel, type ParallelChainStep } from "./chain-parser.js";
-import { executeAdaptiveChain } from "./adaptive-runtime.js";
+import { AdaptiveChainCancelledError, executeAdaptiveChain } from "./adaptive-runtime.js";
+import { formatAdaptiveDecision, formatAdaptiveError, formatAdaptiveRuntimeReport } from "./adaptive-renderer.js";
 import { captureGitWorktreeSnapshot, compareGitWorktreeSnapshots } from "./git-worktree-snapshot.js";
 import { generateBoomerangSummary, generateChainStepSummary, generateIterationSummary, didIterationMakeChanges, getIterationEntries, wasIterationAborted } from "./loop-utils.js";
 import { selectModelCandidate } from "./model-selection.js";
@@ -31,9 +32,12 @@ import {
 	expandCwdPath,
 	formatPromptSourceLabel,
 	loadPromptsWithModel,
+	collectPromptSourceRecords,
+	selectEffectivePromptSourceRecords,
 	type DelegationLineupSlot,
 	type PromptWithModel,
 } from "./prompt-loader.js";
+import { createInvalidAdaptivePreflight } from "./adaptive-preflight.js";
 import {
 	buildSkillLoadedMessage,
 	getRequestedSkills,
@@ -137,6 +141,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	let prompts = new Map<string, PromptWithModel>();
 	let chainPrompts = new Map<string, PromptWithModel>();
 	let adaptivePrompts = new Map<string, PromptWithModel>();
+	let blockedAdaptivePrompts = new Map<string, { name: string; source: "user" | "project"; rootKind: "prompts" | "prompt-library"; filePath: string; hidden: boolean; diagnostics: string[] }>();
 	let previousModel: Model<any> | undefined;
 	let previousThinking: ThinkingLevel | undefined;
 	let pendingSkillMessage: PendingSkillMessage | undefined;
@@ -322,6 +327,14 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		prompts = result.prompts;
 		chainPrompts = chainResult.prompts;
 		adaptivePrompts = new Map([...chainResult.prompts].filter(([, prompt]) => prompt.adaptiveChain !== undefined));
+		const inventory = collectPromptSourceRecords(cwd, true).inventoryRecords;
+		blockedAdaptivePrompts = new Map();
+		for (const record of selectEffectivePromptSourceRecords(inventory).values()) {
+			if (chainResult.prompts.has(record.promptName)) continue;
+			const related = chainResult.diagnostics.filter((diagnostic) => diagnostic.filePath === record.filePath && diagnostic.code.includes("chain"));
+			if (!related.length) continue;
+			blockedAdaptivePrompts.set(record.promptName, { name: record.promptName, source: record.source, rootKind: record.rootKind, filePath: record.filePath, hidden: record.hidden === true, diagnostics: related.map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`) });
+		}
 
 		for (const [name, prompt] of prompts) {
 			if (prompt.hidden) continue;
@@ -2544,7 +2557,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	}
 
 	function getDryRunUnsupportedReason(prompt: PromptWithModel): string | undefined {
-		if (prompt.chain) return DRY_RUN_CHAIN_UNSUPPORTED;
+		if (prompt.chain && !prompt.adaptiveChain) return DRY_RUN_CHAIN_UNSUPPORTED;
 		if (prompt.deterministic) return DRY_RUN_DETERMINISTIC_UNSUPPORTED;
 		return undefined;
 	}
@@ -2553,7 +2566,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		const merged = new Map<string, PromptWithModel>();
 		for (const [name, prompt] of chainPrompts) merged.set(name, prompt);
 		for (const [name, prompt] of prompts) merged.set(name, prompt);
-		return Array.from(merged.values())
+		const catalog: PromptTemplateCatalogItem[] = Array.from(merged.values())
 			.filter((prompt) => !prompt.hidden)
 			.sort((a, b) => a.name.localeCompare(b.name))
 			.map((prompt) => ({
@@ -2567,6 +2580,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				skills: getRequestedSkills(prompt),
 				unsupportedReason: getDryRunUnsupportedReason(prompt),
 			}));
+		for (const blocked of blockedAdaptivePrompts.values()) if (!blocked.hidden) catalog.push({ name: blocked.name, source: blocked.source, displaySource: blocked.rootKind === "prompt-library" ? `${blocked.source} library` : blocked.source, file: blocked.filePath, description: "Blocked adaptive chain (parser-invalid)", unsupportedReason: "graph unavailable/invalid" });
+		return catalog.sort((a, b) => a.name.localeCompare(b.name));
 	}
 
 	async function openPromptDryRunInspector(ctx: ExtensionCommandContext, result: PromptDryRunResult, plainReport: string) {
@@ -2619,7 +2634,13 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 	async function inspectPromptDryRunInTui(ctx: ExtensionCommandContext, promptName: string, rawArgs: string, showSkills: boolean): Promise<void> {
 		const prompt = prompts.get(promptName) ?? chainPrompts.get(promptName);
+		const blocked = blockedAdaptivePrompts.get(promptName);
 		if (!prompt) {
+			if (blocked) {
+				const result: PromptDryRunResult = { status: "error", promptName, error: "Graph unavailable/invalid; adaptive chain is blocked.", warnings: [], adaptivePreflight: createInvalidAdaptivePreflight(promptName, blocked.diagnostics) };
+				await openPromptDryRunInspector(ctx, result, formatPromptDryRun(result));
+				return;
+			}
 			notify(ctx, `Prompt "${promptName}" not found`, "error");
 			return;
 		}
@@ -2633,10 +2654,11 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			commands: pi.getCommands() as RuntimeSkillCommand[],
 			showSkills,
 			pathArgumentPromptName: promptName === "parallel-patch-compare-at-path" ? promptName : undefined,
+			promptCatalog: chainPrompts,
 		});
 		const plainReport = formatPromptDryRun(result);
 
-		if (result.status === "error") {
+		if (result.status === "error" && !result.adaptivePreflight && !result.comparePreflight) {
 			for (const warning of result.warnings) notify(ctx, warning, "warning");
 			notify(ctx, result.error, "error");
 			return;
@@ -2671,6 +2693,13 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 		const prompt = prompts.get(parsed.promptName) ?? chainPrompts.get(parsed.promptName);
 		if (!prompt) {
+			const blocked = blockedAdaptivePrompts.get(parsed.promptName);
+			if (blocked) {
+				const result: PromptDryRunResult = { status: "error", promptName: parsed.promptName, error: "Graph unavailable/invalid; adaptive chain is blocked.", warnings: [], adaptivePreflight: createInvalidAdaptivePreflight(parsed.promptName, blocked.diagnostics) };
+				const report = formatPromptDryRun(result);
+				if (useTui) await openPromptDryRunInspector(ctx, result, report); else if (parsed.plain || !ctx.hasUI) process.stdout.write(report); else notify(ctx, report, "error");
+				return;
+			}
 			notify(ctx, `Prompt "${parsed.promptName}" not found`, "error");
 			return;
 		}
@@ -2684,6 +2713,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			commands: pi.getCommands() as RuntimeSkillCommand[],
 			showSkills: parsed.showSkills,
 			pathArgumentPromptName: parsed.promptName === "parallel-patch-compare-at-path" ? parsed.promptName : undefined,
+			promptCatalog: chainPrompts,
 		});
 		const plainReport = formatPromptDryRun(result);
 
@@ -2693,11 +2723,15 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				process.stdout.write(plainReport);
 				return;
 			}
-			if (result.comparePreflight) {
-				notify(ctx, plainReport, "error");
+			if ((result.comparePreflight || result.adaptivePreflight) && useTui) {
+				const action = parsePromptDryRunInspectorAction(await openPromptDryRunInspector(ctx, result, plainReport));
+				if (action?.action === "back") {
+					const selection = await openPromptDryRunPicker(ctx, result.promptName);
+					if (selection?.action === "selected") await inspectPromptDryRunInTui(ctx, selection.templateName, parsed.remainingArgs, parsed.showSkills);
+				}
 				return;
 			}
-			notify(ctx, result.error, "error");
+			notify(ctx, plainReport, "error");
 			return;
 		}
 
@@ -2754,6 +2788,22 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			const unsupportedRuntime = runtime.override || runtime.fork || runtime.preset || runtimeLoop;
 			if (unsupportedRuntime) {
 				notify(ctx, "Adaptive chains do not support --subagent, --fork, --preset, or --loop: these modes can expand one router action into multiple top-level model calls, and exact call reservation is not implemented.", "error");
+				return;
+			}
+
+			const preflightResult = await createPromptDryRun(wrapper, {
+				cwd: ctx.cwd,
+				rawArgs: args,
+				currentModel: getCurrentModel(ctx),
+				currentModelLabel: getCurrentModelLabel(ctx),
+				modelRegistry: ctx.modelRegistry,
+				commands: pi.getCommands() as RuntimeSkillCommand[],
+				promptCatalog: chainPrompts,
+			});
+			if (preflightResult.status === "error") {
+				const report = formatPromptDryRun(preflightResult);
+				if (isTuiMode(ctx) && hasCustomUi(ctx) && preflightResult.adaptivePreflight) await openPromptDryRunInspector(ctx, preflightResult, report);
+				else notify(ctx, report, "error");
 				return;
 			}
 
@@ -2818,13 +2868,13 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				captureSnapshot(_step, cwd) { return captureGitWorktreeSnapshot(cwd); },
 				compareSnapshots: compareGitWorktreeSnapshots,
 				onDecision(decision) {
-					const target = decision.selectedTarget ?? "complete";
-					notify(ctx, `Adaptive chain ${name}: ${decision.reason} ${target}`, "info");
+					notify(ctx, `Adaptive chain ${name}: ${formatAdaptiveDecision(decision)}`, "info");
 				},
 			});
-			notify(ctx, `Adaptive chain ${name} completed: ${report.actions.length} action(s)`, "info");
+			notify(ctx, formatAdaptiveRuntimeReport(name, report), "info");
 		} catch (error) {
-			notify(ctx, `Adaptive chain ${name} failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+			if (error instanceof AdaptiveChainCancelledError) notify(ctx, formatAdaptiveRuntimeReport(name, error.report, "cancelled"), "warning");
+			else notify(ctx, formatAdaptiveError(name, error), "error");
 		} finally {
 			if (workflowOwner === owner) {
 				try {
