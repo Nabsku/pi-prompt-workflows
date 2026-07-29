@@ -2135,10 +2135,6 @@ function loadPromptsWithModelFromDir(
 					diagnostics.push(createDiagnostic("invalid-budget-chain", fullPath, source, "Prompt budgets belong on executable chain step templates, not chain wrappers."));
 					continue;
 				}
-				if (budget && deterministic) {
-					diagnostics.push(createDiagnostic("invalid-budget-deterministic", fullPath, source, "Prompt budgets are not supported on deterministic prompts because the command runs before an optional LLM handoff."));
-					continue;
-				}
 
 				const name = entry.name.slice(0, -3);
 				if (RESERVED_COMMAND_NAMES.has(name)) {
@@ -2206,6 +2202,10 @@ function loadPromptsWithModelFromDir(
 						),
 					);
 					deterministic = undefined;
+				}
+				if (budget && deterministic) {
+					diagnostics.push(createDiagnostic("invalid-budget-deterministic", fullPath, source, "Prompt budgets are not supported on deterministic prompts because the command runs before an optional LLM handoff."));
+					continue;
 				}
 				const worktreeInput = hasBestOfN ? bestOfN?.worktree : frontmatter.worktree;
 				const worktree = normalizeWorktree(worktreeInput, fullPath, source, diagnostics);
