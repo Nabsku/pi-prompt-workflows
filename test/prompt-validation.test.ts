@@ -1144,7 +1144,7 @@ test("validatePromptTemplates reports configured budgets and fails static maximu
 	});
 });
 
-test("validatePromptTemplates defers hard budget failure for unresolved model conditionals", () => {
+test("validatePromptTemplates summarizes the configured model conditional branch", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
 		const promptsDir = join(cwd, ".pi", "prompts");
@@ -1156,7 +1156,7 @@ test("validatePromptTemplates defers hard budget failure for unresolved model co
 
 		const result = validatePromptTemplates(cwd);
 		assert.equal(result.ok, true);
-		assert.equal(result.budgets?.[0]?.verdict, "exceeded");
+		assert.equal(result.budgets?.[0]?.verdict, "within");
 		assert.equal(result.diagnostics.some((item) => item.code === "prompt-budget-exceeded"), false);
 	});
 });
@@ -1261,8 +1261,10 @@ test("validatePromptTemplates evaluates conditionals against pinned models", () 
 		const promptsDir = join(cwd, ".pi", "prompts");
 		mkdirSync(promptsDir, { recursive: true });
 		writeFileSync(join(promptsDir, "pinned.md"), `---\nmodel: openai/gpt-fixed\nbudget:\n  maxTokens: 3\n---\n<if-model is="openai/gpt-fixed">${"x".repeat(40)}<else>x</if-model>`);
+		writeFileSync(join(promptsDir, "pinned-within.md"), `---\nmodel: openai/gpt-fixed\nbudget:\n  maxTokens: 3\n---\n<if-model is="openai/gpt-fixed">x<else>${"x".repeat(40)}</if-model>`);
 
 		const result = validatePromptTemplates(cwd);
 		assert.equal(result.diagnostics.some((item) => item.code === "prompt-budget-exceeded"), true);
+		assert.equal(result.budgets?.find((budget) => budget.promptName === "pinned-within")?.verdict, "within");
 	});
 });
