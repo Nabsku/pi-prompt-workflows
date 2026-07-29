@@ -6,7 +6,7 @@ import { evaluatePromptBudget, type PromptBudgetResult } from "./prompt-budget.j
 import { collectPromptIncludeGraphs, type PromptIncludeGraph, type PromptIncludeGraphEdge, type PromptIncludeGraphNode } from "./prompt-includes.js";
 import { collectPromptSourceRecords, discoverFilesystemSkills, loadPromptsWithModel, readSkillContent, resolveSkillPath, type PromptLoaderDiagnostic, type PromptSource, type PromptSourceRecord, type PromptWithModel } from "./prompt-loader.js";
 import { buildSkillLoadedMessage, getRequestedSkills, resolvePromptSkills } from "./prompt-skills.js";
-import { minimumTemplateConditionalContent } from "./template-conditionals.js";
+import { minimumTemplateConditionalContent, renderTemplateConditionals } from "./template-conditionals.js";
 
 export interface RegisteredPromptSkill {
 	skillName: string;
@@ -582,11 +582,18 @@ export function validatePromptTemplates(cwd: string, options: PromptValidationOp
 		}
 		const budget = evaluatePromptBudget(staticContent, prompt.budget);
 		budgets.push({ promptName: prompt.name, filePath: prompt.filePath, ...budget });
-		const minimumConditionalBody = minimumTemplateConditionalContent(substituteArgs(prompt.content, []));
-		const minimumConditionalContent = minimumConditionalBody === undefined
-			? undefined
-			: skillPreamble ? `${skillPreamble}\n\n---\n\n${minimumConditionalBody}` : minimumConditionalBody;
-		const conditionalCanFit = minimumConditionalContent !== undefined && evaluatePromptBudget(minimumConditionalContent, prompt.budget).verdict !== "exceeded";
+		const substitutedBody = substituteArgs(prompt.content, []);
+		const configuredModels = prompt.models.map((spec) => {
+			const slash = spec.indexOf("/");
+			return slash > 0 ? { provider: spec.slice(0, slash), id: spec.slice(slash + 1) } : undefined;
+		});
+		const conditionalCandidates = configuredModels.length > 0 && configuredModels.every((model) => model !== undefined)
+			? configuredModels.map((model) => renderTemplateConditionals(substitutedBody, model!).content)
+			: [minimumTemplateConditionalContent(substitutedBody)].filter((content): content is string => content !== undefined);
+		const conditionalCanFit = conditionalCandidates.some((body) => {
+			const content = skillPreamble ? `${skillPreamble}\n\n---\n\n${body}` : body;
+			return evaluatePromptBudget(content, prompt.budget).verdict !== "exceeded";
+		});
 		if (budget.verdict === "exceeded" && !conditionalCanFit) {
 			result.diagnostics.push(createValidationDiagnostic(
 				"prompt-budget-exceeded",
