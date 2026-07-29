@@ -23,7 +23,7 @@ import { parseChainSteps, parseChainDeclaration, type ChainStep, type ChainStepO
 import { generateBoomerangSummary, generateChainStepSummary, generateIterationSummary, didIterationMakeChanges, getIterationEntries, wasIterationAborted } from "./loop-utils.js";
 import { selectModelCandidate } from "./model-selection.js";
 import { notify, summarizePromptDiagnostics, diagnosticsFingerprint } from "./notifications.js";
-import { checkPromptExecutionBudget, preparePromptExecution, renderPromptForResolvedModel } from "./prompt-execution.js";
+import { checkPromptExecutionBudget, preparePromptExecution, PromptBudgetExceededError, renderPromptForResolvedModel } from "./prompt-execution.js";
 import {
 	buildPromptCommandDescription,
 	expandCwdPath,
@@ -437,6 +437,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				return { changed: delegated.changed, text: delegated.text };
 			} catch (error) {
 				notify(ctx, error instanceof Error ? error.message : String(error), "error");
+				if (error instanceof PromptBudgetExceededError) return "aborted";
 				return { changed: false };
 			}
 		}

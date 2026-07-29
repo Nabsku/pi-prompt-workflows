@@ -14,7 +14,7 @@ import { evaluatePromptBudget, estimatePromptTokens, type PromptBudgetResult, ty
 import { preparePromptExecution } from "./prompt-execution.js";
 import { expandCwdPath, type PromptWithModel } from "./prompt-loader.js";
 import { stripPromptPartialFrontmatter, type PromptIncludeGraph } from "./prompt-includes.js";
-import { getRequestedSkills, resolvePromptSkills, type RuntimeSkillCommand } from "./prompt-skills.js";
+import { buildSkillLoadedMessage, getRequestedSkills, resolvePromptSkills, type RuntimeSkillCommand } from "./prompt-skills.js";
 import { DEFAULT_SUBAGENT_NAME } from "./subagent-runtime.js";
 
 export const DRY_RUN_CHAIN_UNSUPPORTED =
@@ -82,6 +82,7 @@ export interface PromptDryRunError {
 	warnings: string[];
 	runtime?: Partial<PromptDryRunRuntimeMetadata>;
 	comparePreflight?: BestOfNPreflight;
+	budget?: PromptBudgetResult;
 }
 
 export type PromptDryRunResult = PromptDryRunSuccess | PromptDryRunError;
@@ -213,8 +214,9 @@ function errorResult(
 	warnings: string[] = [],
 	runtime?: Partial<PromptDryRunRuntimeMetadata>,
 	comparePreflight?: BestOfNPreflight,
+	budget?: PromptBudgetResult,
 ): PromptDryRunError {
-	return { status: "error", promptName: prompt.name, error, warnings, ...(runtime ? { runtime } : {}), ...(comparePreflight ? { comparePreflight } : {}) };
+	return { status: "error", promptName: prompt.name, error, warnings, ...(runtime ? { runtime } : {}), ...(comparePreflight ? { comparePreflight } : {}), ...(budget ? { budget } : {}) };
 }
 
 function hasCompareLineup(prompt: PromptWithModel): boolean {
@@ -284,11 +286,14 @@ function promptBudgetSources(
 }
 
 function evaluateDryRunBudget(
-	content: string,
+	content: string | string[],
 	prompt: PromptWithModel,
 	skills: Array<{ skillName: string; skillPath: string; skillContent: string }> = [],
 ): PromptBudgetResult {
-	return { ...evaluatePromptBudget(content, prompt.budget), sources: promptBudgetSources(prompt, skills) };
+	const candidates = Array.isArray(content) ? content : [content];
+	const results = candidates.map((candidate) => evaluatePromptBudget(candidate, prompt.budget));
+	const largest = results.reduce((current, candidate) => candidate.estimatedTokens > current.estimatedTokens ? candidate : current);
+	return { ...largest, sources: promptBudgetSources(prompt, skills) };
 }
 
 function parseDryRunArgs(prompt: PromptWithModel, rawArgs: string | undefined, args: string[] | undefined) {
@@ -392,9 +397,20 @@ export async function createPromptDryRun(
 			pathArgumentPromptName: options.pathArgumentPromptName,
 			renderedTask: prepared.content,
 		});
+		const lineupTasks = [
+			...preflight.slots.workers,
+			...preflight.slots.reviewers,
+			...(preflight.slots.finalApplier ? [preflight.slots.finalApplier] : []),
+		].map((slot) => slot.effectiveTask).filter((task): task is string => task !== undefined);
+		const budget = evaluateDryRunBudget(lineupTasks.length > 0 ? lineupTasks : (preflight.task.renderedTask ?? ""), prompt);
+		if (budget.verdict === "exceeded") {
+			preflight.diagnostics.push({ severity: "error", code: "prompt-budget-exceeded", message: `Compare lineup task estimated ${budget.estimatedTokens} tokens exceeds configured maximum of ${budget.config?.maxTokens}.`, source: prompt.source, filePath: prompt.filePath });
+		} else if (budget.verdict === "warning") {
+			preflight.diagnostics.push({ severity: "warning", code: "prompt-budget-warning", message: `Compare lineup task estimated ${budget.estimatedTokens} tokens reached warning threshold of ${budget.config?.warnTokens}.`, source: prompt.source, filePath: prompt.filePath });
+		}
 		warnings.push(...preflight.diagnostics.filter((diagnostic) => diagnostic.severity === "warning").map((diagnostic) => diagnostic.message));
 		const errors = preflight.diagnostics.filter((diagnostic) => diagnostic.severity === "error").map((diagnostic) => diagnostic.message);
-		if (errors.length > 0) return errorResult(prompt, errors.join("\n"), warnings, runtime, preflight);
+		if (errors.length > 0) return errorResult(prompt, errors.join("\n"), warnings, runtime, preflight, budget);
 		return {
 			status: "ok",
 			promptName: prompt.name,
@@ -466,10 +482,17 @@ export async function createPromptDryRun(
 	const resolvedSkills = skillResolution.kind === "ready" ? skillResolution.skills : [];
 	const skillPreviews = previewSkills(resolvedSkills, options.showSkills === true);
 	let content = prepared.content;
+	let budgetContent: string | string[] = content;
+	const skillPreamble = resolvedSkills.length > 0 ? buildSkillLoadedMessage(resolvedSkills).content : undefined;
 	if (delegated && effectivePrompt.parallel && effectivePrompt.parallel > 1) {
-		content = Array.from({ length: effectivePrompt.parallel }, (_, index) => `[Parallel subagent ${index + 1}/${effectivePrompt.parallel}]\n\n${prepared.content}`).join("\n\n");
+		const tasks = Array.from({ length: effectivePrompt.parallel }, (_, index) => `[Parallel subagent ${index + 1}/${effectivePrompt.parallel}]\n\n${prepared.content}`);
+		budgetContent = tasks.map((task) => skillPreamble ? `${skillPreamble}\n\n---\n\n${task}` : task);
+		content = tasks.join("\n\n");
+	} else if (delegated && skillPreamble) {
+		budgetContent = `${skillPreamble}\n\n---\n\n${content}`;
 	} else if (runtime.loop && !delegated) {
 		content = `[${representativeLoopContext(runtime.loop, loopRotation.rotationLabel)}]\n\n${prepared.content}`;
+		budgetContent = content;
 	}
 
 	return {
@@ -480,7 +503,7 @@ export async function createPromptDryRun(
 		model: prepared.selectedModel.model,
 		modelAlreadyActive: prepared.selectedModel.alreadyActive,
 		warnings,
-		budget: evaluateDryRunBudget(content, prompt, resolvedSkills),
+		budget: evaluateDryRunBudget(budgetContent, prompt, resolvedSkills),
 		skills: skillPreviews,
 		includeGraph: effectivePrompt.includeGraph,
 		details: { skills: skillPreviews, includeGraph: effectivePrompt.includeGraph },

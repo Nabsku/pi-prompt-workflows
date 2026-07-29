@@ -228,6 +228,7 @@ test("dry-run previews skill-bearing delegated prompts", async () => {
 		assert.equal(result.content, "Body ");
 		assert.doesNotMatch(result.content, /tmux content/);
 		assert.deepEqual(result.skills, [{ skillName: "tmux", skillPath }]);
+		assert.ok(result.budget.bytes > Buffer.byteLength(result.content, "utf8"));
 		const shown = assertOk(await createPromptDryRun(prompt({ skill: "tmux", subagent: true }), options(cwd, { showSkills: true })));
 		assert.deepEqual(shown.skills, [{ skillName: "tmux", skillPath, skillContent: "tmux content" }]);
 	});
@@ -244,6 +245,18 @@ test("returns compare preflight for compare prompts", async () => {
 		assert.equal(result.comparePreflight?.callCount.workers, 1);
 		assert.equal(result.comparePreflight?.slots.workers[0]?.agent, "worker");
 		assert.equal(result.content, "Body ");
+	});
+});
+
+test("compare dry-run budgets effective lineup tasks and blocks exceeded verdicts", async () => {
+	await withTempHome(async (root) => {
+		const result = assertError(await createPromptDryRun(
+			prompt({ workers: [{ agent: "worker", taskSuffix: "this worker-specific suffix makes the effective task much larger" }], budget: { maxTokens: 5 } }),
+			options(root),
+		));
+		assert.equal(result.budget?.verdict, "exceeded");
+		assert.match(result.error, /Compare lineup task estimated .* exceeds configured maximum/);
+		assert.equal(result.comparePreflight?.diagnostics.some((diagnostic) => diagnostic.code === "prompt-budget-exceeded"), true);
 	});
 });
 
@@ -417,6 +430,7 @@ test("parallel delegated dry-run shows each runtime subagent task prefix", async
 		"",
 		"Body file.ts",
 	].join("\n"));
+	assert.ok(result.budget.bytes < Buffer.byteLength(result.content, "utf8"));
 });
 
 test("--cwd is displayed as runtime metadata but skills still resolve from ctx.cwd, matching runtime", async () => {

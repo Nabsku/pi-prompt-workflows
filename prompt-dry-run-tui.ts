@@ -88,18 +88,19 @@ function formatSkills(result: PromptDryRunResult): string {
 }
 
 function formatBudget(result: PromptDryRunResult): string {
-	if (result.status !== "ok") return "Prompt budget unavailable for failed dry-run.";
+	const budget = result.budget;
+	if (!budget) return "Prompt budget unavailable for failed dry-run.";
 	const lines = [
-		`Estimated tokens: ${result.budget.estimatedTokens}`,
-		`UTF-8 bytes: ${result.budget.bytes}`,
-		`Method: ${result.budget.method} (estimate, not model-tokenizer exact)`,
-		`Verdict: ${result.budget.verdict}`,
+		`Estimated tokens: ${budget.estimatedTokens}`,
+		`UTF-8 bytes: ${budget.bytes}`,
+		`Method: ${budget.method} (estimate, not model-tokenizer exact)`,
+		`Verdict: ${budget.verdict}`,
 	];
-	if (result.budget.config?.warnTokens !== undefined) lines.push(`Warning threshold: ${result.budget.config.warnTokens}`);
-	if (result.budget.config?.maxTokens !== undefined) lines.push(`Maximum: ${result.budget.config.maxTokens}`);
-	if (result.budget.sources?.length) {
+	if (budget.config?.warnTokens !== undefined) lines.push(`Warning threshold: ${budget.config.warnTokens}`);
+	if (budget.config?.maxTokens !== undefined) lines.push(`Maximum: ${budget.config.maxTokens}`);
+	if (budget.sources?.length) {
 		lines.push("", "Source estimates (diagnostic, not additive):");
-		for (const source of result.budget.sources) lines.push(`- ${source.kind} ${source.label}: ~${source.estimatedTokens} tokens`);
+		for (const source of budget.sources) lines.push(`- ${source.kind} ${source.label}: ~${source.estimatedTokens} tokens`);
 	}
 	return lines.join("\n");
 }
