@@ -157,6 +157,10 @@ test("renders includes + $@ args through existing loader/preparation path", asyn
 		assert.deepEqual(result.args, ["one", "two"]);
 		assert.deepEqual(result.includeGraph?.edges.map((edge) => edge.includePath), ["args.md"]);
 		assert.equal(result.details.includeGraph, result.includeGraph);
+		assert.deepEqual(result.budget.sources?.map((source) => ({ kind: source.kind, label: source.kind === "prompt" ? source.label : source.filePath?.split("/").at(-1) })), [
+			{ kind: "prompt", label: "args-demo" },
+			{ kind: "include", label: "args.md" },
+		]);
 	});
 });
 

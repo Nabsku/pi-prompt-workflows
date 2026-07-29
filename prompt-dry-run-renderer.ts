@@ -89,6 +89,12 @@ function appendBudget(lines: string[], result: Extract<PromptDryRunResult, { sta
 	lines.push(`- Verdict: ${formatScalar(result.budget.verdict)}`);
 	if (result.budget.config?.warnTokens !== undefined) lines.push(`- Warning threshold: ${formatScalar(result.budget.config.warnTokens)}`);
 	if (result.budget.config?.maxTokens !== undefined) lines.push(`- Maximum: ${formatScalar(result.budget.config.maxTokens)}`);
+	if (result.budget.sources?.length) {
+		lines.push("- Source estimates (diagnostic, not additive):");
+		for (const source of result.budget.sources) {
+			lines.push(`  - ${formatScalar(source.kind)} ${sanitizeInline(source.label)}: ~${formatScalar(source.estimatedTokens)} tokens`);
+		}
+	}
 }
 
 function appendCompareSlots(lines: string[], title: string, slots: BestOfNPreflightSlot[]): void {
