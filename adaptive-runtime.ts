@@ -26,6 +26,7 @@ export interface AdaptiveRuntimeTraceEntry {
 	readonly target: string;
 	readonly outcome: ChainOutcome;
 	readonly changed: boolean;
+	readonly errorReason?: string;
 }
 
 export interface AdaptiveRuntimeReport {
@@ -106,7 +107,8 @@ export async function executeAdaptiveChain<TPrompt, TRun>(
 		const changed = dependencies.compareSnapshots(before, after).changed;
 		const status = dependencies.signal?.aborted ? "failed" : outcomeStatus(outcome);
 		observation = { outcome: status, changed };
-		actions.push({ stepId: step.id, kind: step.kind, target: step.target, outcome: status, changed });
+		const errorReason = "error" in outcome ? String(outcome.error instanceof Error ? outcome.error.message : outcome.error) : undefined;
+		actions.push({ stepId: step.id, kind: step.kind, target: step.target, outcome: status, changed, ...(errorReason ? { errorReason } : {}) });
 		throwIfCancelled();
 	}
 }

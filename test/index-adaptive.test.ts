@@ -56,7 +56,7 @@ for (const [stopReason, expectedTarget] of [["stop", "success"], ["error", "fail
 			writeFileSync(join(cwd, ".pi", "prompts", "first.md"), "---\nmodel: test/model\n---\nFIRST");
 			writeFileSync(join(cwd, ".pi", "prompts", "success.md"), "---\nmodel: test/model\n---\nSUCCESS");
 			writeFileSync(join(cwd, ".pi", "prompts", "failure.md"), "---\nmodel: test/model\n---\nFAILURE");
-			writeFileSync(join(cwd, ".pi", "prompts", "flow.md"), ["---", "chain:", "  - prompt: first", "  - prompt: success", "    when: succeeded", "  - prompt: failure", "    when: failed", "limits:", "  maxSteps: 2", "  maxModelCalls: 2", "---", "ignored"].join("\n"));
+			writeFileSync(join(cwd, ".pi", "prompts", "flow.md"), ["---", "chain:", "  - prompt: first", "  - prompt: success", "    when: succeeded", "  - prompt: failure", "    when: failed", "limits:", "  maxSteps: 3", "  maxModelCalls: 3", "---", "ignored"].join("\n"));
 			const commands = new Map<string, any>();
 			const messages: string[] = [];
 			const branch: any[] = [{ id: "root", type: "message", message: { role: "user", content: "root", timestamp: Date.now() } }];

@@ -44,9 +44,17 @@ test("shared sanitizer covers untrusted render fields across current and future 
 	}
 });
 
-test("shared capped text truncates after sanitization", () => {
-	const rendered = capSanitizedText("safe\u001b[2Jcontent", 7, { originalBytes: 55 });
-	assert.equal(rendered.includes("\u001b"), false);
-	assert.match(rendered, /^safecon/);
-	assert.match(rendered, /original 55 bytes/);
+test("shared capped text truncates after sanitization with its marker inside the cap", () => {
+	const rendered = capSanitizedText("safe\u001b[2Jcontent", 8, { marker: "…" });
+	assert.equal(rendered, "safecon…");
+	assert.equal(rendered.length, 8);
+});
+
+test("shared capped text never splits emoji surrogates at the exact UTF-16 cap", () => {
+	for (const max of [63_999, 64_000, 64_001]) {
+		const rendered = capSanitizedText("😀".repeat(40_000), max);
+		assert.ok(rendered.length <= max);
+		assert.match(rendered, /… \[truncated, original \d+ bytes\]$/);
+		assert.doesNotMatch(rendered, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u);
+	}
 });

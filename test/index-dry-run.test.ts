@@ -174,6 +174,18 @@ test("unknown template reports not found error", async () => {
 	});
 });
 
+test("parser-invalid adaptive graphs stay unregistered but exact plain dry-run shows a blocked report", async () => {
+	await setup(async (_root, cwd, pi, ctx) => {
+		writePrompt(cwd, "broken-flow", ["---", "chain:", "  - prompt: a", "    onSuccess: b", "  - prompt: b", "    onSuccess: a", "---", "ignored"].join("\n"));
+		const output = await captureStdout(() => pi.commands.get("dry-run-prompt")!.handler!("broken-flow --plain", ctx));
+		assert.match(output, /Status: error/);
+		assert.match(output, /Graph unavailable\/invalid/i);
+		assert.match(output, /cycle/i);
+		assertNoExecutionSideEffects(pi);
+		assert.equal(pi.commands.has("broken-flow"), false);
+	});
+});
+
 test("--plain prints complete dry-run error reports to stdout", async () => {
 	await setup(async (_root, cwd, pi, ctx) => {
 		writePrompt(cwd, "chainy", "---\nmodel: anthropic/claude-sonnet-4-20250514\nchain: review -> fix\n---\nignored");
