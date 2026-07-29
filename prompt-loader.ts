@@ -162,6 +162,20 @@ export interface CollectPromptSourceRecordsResult {
 	diagnostics: PromptLoaderDiagnostic[];
 }
 
+/** Select one canonical inventory record per name using the loader's root/layer precedence. */
+export function selectEffectivePromptSourceRecords(records: readonly PromptSourceRecord[]): Map<string, PromptSourceRecord> {
+	const selected = new Map<string, PromptSourceRecord>();
+	for (const record of records) {
+		// Inventory retains these for validation, but they can never own a command name.
+		if (record.skippedReason || RESERVED_COMMAND_NAMES.has(record.promptName)) continue;
+		const existing = selected.get(record.promptName);
+		// Inventory is already in root-priority and lexical traversal order: first in
+		// one source layer wins, while the project layer canonically replaces user.
+		if (!existing || (existing.source === "user" && record.source === "project")) selected.set(record.promptName, record);
+	}
+	return selected;
+}
+
 function createDiagnostic(
 	code: string,
 	filePath: string,

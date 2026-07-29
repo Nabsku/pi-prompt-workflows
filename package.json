@@ -38,6 +38,8 @@
     "chain-parser.ts",
     "adaptive-chain.ts",
     "adaptive-runtime.ts",
+    "adaptive-preflight.ts",
+    "adaptive-renderer.ts",
     "git-worktree-snapshot.ts",
     "compare-defaults.ts",
     "loop-utils.ts",

@@ -3,7 +3,8 @@ import type { PromptDryRunResult } from "./prompt-dry-run.js";
 import { formatComparePreflight } from "./prompt-dry-run-renderer.js";
 import type { PromptIncludeGraph, PromptIncludeGraphEdge, PromptIncludeGraphNode } from "./prompt-includes.js";
 import type { PromptLoaderDiagnostic } from "./prompt-loader.js";
-import { sanitizeForTerminal, truncateForTerminalWidth } from "./render-safe.js";
+import { capSanitizedText, sanitizeForTerminal, truncateForTerminalWidth } from "./render-safe.js";
+import { formatAdaptivePreflight } from "./adaptive-preflight.js";
 
 export interface PromptTemplateCatalogItem {
 	name: string;
@@ -25,6 +26,7 @@ export interface PromptDryRunTuiViewModel {
 		metadata: string;
 		budget: string;
 		compare: string;
+		adaptive: string;
 		skills: string;
 		includes: string;
 		warnings: string;
@@ -180,16 +182,17 @@ export function createPromptDryRunTuiViewModel(result: PromptDryRunResult, plain
 	].join("\n");
 	return {
 		result,
-		plainReport,
+		plainReport: capSanitizedText(plainReport, 64_000, { preserveLineBreaks: true }),
 		panes: {
 			prompt,
 			metadata,
 			budget: formatBudget(result),
 			compare: formatCompare(result),
+			adaptive: result.adaptivePreflight ? formatAdaptivePreflight(result.adaptivePreflight) : "No adaptive chain.",
 			skills: formatSkills(result),
 			includes: formatIncludes(result),
 			warnings,
-			raw: plainReport,
+			raw: capSanitizedText(plainReport, 64_000, { preserveLineBreaks: true }),
 		},
 	};
 }
@@ -279,7 +282,7 @@ export class PromptDryRunPicker implements Component {
 	invalidate(): void {}
 }
 
-const PANE_NAMES = ["Prompt", "Metadata", "Budget", "Compare", "Skills", "Includes", "Warnings", "Raw"] as const;
+const PANE_NAMES = ["Prompt", "Metadata", "Budget", "Compare", "Skills", "Includes", "Warnings", "Raw", "Adaptive"] as const;
 type PaneName = typeof PANE_NAMES[number];
 
 export class PromptDryRunInspector implements Component {
@@ -293,6 +296,7 @@ export class PromptDryRunInspector implements Component {
 		readonly done?: (value: PromptDryRunTuiResult) => void,
 	) {
 		if (viewModel.result.comparePreflight) this.paneIndex = PANE_NAMES.indexOf("Compare");
+		else if (viewModel.result.adaptivePreflight) this.paneIndex = PANE_NAMES.indexOf("Adaptive");
 	}
 
 	private activePane(): PaneName {

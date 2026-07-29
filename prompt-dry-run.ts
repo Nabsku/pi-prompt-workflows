@@ -16,6 +16,7 @@ import { expandCwdPath, type PromptWithModel } from "./prompt-loader.js";
 import { stripPromptPartialFrontmatter, type PromptIncludeGraph } from "./prompt-includes.js";
 import { buildSkillLoadedMessage, getRequestedSkills, resolvePromptSkills, type RuntimeSkillCommand } from "./prompt-skills.js";
 import { DEFAULT_SUBAGENT_NAME } from "./subagent-runtime.js";
+import { prepareAdaptivePreflight, type AdaptivePreflight } from "./adaptive-preflight.js";
 
 export const DRY_RUN_CHAIN_UNSUPPORTED =
 	"Dry-run for chain templates is not supported in v1. Use /validate-prompts for structural checks.";
@@ -73,6 +74,7 @@ export interface PromptDryRunSuccess {
 	includeGraph?: PromptIncludeGraph;
 	runtime: PromptDryRunRuntimeMetadata;
 	comparePreflight?: BestOfNPreflight;
+	adaptivePreflight?: AdaptivePreflight;
 }
 
 export interface PromptDryRunError {
@@ -82,6 +84,7 @@ export interface PromptDryRunError {
 	warnings: string[];
 	runtime?: Partial<PromptDryRunRuntimeMetadata>;
 	comparePreflight?: BestOfNPreflight;
+	adaptivePreflight?: AdaptivePreflight;
 	budget?: PromptBudgetResult;
 }
 
@@ -101,6 +104,8 @@ export interface CreatePromptDryRunOptions {
 	currentModelLabel?: string;
 	/** Prompt name whose first positional arg is compare cwd for path-driven compare templates. */
 	pathArgumentPromptName?: string;
+	/** Effective catalog used for pure adaptive target inspection. */
+	promptCatalog?: ReadonlyMap<string, PromptWithModel>;
 }
 
 export interface ParsedDryRunCommand {
@@ -315,6 +320,7 @@ function parseDryRunArgs(prompt: PromptWithModel, rawArgs: string | undefined, a
 			override: undefined,
 			model: undefined,
 			fork: false,
+			preset: undefined,
 			runtimeCwd: undefined,
 		} as const;
 	}
@@ -348,6 +354,7 @@ function parseDryRunArgs(prompt: PromptWithModel, rawArgs: string | undefined, a
 		override: subagent.override,
 		model: subagent.model,
 		fork: subagent.fork === true,
+		preset: subagent.preset,
 		runtimeCwd: subagent.cwd,
 	} as const;
 }
@@ -360,6 +367,16 @@ export async function createPromptDryRun(
 	const runtime: PromptDryRunRuntimeMetadata = { ...parsed.runtime };
 	const warnings: string[] = [];
 
+	if (prompt.adaptiveChain) {
+		const runtimeCwd = parsed.runtimeCwd ? expandCwdPath(parsed.runtimeCwd) : undefined;
+		if (parsed.runtimeCwd && !runtimeCwd) return errorResult(prompt, "Invalid --cwd path: must be absolute", warnings, runtime);
+		if (runtimeCwd) runtime.cwd = runtimeCwd;
+		const adaptivePreflight = await prepareAdaptivePreflight(prompt, options.promptCatalog ?? new Map(), { cwd: options.cwd, runtimeCwd, args: parsed.args, modelOverride: parsed.model, currentModel: options.currentModel, modelRegistry: options.modelRegistry, commands: options.commands });
+		const unsupportedRuntime = parsed.override || parsed.fork || parsed.preset || parsed.runtime.loop;
+		if (unsupportedRuntime) return { ...errorResult(prompt, "Adaptive chains reject runtime --subagent, --fork, --preset, and --loop modes because they can expand one router action into multiple top-level model calls; exact call reservation is not implemented.", warnings, runtime), adaptivePreflight };
+		if (adaptivePreflight.status === "blocked") return { ...errorResult(prompt, adaptivePreflight.diagnostics.join("\n"), warnings, runtime), adaptivePreflight };
+		return { status: "ok", promptName: prompt.name, content: "", args: parsed.args, modelAlreadyActive: true, warnings, budget: evaluateDryRunBudget("", prompt, []), skills: [], details: { skills: [] }, runtime, adaptivePreflight };
+	}
 	if (prompt.chain) return errorResult(prompt, DRY_RUN_CHAIN_UNSUPPORTED, warnings, runtime);
 	if (hasCompareLineup(prompt)) {
 		const compareSkillResolution = resolvePromptSkills(getRequestedSkills(prompt), options.cwd, options.commands ?? []);

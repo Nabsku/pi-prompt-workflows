@@ -1,0 +1,112 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { createAdaptivePreflight, formatAdaptivePreflight, MAX_ADAPTIVE_PREFLIGHT_STATES, prepareAdaptivePreflight } from "../adaptive-preflight.ts";
+import { formatAdaptiveDecision, formatAdaptiveRuntimeReport } from "../adaptive-renderer.ts";
+import type { PromptWithModel } from "../prompt-loader.ts";
+
+function prompt(name: string, extra: Partial<PromptWithModel> = {}): PromptWithModel {
+	return { name, description: `${name} description`, content: "body", models: ["test/model"], restore: false, source: "user", rootKind: "prompt", filePath: `/tmp/${name}.md`, ...extra } as PromptWithModel;
+}
+
+test("adaptive preflight renders deterministic graph and bounded prompt calls", () => {
+	const wrapper = prompt("flow", { adaptiveChain: { limits: { maxSteps: 3, maxModelCalls: 2 }, steps: [
+		{ id: "inspect", kind: "run", target: "run", when: "always", onFailure: "fix" },
+		{ id: "fix", kind: "prompt", target: "fix", when: "changed" },
+		{ id: "verify", kind: "prompt", target: "verify", when: "always" },
+	] } });
+	const catalog = new Map([["run", prompt("run", { deterministic: { execution: { kind: "run", command: "npm test" }, handoff: "never", nonInteractive: true } })], ["fix", prompt("fix")], ["verify", prompt("verify")]]);
+	const result = createAdaptivePreflight(wrapper, catalog, "/repo");
+	assert.equal(result.status, "ready");
+	assert.deepEqual(result.callBounds, { minimum: 1, maximum: 2, exact: false, explanation: result.callBounds.explanation });
+	const rendered = formatAdaptivePreflight(result);
+	assert.match(rendered, /1\. inspect \[run\]/);
+	assert.match(rendered, /onFailure=fix/);
+	assert.match(rendered, /gate=changed/);
+	assert.match(rendered, /maxSteps=3, maxModelCalls=2/);
+});
+
+test("adaptive preflight accumulates post-render prompt-token estimates across dynamic branches", async () => {
+	const wrapper = prompt("flow", { adaptiveChain: { limits: { maxSteps: 2, maxModelCalls: 2 }, steps: [
+		{ id: "first", kind: "prompt", target: "first", when: "always", onFailure: "end" },
+		{ id: "second", kind: "prompt", target: "second", when: "always" },
+	] } });
+	const catalog = new Map([["first", prompt("first", { content: "Hello $1" })], ["second", prompt("second", { content: "12345678" })]]);
+	const model = { provider: "test", id: "model" } as any;
+	const result = await prepareAdaptivePreflight(wrapper, catalog, { cwd: "/repo", args: ["world"], currentModel: model, modelRegistry: { find: () => model, getAll: () => [model], getAvailable: () => [model] } as any });
+	assert.deepEqual(result.targets.map((target) => target.promptCost?.estimatedTokens), [3, 2]);
+	assert.deepEqual({ min: result.promptCostBounds.minimumCompleting, max: result.promptCostBounds.maximumCompleting, reachable: result.promptCostBounds.maximumReachable, initial: result.promptCostBounds.initialFallthrough }, { min: 3, max: 5, reachable: 5, initial: 5 });
+	assert.match(formatAdaptivePreflight(result), /Prompt-token bounds: completing min=3, completing max=5, reachable max=5/);
+});
+
+test("adaptive initial token path follows the runtime router with succeeded unchanged observations", async () => {
+	const wrapper = prompt("flow", { adaptiveChain: { limits: { maxSteps: 2, maxModelCalls: 2 }, steps: [
+		{ id: "jump", kind: "prompt", target: "jump", when: "always", onSuccess: "gate-1" },
+		{ id: "sequential", kind: "prompt", target: "sequential", when: "always" },
+		{ id: "gate-1", kind: "run", target: "run", when: "changed" },
+		{ id: "gate-2", kind: "run", target: "run", when: "failed" },
+		{ id: "selected", kind: "prompt", target: "selected", when: "always" },
+	] } });
+	const run = prompt("run", { deterministic: { execution: { kind: "run", command: "true" }, handoff: "never", nonInteractive: true } });
+	const catalog = new Map([["jump", prompt("jump", { content: "1111" })], ["sequential", prompt("sequential", { content: "22222222" })], ["run", run], ["selected", prompt("selected", { content: "333333333333" })]]);
+	const model = { provider: "test", id: "model" } as any;
+	const result = await prepareAdaptivePreflight(wrapper, catalog, { cwd: "/repo", args: [], currentModel: model, modelRegistry: { find: () => model, getAll: () => [model], getAvailable: () => [model] } as any });
+	assert.equal(result.promptCostBounds.initialFallthrough, 4);
+	assert.equal(result.promptCostBounds.initialPathStatus, "completed");
+	assert.match(result.promptCostBounds.explanation, /succeeded \+ changed=false/);
+});
+
+test("adaptive initial token path labels baseline limit exhaustion", async () => {
+	const wrapper = prompt("flow", { adaptiveChain: { limits: { maxSteps: 1, maxModelCalls: 1 }, steps: [
+		{ id: "first", kind: "prompt", target: "first", when: "always" },
+		{ id: "second", kind: "prompt", target: "second", when: "always" },
+	] } });
+	const catalog = new Map([["first", prompt("first", { content: "1111" })], ["second", prompt("second", { content: "2222" })]]);
+	const model = { provider: "test", id: "model" } as any;
+	const result = await prepareAdaptivePreflight(wrapper, catalog, { cwd: "/repo", args: [], currentModel: model, modelRegistry: { find: () => model, getAll: () => [model], getAvailable: () => [model] } as any });
+	assert.equal(result.promptCostBounds.initialFallthrough, 1);
+	assert.equal(result.promptCostBounds.initialPathStatus, "exhausted");
+	assert.match(formatAdaptivePreflight(result), /initial baseline=1 .*exhausted/);
+});
+
+test("adaptive preflight fails closed for missing, kind mismatch and multi-call target", () => {
+	const wrapper = prompt("flow", { adaptiveChain: { limits: { maxSteps: 3, maxModelCalls: 3 }, steps: [
+		{ id: "a", kind: "prompt", target: "missing", when: "always" },
+		{ id: "b", kind: "run", target: "plain", when: "always" },
+		{ id: "c", kind: "prompt", target: "multi", when: "always" },
+	] } });
+	const result = createAdaptivePreflight(wrapper, new Map([["plain", prompt("plain")], ["multi", prompt("multi", { parallel: 2 })]]), "/repo");
+	assert.equal(result.status, "blocked");
+	assert.match(result.diagnostics.join("\n"), /Missing prompt target/);
+	assert.match(result.diagnostics.join("\n"), /Kind mismatch/);
+	assert.match(result.diagnostics.join("\n"), /multiple top-level model calls/);
+});
+
+test("adaptive preflight bounds adversarial branching by deterministic state count", () => {
+	const steps = Array.from({ length: 128 }, (_, index) => ({ id: `step-${index}`, kind: "prompt" as const, target: "target", when: "always" as const, onFailure: index + 2 < 128 ? `step-${index + 2}` : undefined }));
+	const wrapper = prompt("branching", { adaptiveChain: { limits: { maxSteps: 128, maxModelCalls: 128 }, steps } });
+	const started = performance.now();
+	const result = createAdaptivePreflight(wrapper, new Map([["target", prompt("target")]]), "/repo");
+	assert.equal(result.status, "blocked");
+	assert.equal(result.analysis.complete, false);
+	assert.ok(result.analysis.analyzedStates <= MAX_ADAPTIVE_PREFLIGHT_STATES);
+	assert.equal(result.analysis.enqueuedStates, MAX_ADAPTIVE_PREFLIGHT_STATES);
+	assert.equal(result.callBounds.exact, false);
+	assert.equal(result.promptCostBounds.exact, false);
+	assert.match(result.callBounds.explanation, /Unavailable.*conservative/);
+	assert.deepEqual(result.diagnostics, [`analysis inconclusive: state limit ${MAX_ADAPTIVE_PREFLIGHT_STATES} exceeded`]);
+	assert.ok(performance.now() - started < 2_000);
+	const rendered = formatAdaptivePreflight(result);
+	assert.match(rendered, /inconclusive/);
+	assert.match(rendered, /runtime revalidates them before execution/);
+	assert.doesNotMatch(rendered, /\u001b|\r/);
+});
+
+test("adaptive renderers sanitize and cap untrusted fields and show outcomes", () => {
+	const bad = `evil\u001b[31m\n${"x".repeat(1000)}`;
+	const text = formatAdaptiveDecision({ sourceStep: bad, observedOutcome: "failed", matchedRule: "onFailure", matchedGate: "always", selectedTarget: bad, reason: "selected" });
+	assert.doesNotMatch(text, /\u001b/);
+	assert.ok(text.length < 700);
+	const report = formatAdaptiveRuntimeReport(bad, { state: { status: "completed", currentStep: null, stepsTaken: 1, modelCalls: 1, visited: ["a"], executed: ["a"], trace: [] }, decisions: [], actions: [{ stepId: bad, kind: "prompt", target: bad, outcome: "blocked", changed: false }] });
+	assert.match(report, /blocked; changed=false/);
+	assert.doesNotMatch(report, /\u001b/);
+});
