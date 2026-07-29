@@ -201,13 +201,17 @@ function expectedArtifactNames(lineup: Record<string, unknown> | undefined, diag
 	const names: string[] = [];
 	const workers = safeArray(lineup?.workers);
 	const reviewers = safeArray(lineup?.reviewers);
-	const workerCount = Math.min(workers.length, MAX_LINEUP_ARTIFACT_SLOTS);
-	const reviewerCount = Math.min(reviewers.length, MAX_LINEUP_ARTIFACT_SLOTS);
+	const produced = safeJsonObject(lineup?.artifactsProduced);
+	const producedWorkers = typeof produced?.workers === "number" && Number.isInteger(produced.workers) && produced.workers >= 0 ? produced.workers : workers.length;
+	const producedReviewers = typeof produced?.reviewers === "number" && Number.isInteger(produced.reviewers) && produced.reviewers >= 0 ? produced.reviewers : reviewers.length;
+	const workerCount = Math.min(producedWorkers, workers.length, MAX_LINEUP_ARTIFACT_SLOTS);
+	const reviewerCount = Math.min(producedReviewers, reviewers.length, MAX_LINEUP_ARTIFACT_SLOTS);
 	if (workers.length > MAX_LINEUP_ARTIFACT_SLOTS) diagnostics.push(`lineup.json has ${workers.length} worker slots; artifact inventory capped at ${MAX_LINEUP_ARTIFACT_SLOTS}.`);
 	if (reviewers.length > MAX_LINEUP_ARTIFACT_SLOTS) diagnostics.push(`lineup.json has ${reviewers.length} reviewer slots; artifact inventory capped at ${MAX_LINEUP_ARTIFACT_SLOTS}.`);
 	for (let index = 0; index < workerCount; index += 1) names.push(`worker-${index + 1}.md`);
 	for (let index = 0; index < reviewerCount; index += 1) names.push(`reviewer-${index + 1}.md`);
-	if (lineup?.finalApplier !== undefined && lineup.finalApplier !== null) names.push("final-applier.md");
+	const producedFinalApplier = typeof produced?.finalApplier === "boolean" ? produced.finalApplier : lineup?.finalApplier !== undefined && lineup.finalApplier !== null;
+	if (producedFinalApplier && lineup?.finalApplier !== undefined && lineup.finalApplier !== null) names.push("final-applier.md");
 	return names;
 }
 
