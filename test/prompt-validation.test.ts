@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 import { formatPromptValidationReport, validatePromptTemplates } from "../prompt-validation.js";
 
 function withTempHome(run: (root: string) => void) {
@@ -1267,4 +1268,83 @@ test("validatePromptTemplates evaluates conditionals against pinned models", () 
 		assert.equal(result.diagnostics.some((item) => item.code === "prompt-budget-exceeded"), true);
 		assert.equal(result.budgets?.find((budget) => budget.promptName === "pinned-within")?.verdict, "within");
 	});
+});
+
+test("validatePromptTemplates preflights structured adaptive targets and reports bounded summary", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "leaf.md"), "---\nbudget:\n  maxTokens: 100\n---\nleaf");
+		writeFileSync(join(cwd, ".pi", "prompts", "flow.md"), "---\nchain:\n  - id: first\n    prompt: leaf\nlimits:\n  maxSteps: 1\n  maxModelCalls: 1\n---\nignored");
+		const result = validatePromptTemplates(cwd);
+		assert.equal(result.ok, true);
+		assert.equal(result.adaptiveChains?.[0]?.preflight.callBounds.maximum, 1);
+		assert.match(formatPromptValidationReport(result), /Adaptive chains .*runtime revalidates/);
+	});
+});
+
+test("validatePromptTemplates does not Git-check an unselected initial changed-gated target", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "leaf.md"), "---\nmodel: test/model\n---\nleaf");
+		writeFileSync(join(cwd, ".pi", "prompts", "flow.md"), "---\nchain:\n  - prompt: leaf\n    when: changed\n---\nignored");
+		const result = validatePromptTemplates(cwd);
+		assert.equal(result.ok, true);
+		assert.equal(result.diagnostics.some((item) => item.code === "adaptive-changed-requires-git"), false);
+	});
+});
+
+test("adaptive validation report sanitizes and caps malicious target diagnostics", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		const bad = `missing-${"x".repeat(5000)}\\nforged`;
+		writeFileSync(join(cwd, ".pi", "prompts", "flow.md"), `---\nchain:\n  - prompt: ${bad}\n---\nignored`);
+		const report = formatPromptValidationReport(validatePromptTemplates(cwd));
+		assert.doesNotMatch(report, /\u001b|\r/);
+		assert.ok(report.length < 10000);
+		assert.doesNotMatch(report, /\nforged\n/);
+	});
+});
+
+test("changed-gate validation checks every selected predecessor cwd, not the gated target", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project"); const gitCwd = join(cwd, "repo");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true }); mkdirSync(gitCwd, { recursive: true });
+		execFileSync("git", ["init", "-q"], { cwd: gitCwd });
+		writeFileSync(join(cwd, ".pi", "prompts", "mutate.md"), "mutate");
+		writeFileSync(join(cwd, ".pi", "prompts", "review.md"), "review");
+		writeFileSync(join(cwd, ".pi", "prompts", "flow.md"), `---\ncwd: ${gitCwd}\nchain:\n  - id: mutate\n    prompt: mutate\n    onSuccess: skipped\n  - id: skipped\n    prompt: review\n    when: failed\n  - id: changed-review\n    prompt: review\n    when: changed\n---\nignored`);
+		const valid = validatePromptTemplates(cwd);
+		assert.equal(valid.diagnostics.some((item) => item.code === "adaptive-changed-requires-git"), false, valid.diagnostics.map((item) => item.message).join("\n"));
+		writeFileSync(join(cwd, ".pi", "prompts", "flow.md"), `---\ncwd: ${cwd}\nchain:\n  - id: mutate\n    prompt: mutate\n    onSuccess: skipped\n  - id: skipped\n    prompt: review\n    when: failed\n  - id: changed-review\n    prompt: review\n    when: changed\n---\nignored`);
+		const invalid = validatePromptTemplates(cwd);
+		const diagnostic = invalid.diagnostics.find((item) => item.code === "adaptive-changed-requires-git");
+		assert.match(diagnostic?.message ?? "", /selected predecessor "mutate" \(prompt:mutate\)/);
+		assert.doesNotMatch(diagnostic?.message ?? "", /prompt:review.*runtime-effective/);
+	});
+});
+
+test("changed-gate validation handles run predecessors reached by explicit transitions", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project"); const gitCwd = join(cwd, "repo");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true }); mkdirSync(gitCwd, { recursive: true });
+		execFileSync("git", ["init", "-q"], { cwd: gitCwd });
+		writeFileSync(join(cwd, ".pi", "prompts", "run.md"), `---\ndeterministic:\n  run:\n    command: git\n    args: [status, --porcelain=v1]\n  cwd: ${gitCwd}\n  handoff: never\n---\n`);
+		writeFileSync(join(cwd, ".pi", "prompts", "review.md"), "review");
+		writeFileSync(join(cwd, ".pi", "prompts", "flow.md"), `---\ncwd: ${gitCwd}\nchain:\n  - id: check\n    run: run\n    onFailure: changed-review\n  - id: unused\n    prompt: review\n  - id: changed-review\n    prompt: review\n    when: changed\n---\nignored`);
+		const result = validatePromptTemplates(cwd);
+		assert.equal(result.diagnostics.some((item) => item.code === "adaptive-changed-requires-git"), false, result.diagnostics.map((item) => item.message).join("\n"));
+	});
+});
+
+test("validation report has aggregate line and UTF-8 byte caps with a safe omission marker", () => {
+	const malicious = "\u001b[31m" + "😀".repeat(40000) + "\ud800";
+	const diagnostics = Array.from({ length: 1000 }, (_, index) => ({ code: `bad-${index}`, source: "project" as const, filePath: malicious, message: malicious, key: String(index) }));
+	const report = formatPromptValidationReport({ ok: false, promptCount: 0, sourceSummary: { projectPrompts: 0, userPrompts: 0, projectLibraryCommands: 0, userLibraryCommands: 0, projectHiddenLibraryCommands: 0, userHiddenLibraryCommands: 0, projectLibraryFragments: 0, userLibraryFragments: 0 }, diagnostics, includeGraphs: [] });
+	assert.ok(Buffer.byteLength(report, "utf8") <= 65536);
+	assert.ok(report.split("\n").length <= 400);
+	assert.match(report, /omitted/);
+	assert.doesNotMatch(report, /\x1b|[\u0000-\u0008\u000b-\u001f\u007f-\u009f]|[\ud800-\udbff](?![\udc00-\udfff])|(?:^|[^\ud800-\udbff])[\udc00-\udfff]/);
 });

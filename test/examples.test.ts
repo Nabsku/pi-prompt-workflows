@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
 import { loadPromptsWithModel } from "../prompt-loader.js";
+import { validatePromptTemplates } from "../prompt-validation.js";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 
@@ -16,6 +18,7 @@ function withExamplePrompts(run: (cwd: string) => void) {
 		const promptDir = join(cwd, ".pi", "prompts");
 		mkdirSync(promptDir, { recursive: true });
 		cpSync(join(repoRoot, "examples"), promptDir, { recursive: true });
+		execFileSync("git", ["init", "-q"], { cwd });
 		run(cwd);
 	} finally {
 		process.env.HOME = previousHome;
@@ -29,11 +32,89 @@ test("packaged examples load as prompt commands", () => {
 		const diagnostics = result.diagnostics.map((item) => item.message).join("\n");
 
 		assert.equal(diagnostics, "");
-		assert.deepEqual([...result.prompts.keys()].sort(), ["best-of-n", "best-of-n-smoke", "hello", "review"]);
+		assert.deepEqual([...result.prompts.keys()].sort(), ["adaptive-review", "adaptive-status", "adaptive-test", "adaptive-validate", "best-of-n", "best-of-n-smoke", "hello", "review"]);
 		assert.deepEqual(result.prompts.get("hello")?.models, []);
 		assert.deepEqual(result.prompts.get("review")?.models, []);
 		assert.equal(result.prompts.get("best-of-n-smoke")?.workers?.length, 1);
 		assert.equal(result.prompts.get("best-of-n-smoke")?.reviewers?.length, 1);
 		assert.equal(result.prompts.get("best-of-n-smoke")?.finalApplier, undefined);
+	});
+});
+
+test("packaged adaptive examples load and validate with their companion targets", () => {
+	withExamplePrompts((cwd) => {
+		const loaded = loadPromptsWithModel(cwd, true, { includeAdaptiveChains: true });
+		assert.ok(loaded.prompts.has("adaptive-fix-review"));
+		assert.ok(loaded.prompts.has("adaptive-validation-review"));
+		const validation = validatePromptTemplates(cwd);
+		assert.equal(validation.ok, true, validation.diagnostics.map((item) => item.message).join("\n"));
+		assert.equal(validation.adaptiveChains?.length, 2);
+	});
+});
+
+test("packaged Git checks use exact hardened argv and bypass configured helpers", () => {
+	withExamplePrompts((cwd) => {
+		const loaded = loadPromptsWithModel(cwd);
+		const expectedStatusArgs = ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v1"];
+		const expectedDiffArgs = ["--no-pager", "diff", "--no-ext-diff", "--no-textconv", "--check"];
+		for (const name of ["adaptive-status", "adaptive-validate"]) {
+			const execution = loaded.prompts.get(name)?.deterministic?.execution;
+			assert.equal(execution?.kind, "command");
+			assert.equal(execution?.command, "git");
+			assert.deepEqual(execution?.args, expectedStatusArgs);
+		}
+		const diffExecution = loaded.prompts.get("adaptive-test")?.deterministic?.execution;
+		assert.equal(diffExecution?.kind, "command");
+		assert.equal(diffExecution?.command, "git");
+		assert.deepEqual(diffExecution?.args, expectedDiffArgs);
+
+		const markerDir = join(cwd, "helper-markers");
+		mkdirSync(markerDir);
+		const helper = (name: string) => {
+			const script = join(markerDir, `${name}.sh`);
+			writeFileSync(script, `#!/bin/sh\nprintf invoked >${JSON.stringify(join(markerDir, name))}\nexit 97\n`);
+			chmodSync(script, 0o755);
+			return script;
+		};
+		const markers = {
+			fsmonitor: join(markerDir, "fsmonitor"),
+			externalDiff: join(markerDir, "external-diff"),
+			textconv: join(markerDir, "textconv"),
+			pager: join(markerDir, "pager"),
+			editor: join(markerDir, "editor"),
+		};
+		const fsmonitor = helper("fsmonitor");
+		const externalDiff = helper("external-diff");
+		const textconv = helper("textconv");
+		const pager = helper("pager");
+		const editor = helper("editor");
+
+		writeFileSync(join(cwd, ".gitattributes"), "sample.txt diff=hostile\n");
+		writeFileSync(join(cwd, "sample.txt"), "clean\n");
+		execFileSync("git", ["add", ".gitattributes", "sample.txt"], { cwd });
+		execFileSync("git", ["-c", "user.name=Example Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture"], { cwd });
+		execFileSync("git", ["config", "core.fsmonitor", fsmonitor], { cwd });
+		execFileSync("git", ["config", "diff.external", externalDiff], { cwd });
+		execFileSync("git", ["config", "diff.hostile.textconv", textconv], { cwd });
+		writeFileSync(join(cwd, "sample.txt"), "changed\n");
+
+		const hostileEnv = { ...process.env, GIT_PAGER: pager, PAGER: pager, GIT_EDITOR: editor, EDITOR: editor };
+		const indexPath = join(cwd, ".git", "index");
+		const indexBefore = readFileSync(indexPath);
+		for (const name of ["adaptive-status", "adaptive-validate"]) {
+			const execution = loaded.prompts.get(name)!.deterministic!.execution;
+			assert.equal(execution.kind, "command");
+			if (execution.kind !== "command") continue;
+			execFileSync(execution.command, execution.args, { cwd, env: hostileEnv, timeout: 5000 });
+			assert.deepEqual(readFileSync(indexPath), indexBefore, `${name} must not refresh the index`);
+		}
+		assert.equal(existsSync(markers.fsmonitor), false, "status must disable configured fsmonitor");
+
+		assert.equal(diffExecution!.kind, "command");
+		if (diffExecution!.kind !== "command") return;
+		execFileSync(diffExecution!.command, diffExecution!.args, { cwd, env: hostileEnv, timeout: 5000 });
+		for (const marker of [markers.externalDiff, markers.textconv, markers.pager, markers.editor]) {
+			assert.equal(existsSync(marker), false, `helper must not run: ${marker}`);
+		}
 	});
 });

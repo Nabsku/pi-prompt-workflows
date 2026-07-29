@@ -4,7 +4,7 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, readlin
 
 export type GitWorktreeSnapshotErrorCode =
 	| "NOT_GIT_REPOSITORY" | "GIT_NOT_FOUND" | "INVALID_CWD" | "PERMISSION_DENIED"
-	| "GIT_ERROR" | "LIMIT_EXCEEDED" | "INVALID_STATUS" | "INVALID_INDEX"
+	| "GIT_ERROR" | "GIT_TIMEOUT" | "SNAPSHOT_TIMEOUT" | "LIMIT_EXCEEDED" | "INVALID_STATUS" | "INVALID_INDEX"
 	| "UNSUPPORTED_SUBMODULE" | "UNSAFE_PATH" | "FILE_LIMIT_EXCEEDED"
 	| "BYTE_LIMIT_EXCEEDED" | "IO_ERROR" | "INVALID_SNAPSHOT" | "RACE_DETECTED";
 
@@ -31,29 +31,45 @@ export interface GitWorktreeSnapshot {
 	readonly indexTree: string;
 	readonly status: string; readonly files: readonly GitWorktreeFileSnapshot[]; readonly index: readonly GitIndexPathSnapshot[];
 }
-export interface CaptureGitWorktreeSnapshotOptions { readonly maxFiles?: number; readonly maxBytes?: number; readonly maxGitOutputBytes?: number; }
+export interface CaptureGitWorktreeSnapshotOptions { readonly maxFiles?: number; readonly maxBytes?: number; readonly maxGitOutputBytes?: number; readonly deadlineMs?: number; }
 const DEFAULT_MAX_FILES = 10_000, DEFAULT_MAX_BYTES = 64 * 1024 * 1024, DEFAULT_MAX_GIT_OUTPUT_BYTES = 64 * 1024 * 1024;
+/** One monotonic wall-clock budget shared by every Git subprocess in a capture. */
+export const GIT_WORKTREE_SNAPSHOT_DEADLINE_MS = 10_000;
+const GIT_SAFE_GLOBAL_ARGS = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.external=", "-c", "core.pager=cat"] as const;
+
 function positiveLimit(value: number | undefined, fallback: number, name: string): number {
 	const result = value ?? fallback;
 	if (!Number.isSafeInteger(result) || result < 0) throw new GitWorktreeSnapshotError("INVALID_SNAPSHOT", `${name} must be a non-negative safe integer`);
 	return result;
 }
 function classifyExecError(cause: any, fallback: GitWorktreeSnapshotErrorCode): GitWorktreeSnapshotErrorCode {
+	if (cause?.code === "ETIMEDOUT" || cause?.signal === "SIGTERM" && cause?.status === null) return "GIT_TIMEOUT";
 	if (cause?.code === "ENOENT") return "GIT_NOT_FOUND";
 	if (cause?.code === "ENOTDIR") return "INVALID_CWD";
 	if (cause?.code === "EACCES" || cause?.code === "EPERM") return "PERMISSION_DENIED";
 	if (cause?.code === "ENOBUFS" || /maxBuffer/i.test(String(cause?.message))) return "LIMIT_EXCEEDED";
 	return fallback;
 }
-function runGit(cwd: string, args: string[], fallback: GitWorktreeSnapshotErrorCode, maxBuffer: number, input?: Buffer): Buffer {
-	try { return execFileSync("git", args, { cwd, input, encoding: "buffer", stdio: [input ? "pipe" : "ignore", "pipe", "pipe"], maxBuffer }); }
+interface CaptureDeadline { readonly expiresAt: number; }
+function remainingTimeout(deadline: CaptureDeadline): number {
+	const remaining = Math.floor(deadline.expiresAt - performance.now());
+	if (remaining <= 0) throw new GitWorktreeSnapshotError("SNAPSHOT_TIMEOUT", "Git working-tree snapshot aggregate deadline exceeded");
+	return remaining;
+}
+function runGit(cwd: string, args: string[], fallback: GitWorktreeSnapshotErrorCode, maxBuffer: number, deadline: CaptureDeadline, input?: Buffer): Buffer {
+	const safeArgs = [...GIT_SAFE_GLOBAL_ARGS, ...args];
+	try {
+		return execFileSync("git", safeArgs, { cwd, input, encoding: "buffer", maxBuffer, timeout: remainingTimeout(deadline), killSignal: "SIGTERM", env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "Never", GIT_PAGER: "cat", PAGER: "cat" } }) as Buffer;
+	}
 	catch (cause: any) {
+		if (cause instanceof GitWorktreeSnapshotError) throw cause;
 		let code = classifyExecError(cause, fallback);
+		if (code === "GIT_TIMEOUT") code = performance.now() >= deadline.expiresAt ? "SNAPSHOT_TIMEOUT" : "GIT_TIMEOUT";
 		if (fallback === "NOT_GIT_REPOSITORY" && code === fallback) {
 			const stderr = Buffer.isBuffer(cause?.stderr) ? cause.stderr.toString() : String(cause?.stderr ?? "");
 			if (!/not a git repository/i.test(stderr)) code = "GIT_ERROR";
 		}
-		throw new GitWorktreeSnapshotError(code, code === "NOT_GIT_REPOSITORY" ? `Not a Git repository: ${cwd}` : `Git command failed: git ${args.join(" ")}`, { cause });
+		throw new GitWorktreeSnapshotError(code, code === "NOT_GIT_REPOSITORY" ? `Not a Git repository: ${cwd}` : code === "GIT_TIMEOUT" || code === "SNAPSHOT_TIMEOUT" ? `Git working-tree snapshot timed out while running git ${args.join(" ")}` : `Git command failed: git ${args.join(" ")}`, { cause });
 	}
 }
 function oneLine(output: Buffer, label: string): string {
@@ -120,13 +136,13 @@ function fingerprint(root: Buffer, path: Buffer, remaining: number): { snapshot:
 	if (stat.isFile()) { const h = hashFile(full, stat, remaining); return { snapshot: { path: path.toString("base64"), kind: "file", mode, size: h.size, fingerprint: h.fingerprint }, consumed: h.consumed }; }
 	throw new GitWorktreeSnapshotError("UNSAFE_PATH", "Refusing to snapshot a special file or directory");
 }
-function resolveRepositoryIdentity(cwd: string, maxGit: number): { canonicalRoot: string; repositoryIdentity: GitWorktreeSnapshot["repositoryIdentity"] } {
+function resolveRepositoryIdentity(cwd: string, maxGit: number, deadline: CaptureDeadline): { canonicalRoot: string; repositoryIdentity: GitWorktreeSnapshot["repositoryIdentity"] } {
 	try {
-		const canonicalRoot = realpathSync(oneLine(runGit(cwd, ["rev-parse", "--show-toplevel"], "NOT_GIT_REPOSITORY", maxGit), "repository root"));
+		const canonicalRoot = realpathSync(oneLine(runGit(cwd, ["rev-parse", "--show-toplevel"], "NOT_GIT_REPOSITORY", maxGit, deadline), "repository root"));
 		const rootLstat = lstatSync(canonicalRoot), rootStat = statSync(canonicalRoot);
 		if (!rootLstat.isDirectory() || !rootStat.isDirectory() || rootLstat.dev !== rootStat.dev || rootLstat.ino !== rootStat.ino) throw new GitWorktreeSnapshotError("RACE_DETECTED", "Git working-tree root changed while resolving repository identity");
-		const gitDir = realpathSync(oneLine(runGit(canonicalRoot, ["rev-parse", "--absolute-git-dir"], "GIT_ERROR", maxGit), "git dir"));
-		const commonRaw = oneLine(runGit(canonicalRoot, ["rev-parse", "--git-common-dir"], "GIT_ERROR", maxGit), "git common dir");
+		const gitDir = realpathSync(oneLine(runGit(canonicalRoot, ["rev-parse", "--absolute-git-dir"], "GIT_ERROR", maxGit, deadline), "git dir"));
+		const commonRaw = oneLine(runGit(canonicalRoot, ["rev-parse", "--git-common-dir"], "GIT_ERROR", maxGit, deadline), "git common dir");
 		const commonDir = realpathSync(commonRaw.startsWith("/") ? commonRaw : `${canonicalRoot}/${commonRaw}`);
 		const gitStat = statSync(gitDir), commonStat = statSync(commonDir);
 		return { canonicalRoot, repositoryIdentity: { rootFileId: `${rootStat.dev}:${rootStat.ino}`, gitDir, commonDir, gitDirFileId: `${gitStat.dev}:${gitStat.ino}`, commonDirFileId: `${commonStat.dev}:${commonStat.ino}` } };
@@ -134,20 +150,22 @@ function resolveRepositoryIdentity(cwd: string, maxGit: number): { canonicalRoot
 }
 export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorktreeSnapshotOptions = {}): GitWorktreeSnapshot {
 	const maxFiles = positiveLimit(options.maxFiles, DEFAULT_MAX_FILES, "maxFiles"), maxBytes = positiveLimit(options.maxBytes, DEFAULT_MAX_BYTES, "maxBytes"), maxGit = positiveLimit(options.maxGitOutputBytes, DEFAULT_MAX_GIT_OUTPUT_BYTES, "maxGitOutputBytes");
-	const { canonicalRoot, repositoryIdentity } = resolveRepositoryIdentity(cwd, maxGit);
+	const deadlineMs = positiveLimit(options.deadlineMs, GIT_WORKTREE_SNAPSHOT_DEADLINE_MS, "deadlineMs");
+	const deadline = { expiresAt: performance.now() + deadlineMs };
+	const { canonicalRoot, repositoryIdentity } = resolveRepositoryIdentity(cwd, maxGit, deadline);
 	let symbolic = "";
-	try { symbolic = oneLine(runGit(canonicalRoot, ["symbolic-ref", "-q", "HEAD"], "GIT_ERROR", maxGit), "symbolic HEAD"); }
+	try { symbolic = oneLine(runGit(canonicalRoot, ["symbolic-ref", "-q", "HEAD"], "GIT_ERROR", maxGit, deadline), "symbolic HEAD"); }
 	catch (error: any) { const status = error?.cause?.status; if (status !== 1) throw error; }
 	let headIdentity: string;
 	try {
-		const oid = oneLine(runGit(canonicalRoot, ["rev-parse", "--verify", "HEAD^{commit}"], "GIT_ERROR", maxGit), "HEAD");
+		const oid = oneLine(runGit(canonicalRoot, ["rev-parse", "--verify", "HEAD^{commit}"], "GIT_ERROR", maxGit, deadline), "HEAD");
 		headIdentity = symbolic ? `symbolic:${symbolic}:${oid}` : `detached:${oid}`;
 	} catch (error) {
 		if (!symbolic) throw error;
 		headIdentity = `unborn:${symbolic}`;
 	}
-	let indexTree: string; try { indexTree = oneLine(runGit(canonicalRoot, ["write-tree"], "INVALID_INDEX", maxGit), "index tree"); } catch (error) { if (error instanceof GitWorktreeSnapshotError && error.code === "INVALID_INDEX") throw error; throw error; }
-	const status = runGit(canonicalRoot, ["-c", "core.quotepath=false", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"], "GIT_ERROR", maxGit);
+	let indexTree: string; try { indexTree = oneLine(runGit(canonicalRoot, ["write-tree"], "INVALID_INDEX", maxGit, deadline), "index tree"); } catch (error) { if (error instanceof GitWorktreeSnapshotError && error.code === "INVALID_INDEX") throw error; throw error; }
+	const status = runGit(canonicalRoot, ["-c", "core.quotepath=false", "status", "--no-ahead-behind", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"], "GIT_ERROR", maxGit, deadline);
 	const paths = parseStatusPaths(status); if (paths.length > maxFiles) throw new GitWorktreeSnapshotError("FILE_LIMIT_EXCEEDED", `Working-tree snapshot file limit exceeded (${paths.length} > ${maxFiles})`);
 	const indexParts: Buffer[] = []; let indexBytes = 0;
 	// This Git lacks ls-files --pathspec-from-file. Query each already-bounded status path
@@ -155,7 +173,7 @@ export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorkt
 	for (const path of paths) {
 		const text = path.toString("utf8");
 		if (!Buffer.from(text).equals(path)) throw new GitWorktreeSnapshotError("UNSAFE_PATH", "Git path is not valid UTF-8 on this platform");
-		const part = runGit(canonicalRoot, ["--literal-pathspecs", "ls-files", "--stage", "-z", "--", text], "GIT_ERROR", maxGit);
+		const part = runGit(canonicalRoot, ["--literal-pathspecs", "ls-files", "--stage", "-z", "--", text], "GIT_ERROR", maxGit, deadline);
 		indexBytes += part.length;
 		if (indexBytes > maxGit) throw new GitWorktreeSnapshotError("LIMIT_EXCEEDED", "Git index query output limit exceeded");
 		indexParts.push(part);
@@ -163,7 +181,7 @@ export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorkt
 	const indexOutput = Buffer.concat(indexParts, indexBytes);
 	const index = fingerprintIndex(paths, indexOutput, maxFiles * 3); const files: GitWorktreeFileSnapshot[] = []; let consumed = 0; const rootBytes = Buffer.from(canonicalRoot);
 	for (const path of paths) { const result = fingerprint(rootBytes, path, maxBytes - consumed); consumed += result.consumed; files.push(result.snapshot); }
-	const finalIdentity = resolveRepositoryIdentity(canonicalRoot, maxGit);
+	const finalIdentity = resolveRepositoryIdentity(canonicalRoot, maxGit, deadline);
 	if (finalIdentity.canonicalRoot !== canonicalRoot || finalIdentity.repositoryIdentity.rootFileId !== repositoryIdentity.rootFileId || finalIdentity.repositoryIdentity.gitDir !== repositoryIdentity.gitDir || finalIdentity.repositoryIdentity.commonDir !== repositoryIdentity.commonDir || finalIdentity.repositoryIdentity.gitDirFileId !== repositoryIdentity.gitDirFileId || finalIdentity.repositoryIdentity.commonDirFileId !== repositoryIdentity.commonDirFileId) throw new GitWorktreeSnapshotError("RACE_DETECTED", "Git repository identity changed during snapshot capture");
 	return { version: 1, repositoryRoot: rootBytes.toString("base64"), repositoryIdentity, headIdentity, indexTree, status: status.toString("base64"), files, index };
 }

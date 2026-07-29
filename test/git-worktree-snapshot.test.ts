@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -25,6 +25,14 @@ function changed(cwd: string, action: () => void): boolean {
 	const before = captureGitWorktreeSnapshot(cwd);
 	action();
 	return compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed;
+}
+function snapshotProbe(cwd: string, bin: string, deadlineMs?: number): { ok: boolean; code?: string; message?: string; cleanupStatus?: string } {
+	const moduleUrl = new URL("../git-worktree-snapshot.ts", import.meta.url).href;
+	const source = `import { captureGitWorktreeSnapshot } from ${JSON.stringify(moduleUrl)};\ntry { captureGitWorktreeSnapshot(${JSON.stringify(cwd)}, ${JSON.stringify(deadlineMs === undefined ? {} : { deadlineMs })}); console.log(JSON.stringify({ ok: true })); } catch (error) { console.log(JSON.stringify({ ok: false, code: error?.code, message: error?.message, cleanupStatus: error?.cause?.cleanupStatus })); }`;
+	return JSON.parse(execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", source], {
+		encoding: "utf8",
+		env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+	}).trim());
 }
 
 test("clean to unchanged, tracked edit, and untracked creation", () => {
@@ -151,10 +159,9 @@ test("snapshot validation rejects accessors, toJSON, unknown keys, and malformed
 
 test("capture revalidates repository identity after all work", () => {
 	const cwd = repo(), bin = mkdtempSync(join(tmpdir(), "git-wrapper-")), count = join(bin, "count"); mkdirSync(bin, { recursive: true });
-	writeFileSync(join(bin, "git"), `#!/bin/sh\nif [ "$1 $2" = "rev-parse --show-toplevel" ]; then\n  /usr/bin/git "$@"; rc=$?\n  n=0; [ -f '${count}' ] && n=$(cat '${count}'); n=$((n+1)); printf %s "$n" > '${count}'\n  if [ "$n" = 2 ]; then mv .git .git-before-swap && cp -R .git-before-swap .git; fi\n  exit $rc\nfi\nexec /usr/bin/git "$@"\n`); chmodSync(join(bin, "git"), 0o755);
-	const oldPath = process.env.PATH; process.env.PATH = `${bin}:${oldPath}`;
-	try { assert.throws(() => captureGitWorktreeSnapshot(cwd), (e: unknown) => e instanceof GitWorktreeSnapshotError && e.code === "RACE_DETECTED"); }
-	finally { process.env.PATH = oldPath; }
+	writeFileSync(join(bin, "git"), `#!/bin/sh\ncase " $* " in *" rev-parse --show-toplevel "*)\n  /usr/bin/git "$@"; rc=$?\n  n=0; [ -f '${count}' ] && n=$(cat '${count}'); n=$((n+1)); printf %s "$n" > '${count}'\n  if [ "$n" = 2 ]; then mv .git .git-before-swap && cp -R .git-before-swap .git; fi\n  exit $rc\n  ;;\nesac\nexec /usr/bin/git "$@"\n`); chmodSync(join(bin, "git"), 0o755);
+	const result = snapshotProbe(cwd, bin);
+	assert.equal(result.code, "RACE_DETECTED");
 });
 
 test("capture detects replacement of a separate-git-dir working-tree root", () => {
@@ -169,11 +176,10 @@ test("capture detects replacement of a separate-git-dir working-tree root", () =
 	execFileSync("git", ["commit", "-qm", "initial"], { cwd });
 
 	const bin = mkdtempSync(join(tmpdir(), "git-wrapper-")), count = join(bin, "count");
-	writeFileSync(join(bin, "git"), `#!/bin/sh\nif [ "$1 $2" = "rev-parse --show-toplevel" ]; then\n  /usr/bin/git "$@"; rc=$?\n  n=0; [ -f '${count}' ] && n=$(cat '${count}'); n=$((n+1)); printf %s "$n" > '${count}'\n  if [ "$n" = 2 ]; then old="$PWD-before-swap"; mv "$PWD" "$old" && mkdir "$PWD" && cp -R "$old/." "$PWD/"; fi\n  exit $rc\nfi\nexec /usr/bin/git "$@"\n`);
+	writeFileSync(join(bin, "git"), `#!/bin/sh\ncase " $* " in *" rev-parse --show-toplevel "*)\n  /usr/bin/git "$@"; rc=$?\n  n=0; [ -f '${count}' ] && n=$(cat '${count}'); n=$((n+1)); printf %s "$n" > '${count}'\n  if [ "$n" = 2 ]; then old="$PWD-before-swap"; mv "$PWD" "$old" && mkdir "$PWD" && cp -R "$old/." "$PWD/"; fi\n  exit $rc\n  ;;\nesac\nexec /usr/bin/git "$@"\n`);
 	chmodSync(join(bin, "git"), 0o755);
-	const oldPath = process.env.PATH; process.env.PATH = `${bin}:${oldPath}`;
-	try { assert.throws(() => captureGitWorktreeSnapshot(cwd), (e: unknown) => e instanceof GitWorktreeSnapshotError && e.code === "RACE_DETECTED"); }
-	finally { process.env.PATH = oldPath; }
+	const result = snapshotProbe(cwd, bin);
+	assert.equal(result.code, "RACE_DETECTED");
 });
 
 test("clean HEAD changes and bounded Git output are detected", () => {
@@ -200,4 +206,25 @@ test("non-git cwd and caps fail visibly with structured errors", () => {
 	assert.throws(() => captureGitWorktreeSnapshot(cwd, { maxFiles: 1 }), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "FILE_LIMIT_EXCEEDED");
 	const bytes = repo(); writeFileSync(join(bytes, "large"), "12345");
 	assert.throws(() => captureGitWorktreeSnapshot(bytes, { maxBytes: 4 }), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "BYTE_LIMIT_EXCEEDED");
+});
+
+test("capture suppresses configured fsmonitor and external helpers", () => {
+	const cwd = repo(), marker = join(cwd, "helper-marker"), helper = join(cwd, "hostile-helper.sh");
+	writeFileSync(helper, `#!/bin/sh\nprintf invoked >> '${marker}'\nsleep 5\n`); chmodSync(helper, 0o755);
+	execFileSync("git", ["config", "core.fsmonitor", helper], { cwd });
+	execFileSync("git", ["config", "diff.external", helper], { cwd });
+	execFileSync("git", ["config", "core.pager", helper], { cwd });
+	captureGitWorktreeSnapshot(cwd);
+	assert.equal(existsSync(marker), false);
+});
+
+test("capture enforces one aggregate deadline and returns a structured timeout without leaving the fake git alive", () => {
+	const cwd = repo(), bin = mkdtempSync(join(tmpdir(), "git-timeout-")), pidFile = join(bin, "pid");
+	writeFileSync(join(bin, "git"), `#!/bin/sh\nprintf %s $$ > '${pidFile}'\nexec sleep 5\n`); chmodSync(join(bin, "git"), 0o755);
+	const started = performance.now();
+	const result = snapshotProbe(cwd, bin, 500);
+	assert.ok(["GIT_TIMEOUT", "SNAPSHOT_TIMEOUT"].includes(result.code ?? ""));
+	assert.ok(performance.now() - started < 1700);
+	const pid = Number(readFileSync(pidFile, "utf8"));
+	assert.throws(() => process.kill(pid, 0));
 });

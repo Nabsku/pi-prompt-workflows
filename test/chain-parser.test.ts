@@ -116,6 +116,26 @@ test("normalizes only the four bounded chain outcomes", () => {
 	for (const invalid of ["success", "failure", "changed", "", undefined]) assert.equal(normalizeChainOutcome(invalid), undefined);
 });
 
+test("structured chain explicit IDs distinguish repeated targets and own transitions", () => {
+	const parsed = parseChainDeclaration([
+		{ id: "first-check", run: "check", onFailure: "second-check" },
+		{ id: "second-check", run: "check" },
+	]);
+	assert.deepEqual(parsed.invalidSegments, []);
+	assert.deepEqual(parsed.steps.map((step) => [step.id, step.target]), [["first-check", "check"], ["second-check", "check"]]);
+	assert.equal(parsed.steps[0]?.onFailure, "second-check");
+});
+
+test("structured chain IDs reject the strict invalid and duplicate matrix", () => {
+	for (const id of [null, 7, "", "   "]) {
+		const parsed = parseChainDeclaration([{ id, prompt: "same" }] as never);
+		assert.match(parsed.invalidSegments.join("\n"), /id must be a non-empty string/i);
+	}
+	assert.match(parseChainDeclaration([{ id: "one", prompt: "same" }, { id: "one", prompt: "same" }]).invalidSegments.join("\n"), /duplicate structured chain step ID/i);
+	assert.match(parseChainDeclaration([{ id: "one", prompt: "same", onSuccess: "same" }]).invalidSegments.join("\n"), /unknown target "same"/i);
+	assert.match(parseChainDeclaration([{ prompt: "same" }, { prompt: "same" }]).invalidSegments.join("\n"), /duplicate structured chain step ID/i);
+});
+
 test("parseChainDeclaration rejects invalid structured declarations visibly", () => {
 	const cases: Array<[unknown, unknown, RegExp]> = [
 		[[{ prompt: "a", when: "maybe" }], undefined, /unknown gate/i],

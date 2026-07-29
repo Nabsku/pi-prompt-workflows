@@ -157,6 +157,27 @@ $@
 
 Or use `/chain-prompts analyze -> fix -> test` at runtime. Chain templates ignore the body and `model:` field.
 
+## Adaptive Chains
+
+Use a YAML list under `chain` for bounded outcome-based routing. Each step sets exactly one of `prompt` or `run`; optional `id` defaults to the target name and is required to distinguish repeated targets. Gates are `always`, `changed`, `succeeded`, and `failed`; transitions are `onSuccess`, `onFailure`, and `onBlocked` and point to step IDs. Omitted transitions naturally fall through.
+
+```yaml
+chain:
+  - id: test
+    run: adaptive-test
+    onFailure: fix
+  - id: fix
+    prompt: adaptive-fix
+  - id: review
+    prompt: adaptive-review
+    when: changed
+limits:
+  maxSteps: 3
+  maxModelCalls: 2
+```
+
+Prompt actions cost one model call; run and skipped actions cost zero. `run` targets must be deterministic with `handoff: never`. Prompt targets cannot be loops, delegated/parallel, boomerang, compare, deterministic, or nested chains. Changed evidence is a fail-closed before/after Git snapshot, so use a readable Git worktree. For read-only Git companions, disable configured helpers and refresh side effects explicitly, as in `git --no-optional-locks -c core.fsmonitor=false status --porcelain=v1` and `git --no-pager diff --no-ext-diff --no-textconv --check`. Always run `/validate-prompts` and `/dry-run-prompt <chain> --plain` first; preflight is read-only and runtime revalidates targets, skills, models, budgets, cwd, and snapshots.
+
 ## Model Conditionals
 
 Show different content based on which model runs:
