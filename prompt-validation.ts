@@ -573,7 +573,7 @@ export function validatePromptTemplates(cwd: string, options: PromptValidationOp
 		let staticContent = substituteArgs(prompt.content, []);
 		let skillPreamble: string | undefined;
 		if (prompt.subagent) {
-			const commands = (options.registeredSkills ?? []).map((skill) => ({ name: skill.skillName, sourceInfo: { path: skill.skillPath } }));
+			const commands = (options.registeredSkills ?? []).map((skill) => ({ name: skill.skillName, source: "skill", sourceInfo: { path: skill.skillPath } }));
 			const resolved = resolvePromptSkills(getRequestedSkills(prompt), cwd, commands);
 			if (resolved.kind === "ready" && resolved.skills.length > 0) {
 				skillPreamble = buildSkillLoadedMessage(resolved.skills).content;

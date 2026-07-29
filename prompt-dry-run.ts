@@ -292,7 +292,11 @@ function evaluateDryRunBudget(
 ): PromptBudgetResult {
 	const candidates = Array.isArray(content) ? content : [content];
 	const results = candidates.map((candidate) => evaluatePromptBudget(candidate, prompt.budget));
-	const largest = results.reduce((current, candidate) => candidate.estimatedTokens > current.estimatedTokens ? candidate : current);
+	const largest = results.reduce((current, candidate) =>
+		candidate.estimatedTokens > current.estimatedTokens || (candidate.estimatedTokens === current.estimatedTokens && candidate.bytes > current.bytes)
+			? candidate
+			: current,
+	);
 	return { ...largest, sources: promptBudgetSources(prompt, skills) };
 }
 
@@ -409,6 +413,8 @@ export async function createPromptDryRun(
 			"",
 			"[Worker outputs and worktree summaries]",
 			"",
+			"---",
+			"",
 			slot.effectiveTask ?? "",
 		].join("\n"));
 		const finalApplierTasks = preflight.slots.finalApplier ? [[
@@ -421,6 +427,8 @@ export async function createPromptDryRun(
 			"",
 			"[Final apply instructions]",
 			"Pick one winner or synthesize/cherry-pick from multiple variants, apply the final patch directly in the current repo, keep edits minimal, run obvious relevant verification when practical, and report changed files plus verification run.",
+			"",
+			"---",
 			"",
 			preflight.slots.finalApplier.effectiveTask ?? "",
 			...(preflight.policies.commit.mode === "ask" ? [

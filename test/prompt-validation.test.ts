@@ -1225,3 +1225,32 @@ test("validatePromptTemplates classifies budget-only library files as commands",
 		assert.equal(result.sourceSummary.projectLibraryFragments, 0);
 	});
 });
+
+test("validatePromptTemplates preserves correlated conditional predicates", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const promptsDir = join(cwd, ".pi", "prompts");
+		mkdirSync(promptsDir, { recursive: true });
+		const long = "x".repeat(40);
+		writeFileSync(join(promptsDir, "correlated.md"), `---\nmodel: openai/gpt-test\nbudget:\n  maxTokens: 5\n---\n<if-model is="openai/*">${long}<else>x</if-model><if-model is="openai/*">x<else>${long}</if-model>`);
+
+		const result = validatePromptTemplates(cwd);
+		assert.equal(result.diagnostics.some((item) => item.code === "prompt-budget-exceeded"), true);
+	});
+});
+
+test("validatePromptTemplates includes registered delegated skills in static budgets", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const promptsDir = join(cwd, ".pi", "prompts");
+		const registeredDir = join(root, "registered-skill");
+		mkdirSync(promptsDir, { recursive: true });
+		mkdirSync(registeredDir, { recursive: true });
+		const skillPath = join(registeredDir, "SKILL.md");
+		writeFileSync(skillPath, "this registered compare skill payload is deliberately large");
+		writeFileSync(join(promptsDir, "delegated.md"), "---\nmodel: openai/gpt-test\nsubagent: true\nskill: external\nbudget:\n  maxTokens: 3\n---\nx");
+
+		const result = validatePromptTemplates(cwd, { registeredSkills: [{ skillName: "external", skillPath }] });
+		assert.equal(result.diagnostics.some((item) => item.code === "prompt-budget-exceeded"), true);
+	});
+});
