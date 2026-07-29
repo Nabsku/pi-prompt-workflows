@@ -1,5 +1,6 @@
 import type { BestOfNPreflight, BestOfNPreflightDiagnostic, BestOfNPreflightSlot } from "./best-of-n-preflight.js";
-import type { PromptDryRunResult, PromptDryRunRuntimeMetadata } from "./prompt-dry-run.js";
+import type { PromptBudgetResult } from "./prompt-budget.js";
+import type { PromptDryRunResult, PromptDryRunRuntimeMetadata, PromptDryRunSkillPreview } from "./prompt-dry-run.js";
 import { sanitizeForTerminal } from "./render-safe.js";
 
 function sanitizeInline(value: string): string {
@@ -81,7 +82,7 @@ function appendArgs(lines: string[], args: string[]): void {
 	for (const arg of args) lines.push(`- ${sanitizeInline(arg)}`);
 }
 
-function appendBudget(lines: string[], result: Extract<PromptDryRunResult, { status: "ok" }>): void {
+function appendBudget(lines: string[], result: { budget: PromptBudgetResult }): void {
 	lines.push("", "## Prompt budget");
 	lines.push(`- Estimated tokens: ${formatScalar(result.budget.estimatedTokens)}`);
 	lines.push(`- UTF-8 bytes: ${formatScalar(result.budget.bytes)}`);
@@ -222,6 +223,7 @@ export function formatPromptDryRun(result: PromptDryRunResult): string {
 		lines.push("", "## Metadata");
 		formatRuntime(result.runtime, lines);
 		appendWarnings(lines, result.warnings);
+		if (result.budget) appendBudget(lines, { budget: result.budget });
 		if (result.comparePreflight) appendComparePreflight(lines, result.comparePreflight, result.runtime, result.warnings);
 		lines.push("", "## Error", `Error: ${sanitizeInline(result.error)}`);
 		return `${lines.join("\n")}\n`;

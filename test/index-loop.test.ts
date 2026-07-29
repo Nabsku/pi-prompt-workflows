@@ -2879,6 +2879,30 @@ test("delegated loop and chain abort do not inject follow-up user messages", asy
 	});
 });
 
+test("delegated budget failure aborts a chain before later steps", async () => {
+	await withTempHome(async (root) => {
+		await withSubagentBridge(root, async () => {
+			const cwd = join(root, "project");
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", "budget-chain.md"), "---\nchain: first -> second\n---\nignored");
+			writeFileSync(join(cwd, ".pi", "prompts", "first.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\nbudget:\n  maxTokens: 1\n---\nthis task is over budget`);
+			writeFileSync(join(cwd, ".pi", "prompts", "second.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSECOND`);
+
+			const pi = new FakePi();
+			promptModelExtension(pi as never);
+			const { ctx } = createBranchingContext(cwd, pi);
+			await pi.emit("session_start", {}, ctx);
+			let delegatedRequests = 0;
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, () => { delegatedRequests += 1; });
+
+			await pi.commands.get("budget-chain")!.handler("", ctx);
+
+			assert.equal(delegatedRequests, 0);
+			assert.equal(pi.userMessages.length, 0);
+		});
+	});
+});
+
 test("delegated loop error after prior success does not inject stale delegated text", async () => {
 	await withTempHome(async (root) => {
 		await withSubagentBridge(root, async () => {
