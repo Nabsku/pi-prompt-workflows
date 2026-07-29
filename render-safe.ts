@@ -83,5 +83,18 @@ export function truncateForTerminalWidth(value: unknown, width: number, options:
 export function capSanitizedText(value: unknown, maxChars: number, options: TruncateForTerminalOptions = {}): string {
 	const sanitized = sanitizeForTerminal(value, options);
 	if (sanitized.length <= maxChars) return sanitized;
-	return `${sanitized.slice(0, Math.max(0, maxChars))}${options.marker ?? truncationMarker(options.originalBytes ?? utf8ByteLength(String(value ?? "")))}`;
+	const limit = Math.max(0, Math.floor(maxChars));
+	const marker = sanitizeForTerminal(options.marker ?? truncationMarker(options.originalBytes ?? utf8ByteLength(String(value ?? ""))), options);
+	if (marker.length >= limit) return unicodeSafeSlice(marker, limit);
+	return `${unicodeSafeSlice(sanitized, limit - marker.length)}${marker}`;
+}
+
+/** Slice by JavaScript UTF-16 code units without leaving an unpaired surrogate. */
+function unicodeSafeSlice(value: string, maxCodeUnits: number): string {
+	let end = Math.min(value.length, Math.max(0, maxCodeUnits));
+	if (end > 0) {
+		const last = value.charCodeAt(end - 1);
+		if (last >= 0xd800 && last <= 0xdbff) end--;
+	}
+	return value.slice(0, end);
 }

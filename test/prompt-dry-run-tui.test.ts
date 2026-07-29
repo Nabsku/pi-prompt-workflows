@@ -255,7 +255,7 @@ test("inspector always exposes an Includes pane and shows No includes when the g
 
 	assert.match(text, /\[Includes\]/);
 	assert.match(text, /No includes\./);
-	assert.match(text, /pane 6\/8/);
+	assert.match(text, /pane 6\/9/);
 });
 
 test("inspector Includes pane renders root-only include diagnostics without edges", () => {

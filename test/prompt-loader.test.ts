@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildPromptCommandDescription, collectPromptSourceRecords, loadPromptsWithModel, RESERVED_COMMAND_NAMES, resolveSkillPath } from "../prompt-loader.js";
+import { buildPromptCommandDescription, collectPromptSourceRecords, loadPromptsWithModel, RESERVED_COMMAND_NAMES, resolveSkillPath, selectEffectivePromptSourceRecords } from "../prompt-loader.js";
 import { loadBestOfNPresetCatalog } from "../best-of-n-presets.js";
 
 function withTempHome(run: (root: string) => void) {
@@ -17,6 +17,29 @@ function withTempHome(run: (root: string) => void) {
 		rmSync(root, { recursive: true, force: true });
 	}
 }
+
+test("effective inventory selection mirrors project, lexical, and reserved loader precedence", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const userRoot = join(root, ".pi", "agent", "prompts");
+		const projectRoot = join(cwd, ".pi", "prompts");
+		mkdirSync(join(userRoot, "alpha"), { recursive: true });
+		mkdirSync(join(projectRoot, "alpha"), { recursive: true });
+		mkdirSync(join(projectRoot, "zeta"), { recursive: true });
+		const invalid = (hidden = false) => `---\nchain:\n  - nope: target\n${hidden ? "hidden: true\n" : ""}---\nignored`;
+		writeFileSync(join(userRoot, "alpha", "dup.md"), invalid());
+		writeFileSync(join(projectRoot, "alpha", "dup.md"), invalid(true));
+		writeFileSync(join(projectRoot, "zeta", "dup.md"), invalid());
+		writeFileSync(join(projectRoot, "dry-run-prompt.md"), invalid());
+
+		const inventory = collectPromptSourceRecords(cwd, true).inventoryRecords;
+		const selected = selectEffectivePromptSourceRecords(inventory);
+		assert.equal(selected.get("dup")?.source, "project");
+		assert.equal(selected.get("dup")?.hidden, true);
+		assert.match(selected.get("dup")?.filePath ?? "", /alpha\/dup\.md$/);
+		assert.equal(selected.has("dry-run-prompt"), false);
+	});
+});
 
 test("loadPromptsWithModel keeps the first same-layer duplicate after lexical sorting", () => {
 	withTempHome((root) => {

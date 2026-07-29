@@ -1,7 +1,8 @@
 import type { BestOfNPreflight, BestOfNPreflightDiagnostic, BestOfNPreflightSlot } from "./best-of-n-preflight.js";
 import type { PromptBudgetResult } from "./prompt-budget.js";
 import type { PromptDryRunResult, PromptDryRunRuntimeMetadata, PromptDryRunSkillPreview } from "./prompt-dry-run.js";
-import { sanitizeForTerminal } from "./render-safe.js";
+import { capSanitizedText, sanitizeForTerminal } from "./render-safe.js";
+import { formatAdaptivePreflight } from "./adaptive-preflight.js";
 
 function sanitizeInline(value: string): string {
 	return sanitizeForTerminal(value);
@@ -225,8 +226,9 @@ export function formatPromptDryRun(result: PromptDryRunResult): string {
 		appendWarnings(lines, result.warnings);
 		if (result.budget) appendBudget(lines, { budget: result.budget });
 		if (result.comparePreflight) appendComparePreflight(lines, result.comparePreflight, result.runtime, result.warnings);
+		if (result.adaptivePreflight) lines.push("", formatAdaptivePreflight(result.adaptivePreflight));
 		lines.push("", "## Error", `Error: ${sanitizeInline(result.error)}`);
-		return `${lines.join("\n")}\n`;
+		return capSanitizedText(`${lines.join("\n")}\n`, 64_000, { preserveLineBreaks: true });
 	}
 
 	lines.push("", "## Metadata");
@@ -234,10 +236,11 @@ export function formatPromptDryRun(result: PromptDryRunResult): string {
 	lines.push(`- Model already active: ${formatScalar(result.modelAlreadyActive)}`);
 	formatRuntime(result.runtime, lines);
 	if (result.comparePreflight) appendComparePreflight(lines, result.comparePreflight, result.runtime, result.warnings);
+	if (result.adaptivePreflight) lines.push("", formatAdaptivePreflight(result.adaptivePreflight));
 	appendWarnings(lines, result.warnings);
 	appendSkills(lines, result);
 	appendArgs(lines, result.args);
 	appendBudget(lines, result);
-	lines.push("", "## Prompt body", fencedBlock("markdown", result.content));
-	return `${lines.join("\n")}\n`;
+	if (!result.adaptivePreflight) lines.push("", "## Prompt body", fencedBlock("markdown", result.content));
+	return capSanitizedText(`${lines.join("\n")}\n`, 64_000, { preserveLineBreaks: true });
 }

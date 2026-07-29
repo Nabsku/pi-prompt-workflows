@@ -329,7 +329,7 @@ test("TUI /dry-run-prompt keeps a permanent Includes pane with No includes for p
 		const rendered = inspector.render(100).join("\n");
 		assert.match(rendered, /\[Includes\]/);
 		assert.match(rendered, /No includes\./);
-		assert.match(rendered, /pane 6\/8/);
+		assert.match(rendered, /pane 6\/9/);
 		assertNoExecutionSideEffects(pi);
 	});
 });
