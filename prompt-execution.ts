@@ -2,6 +2,7 @@ import type { Model } from "@earendil-works/pi-ai";
 import { substituteArgs } from "./args.js";
 import { getResolvedModelRef, selectModelCandidate, type RegistryLike, type SelectedModelCandidate } from "./model-selection.js";
 import type { PromptWithModel } from "./prompt-loader.js";
+import { evaluatePromptBudget } from "./prompt-budget.js";
 import { renderTemplateConditionals } from "./template-conditionals.js";
 
 export interface PreparedPromptExecution {
@@ -50,7 +51,7 @@ function sameModel(a: Model<any> | undefined, b: Model<any> | undefined): boolea
 }
 
 export async function preparePromptExecution(
-	prompt: Pick<PromptWithModel, "name" | "content" | "models">,
+	prompt: Pick<PromptWithModel, "name" | "content" | "models" | "budget">,
 	args: string[],
 	currentModel: Model<any> | undefined,
 	modelRegistry: RegistryLike,
@@ -83,9 +84,22 @@ export async function preparePromptExecution(
 		};
 	}
 
+	const content = rendered.content ?? "";
+	const budget = evaluatePromptBudget(content, prompt.budget);
+	if (budget.verdict === "exceeded") {
+		return {
+			message: `Prompt \`${prompt.name}\` estimated ${budget.estimatedTokens} tokens exceeds configured maximum of ${budget.config?.maxTokens}.`,
+			warning: rendered.warning,
+		};
+	}
+	const budgetWarning = budget.verdict === "warning"
+		? `Prompt \`${prompt.name}\` estimated ${budget.estimatedTokens} tokens reached warning threshold of ${budget.config?.warnTokens}.`
+		: undefined;
+	const warning = [rendered.warning, budgetWarning].filter(Boolean).join("\n") || undefined;
+
 	return {
 		selectedModel,
-		content: rendered.content ?? "",
-		warning: rendered.warning,
+		content,
+		warning,
 	};
 }

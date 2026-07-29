@@ -1124,3 +1124,22 @@ test("formatPromptValidationReport escapes control characters in diagnostics", (
 	assert.match(report, /include\\ncode/);
 	assert.match(report, /include message\\u001b\[31m/);
 });
+
+test("validatePromptTemplates reports configured budgets and fails static maximum overages", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "within.md"), "---\nmodel: claude-sonnet-4-20250514\nbudget:\n  warnTokens: 10\n  maxTokens: 20\n---\nshort");
+		writeFileSync(join(cwd, ".pi", "prompts", "over.md"), "---\nmodel: claude-sonnet-4-20250514\nbudget:\n  maxTokens: 1\n---\n12345678");
+
+		const result = validatePromptTemplates(cwd);
+		const report = formatPromptValidationReport(result);
+
+		assert.equal(result.ok, false);
+		assert.equal(result.budgets?.length, 2);
+		assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "prompt-budget-exceeded"));
+		assert.match(report, /Prompt budgets \(static rendered content; runtime arguments may increase totals\):/);
+		assert.match(report, /within: ~2 tokens \[within\] warn=10 max=20/);
+		assert.match(report, /over: ~2 tokens \[exceeded\] max=1/);
+	});
+});

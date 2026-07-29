@@ -14,8 +14,15 @@ export interface PromptTokenEstimate {
 export type PromptBudgetVerdict = "unconfigured" | "within" | "warning" | "exceeded";
 
 export interface PromptBudgetResult extends PromptTokenEstimate {
-	config?: PromptBudgetConfig;
 	verdict: PromptBudgetVerdict;
+	config?: PromptBudgetConfig;
+	sources?: PromptBudgetSourceEstimate[];
+}
+
+export interface PromptBudgetSourceEstimate extends PromptTokenEstimate {
+	kind: "prompt" | "include" | "skill";
+	label: string;
+	filePath?: string;
 }
 
 export function estimatePromptTokens(content: string): PromptTokenEstimate {

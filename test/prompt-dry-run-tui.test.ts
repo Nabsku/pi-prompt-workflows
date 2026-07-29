@@ -57,6 +57,7 @@ const okResult: PromptDryRunResult = {
 	model: { provider: "anthropic", id: "claude-sonnet-4" } as never,
 	modelAlreadyActive: true,
 	warnings: ["conditional warning"],
+	budget: { bytes: 240, estimatedTokens: 60, method: "utf8-bytes-divided-by-4", verdict: "warning", config: { warnTokens: 50, maxTokens: 100 } },
 	skills: [
 		{ skillName: "git", skillPath: "/repo/.pi/skills/git/SKILL.md" },
 		{ skillName: "typescript", skillPath: "/repo/.pi/skills/typescript/SKILL.md" },
@@ -226,7 +227,7 @@ test("inspector default pane is Prompt, shows prompt body, warning badge, and hi
 	const text = renderText(lines);
 
 	assert.match(text, /Prompt dry-run: review/);
-	assert.match(text, /Prompt\s+Metadata\s+Compare\s+Skills\s+Includes\s+Warnings\s+Raw|\[Prompt\]/);
+	assert.match(text, /Prompt\s+Metadata\s+Budget\s+Compare\s+Skills\s+Includes\s+Warnings\s+Raw|\[Prompt\]/);
 	assert.match(text, /# Prompt body/);
 	assert.match(text, /Review src\/server\.ts/);
 	assert.match(text, /warning/i);
@@ -237,15 +238,24 @@ test("inspector default pane is Prompt, shows prompt body, warning badge, and hi
 	assertWidthSafe(lines, 72);
 });
 
+test("inspector budget pane shows estimate, method, verdict, and thresholds", () => {
+	const viewModel = createPromptDryRunTuiViewModel(okResult, plainReport);
+	assert.match(viewModel.panes.budget, /Estimated tokens: 60/);
+	assert.match(viewModel.panes.budget, /estimate, not model-tokenizer exact/);
+	assert.match(viewModel.panes.budget, /Verdict: warning/);
+	assert.match(viewModel.panes.budget, /Warning threshold: 50/);
+	assert.match(viewModel.panes.budget, /Maximum: 100/);
+});
+
 test("inspector always exposes an Includes pane and shows No includes when the graph is empty", () => {
 	const inspector = new PromptDryRunInspector(createPromptDryRunTuiViewModel(okResult, plainReport));
 
-	inspector.handleInput("5");
+	inspector.handleInput("6");
 	const text = renderText(inspector.render(80));
 
 	assert.match(text, /\[Includes\]/);
 	assert.match(text, /No includes\./);
-	assert.match(text, /pane 5\/7/);
+	assert.match(text, /pane 6\/8/);
 });
 
 test("inspector Includes pane renders root-only include diagnostics without edges", () => {
@@ -281,7 +291,7 @@ test("inspector Includes pane renders root-only include diagnostics without edge
 		: okResult;
 	const inspector = new PromptDryRunInspector(createPromptDryRunTuiViewModel(result, plainReport));
 
-	inspector.handleInput("5");
+	inspector.handleInput("6");
 	const text = renderText(inspector.render(120));
 
 	assert.match(text, /- review \[ok\] \/repo\/\.pi\/prompts\/review\.md/);
@@ -332,7 +342,7 @@ test("inspector Includes pane renders include edges in graph order with diagnost
 		: okResult;
 	const inspector = new PromptDryRunInspector(createPromptDryRunTuiViewModel(result, plainReport));
 
-	inspector.handleInput("5");
+	inspector.handleInput("6");
 	const wideText = renderText(inspector.render(200));
 	const lines = inspector.render(72);
 	const text = renderText(lines);
@@ -436,11 +446,11 @@ test("inspector tab, numeric jump, back, scroll, and quit keybindings are render
 
 	inspector.handleInput("	");
 	assert.match(renderText(inspector.render(80)), /\[Metadata\]|Metadata/i);
-	inspector.handleInput("4");
-	assert.match(renderText(inspector.render(80)), /\[Skills\]|Skills/i);
 	inspector.handleInput("5");
+	assert.match(renderText(inspector.render(80)), /\[Skills\]|Skills/i);
+	inspector.handleInput("6");
 	assert.match(renderText(inspector.render(80)), /\[Includes\]|No includes\./i);
-	inspector.handleInput("7");
+	inspector.handleInput("8");
 	assert.match(renderText(inspector.render(80)), /# Prompt dry-run: review|Raw/i);
 	inspector.handleInput("j");
 	assert.match(renderText(inspector.render(80)), /scroll|↓|line/i);
@@ -460,7 +470,7 @@ test("inspector supports Kitty CSI-u close, back, tab, numeric panes, and scroll
 		inspector.handleInput("\x1b[9u");
 		assert.match(renderText(inspector.render(80)), /\[Metadata\]/);
 
-		inspector.handleInput("\x1b[55u");
+		inspector.handleInput("\x1b[56u");
 		let text = renderText(inspector.render(80));
 		assert.match(text, /\[Raw\]/);
 		assert.match(text, /line 1\/9/);

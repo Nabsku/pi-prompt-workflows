@@ -2130,6 +2130,14 @@ function loadPromptsWithModelFromDir(
 				const budgetResult = normalizePromptBudget(frontmatter.budget, fullPath, source, diagnostics);
 				if (!budgetResult.ok) continue;
 				const budget = budgetResult.budget;
+				if (budget && chain) {
+					diagnostics.push(createDiagnostic("invalid-budget-chain", fullPath, source, "Prompt budgets belong on executable chain step templates, not chain wrappers."));
+					continue;
+				}
+				if (budget && deterministic) {
+					diagnostics.push(createDiagnostic("invalid-budget-deterministic", fullPath, source, "Prompt budgets are not supported on deterministic prompts because the command runs before an optional LLM handoff."));
+					continue;
+				}
 
 				const name = entry.name.slice(0, -3);
 				if (RESERVED_COMMAND_NAMES.has(name)) {

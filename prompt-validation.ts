@@ -1,6 +1,7 @@
 import { resolve as resolvePath } from "node:path";
 import { loadBestOfNPresetCatalog, type ResolvedBestOfNPreset } from "./best-of-n-presets.js";
 import { parseChainDeclaration, type ChainStep, type ChainStepOrParallel } from "./chain-parser.js";
+import { evaluatePromptBudget, type PromptBudgetResult } from "./prompt-budget.js";
 import { collectPromptIncludeGraphs, type PromptIncludeGraph, type PromptIncludeGraphEdge, type PromptIncludeGraphNode } from "./prompt-includes.js";
 import { collectPromptSourceRecords, discoverFilesystemSkills, loadPromptsWithModel, readSkillContent, resolveSkillPath, type PromptLoaderDiagnostic, type PromptSource, type PromptSourceRecord, type PromptWithModel } from "./prompt-loader.js";
 
@@ -29,12 +30,18 @@ export interface PromptValidationSourceSummary {
 	userLibraryFragments: number;
 }
 
+export interface PromptValidationBudgetSummary extends PromptBudgetResult {
+	promptName: string;
+	filePath: string;
+}
+
 export interface PromptValidationResult {
 	ok: boolean;
 	promptCount: number;
 	sourceSummary: PromptValidationSourceSummary;
 	diagnostics: PromptLoaderDiagnostic[];
 	includeGraphs: PromptValidationIncludeGraph[];
+	budgets?: PromptValidationBudgetSummary[];
 }
 
 const INCLUDE_RELATED_DIAGNOSTIC_CODES = new Set([
@@ -548,13 +555,29 @@ export function validatePromptTemplates(cwd: string, options: PromptValidationOp
 	const loaded = loadPromptsWithModel(cwd, true);
 	const sourceRecordResult = collectPromptSourceRecords(cwd, true);
 	const includeGraphs = collectValidationIncludeGraphs(sourceRecordResult.records, loaded);
+	const budgets: PromptValidationBudgetSummary[] = [];
 	const result: PromptValidationResult = {
 		ok: loaded.diagnostics.length === 0,
 		promptCount: loaded.prompts.size,
 		sourceSummary: collectValidationSourceSummary(sourceRecordResult.records, sourceRecordResult.inventoryRecords, loaded, includeGraphs),
 		diagnostics: [...loaded.diagnostics],
 		includeGraphs,
+		budgets,
 	};
+
+	for (const prompt of loaded.prompts.values()) {
+		if (!prompt.budget) continue;
+		const budget = evaluatePromptBudget(prompt.content, prompt.budget);
+		budgets.push({ promptName: prompt.name, filePath: prompt.filePath, ...budget });
+		if (budget.verdict === "exceeded") {
+			result.diagnostics.push(createValidationDiagnostic(
+				"prompt-budget-exceeded",
+				prompt.filePath,
+				prompt.source,
+				`Prompt ${JSON.stringify(prompt.name)} statically estimates ${budget.estimatedTokens} tokens, exceeding configured maximum of ${budget.config?.maxTokens}. Runtime arguments may increase it further.`,
+			));
+		}
+	}
 
 	validatePromptChains(cwd, result, loaded.prompts);
 	validateComparePrompts(cwd, result, loaded.prompts);
@@ -650,13 +673,28 @@ function formatSourceSummary(summary: PromptValidationSourceSummary): string {
 	return parts.join(" ");
 }
 
+function formatBudgetSection(budgets: PromptValidationBudgetSummary[]): string[] {
+	if (budgets.length === 0) return [];
+	const lines = ["Prompt budgets (static rendered content; runtime arguments may increase totals):"];
+	for (const budget of [...budgets].sort((a, b) => lexicalCompare(a.promptName, b.promptName) || lexicalCompare(a.filePath, b.filePath))) {
+		const thresholds = [
+			budget.config?.warnTokens !== undefined ? `warn=${budget.config.warnTokens}` : undefined,
+			budget.config?.maxTokens !== undefined ? `max=${budget.config.maxTokens}` : undefined,
+		].filter(Boolean).join(" ");
+		lines.push(`- ${sanitizeReportValue(budget.promptName)}: ~${budget.estimatedTokens} tokens [${budget.verdict}] ${thresholds}`.trimEnd());
+	}
+	return lines;
+}
+
 export function formatPromptValidationReport(result: PromptValidationResult): string {
 	const includeGraphLines = formatIncludeGraphSection(result.includeGraphs);
 	const sourceSummaryLine = formatSourceSummary(result.sourceSummary);
+	const budgetLines = formatBudgetSection(result.budgets ?? []);
 	if (result.ok) {
 		return [
 			`[pi-prompt-workflows] Prompt validation passed: ${result.promptCount} prompt template(s) loaded.`,
 			sourceSummaryLine,
+			...budgetLines,
 			...includeGraphLines,
 		].join("\n");
 	}
@@ -666,6 +704,7 @@ export function formatPromptValidationReport(result: PromptValidationResult): st
 	return [
 		`[pi-prompt-workflows] Prompt validation failed: ${diagnostics.length} issue(s) found across ${result.promptCount} loaded prompt template(s).`,
 		sourceSummaryLine,
+		...budgetLines,
 		...lines,
 		...includeGraphLines,
 	].join("\n");
