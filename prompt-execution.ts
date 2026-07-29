@@ -26,6 +26,25 @@ export interface RenderedPrompt {
 	empty?: string;
 }
 
+export interface PromptExecutionBudgetCheck {
+	message?: string;
+	warning?: string;
+}
+
+export function checkPromptExecutionBudget(
+	prompt: Pick<PromptWithModel, "name" | "budget">,
+	content: string,
+): PromptExecutionBudgetCheck {
+	const budget = evaluatePromptBudget(content, prompt.budget);
+	if (budget.verdict === "exceeded") {
+		return { message: `Prompt \`${prompt.name}\` estimated ${budget.estimatedTokens} tokens exceeds configured maximum of ${budget.config?.maxTokens}.` };
+	}
+	if (budget.verdict === "warning") {
+		return { warning: `Prompt \`${prompt.name}\` estimated ${budget.estimatedTokens} tokens reached warning threshold of ${budget.config?.warnTokens}.` };
+	}
+	return {};
+}
+
 export function renderPromptForResolvedModel(
 	prompt: Pick<PromptWithModel, "name" | "content">,
 	args: string[],
@@ -84,22 +103,9 @@ export async function preparePromptExecution(
 		};
 	}
 
-	const content = rendered.content ?? "";
-	const budget = evaluatePromptBudget(content, prompt.budget);
-	if (budget.verdict === "exceeded") {
-		return {
-			message: `Prompt \`${prompt.name}\` estimated ${budget.estimatedTokens} tokens exceeds configured maximum of ${budget.config?.maxTokens}.`,
-			warning: rendered.warning,
-		};
-	}
-	const budgetWarning = budget.verdict === "warning"
-		? `Prompt \`${prompt.name}\` estimated ${budget.estimatedTokens} tokens reached warning threshold of ${budget.config?.warnTokens}.`
-		: undefined;
-	const warning = [rendered.warning, budgetWarning].filter(Boolean).join("\n") || undefined;
-
 	return {
 		selectedModel,
-		content,
-		warning,
+		content: rendered.content ?? "",
+		warning: rendered.warning,
 	};
 }
