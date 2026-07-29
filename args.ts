@@ -752,7 +752,10 @@ export function parseCommandArgs(argsString: string): string[] {
 		const char = argsString[i];
 
 		if (inQuote) {
-			if (char === inQuote) {
+			if (char === "\\" && inQuote === '"' && (argsString[i + 1] === '"' || argsString[i + 1] === "\\")) {
+				current += argsString[i + 1];
+				i += 1;
+			} else if (char === inQuote) {
 				inQuote = null;
 			} else {
 				current += char;

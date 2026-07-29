@@ -88,7 +88,7 @@ Restart pi to load the extension.
 
 | Command | Use it for |
 | --- | --- |
-| `/validate-prompts` | Reload and validate prompt templates, includes, skills, and compare presets before running anything expensive. |
+| `/validate-prompts` | Reload and validate prompt templates, includes, skills, and compare presets referenced by prompt frontmatter before running anything expensive. Use `/compare-presets` to validate/list catalogs used only through runtime `--preset`. |
 | `/print-prompt <name> --plain ...` | Print the exact rendered prompt/preflight report without executing it. |
 | `/dry-run-prompt <name> --plain ...` | Same read-only preview path, with compare-specific verdict and execute guidance. |
 | `/compare-presets` | List available best-of-N presets, trust/source labels, lineups, and copyable use commands. |

@@ -16,6 +16,11 @@ test("parseCommandArgs respects quoted segments", () => {
 	assert.deepEqual(parseCommandArgs("one 'two three' four"), ["one", "two three", "four"]);
 });
 
+test("parseCommandArgs decodes JSON-style quote and backslash escapes in double-quoted values", () => {
+	const value = '/tmp/repo\\with "quotes"';
+	assert.deepEqual(parseCommandArgs(`--cwd ${JSON.stringify(value)}`), ["--cwd", value]);
+});
+
 test("substituteArgs supports positional, aggregate, and slice replacements", () => {
 	const result = substituteArgs("$1 | $@ | $ARGUMENTS | ${@:2} | ${@:2:2}", ["one", "two", "three", "four"]);
 	assert.equal(result, "one | one two three four | one two three four | two three four | two three");
