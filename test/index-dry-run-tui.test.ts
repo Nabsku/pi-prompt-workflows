@@ -306,7 +306,7 @@ test("TUI /dry-run-prompt carries the real include graph into the inspector Incl
 
 		assert.equal(pi.customCalls.length, 1);
 		const inspector = pi.customComponents.at(-1) as { handleInput(data: string): void; render(width: number): string[] };
-		inspector.handleInput("5");
+		inspector.handleInput("6");
 		const rendered = inspector.render(1000).join("\n");
 		assert.match(rendered, /\[Includes\]/);
 		assert.match(rendered, /- review \[ok\] .*\.pi\/prompts\/review\.md/);
@@ -325,11 +325,11 @@ test("TUI /dry-run-prompt keeps a permanent Includes pane with No includes for p
 
 		assert.equal(pi.customCalls.length, 1);
 		const inspector = pi.customComponents.at(-1) as { handleInput(data: string): void; render(width: number): string[] };
-		inspector.handleInput("5");
+		inspector.handleInput("6");
 		const rendered = inspector.render(100).join("\n");
 		assert.match(rendered, /\[Includes\]/);
 		assert.match(rendered, /No includes\./);
-		assert.match(rendered, /pane 5\/7/);
+		assert.match(rendered, /pane 6\/8/);
 		assertNoExecutionSideEffects(pi);
 	});
 });
@@ -436,7 +436,7 @@ test("TUI picker and inspector support preset-only compare prompts", async () =>
 		assert.match(rendered, /compare-preset\s+project/);
 		assert.doesNotMatch(rendered, /compare-preset[\s\S]*unsupported|unsupported[\s\S]*compare-preset/);
 		const inspector = pi.customComponents.at(-1) as { handleInput(data: string): void; render(width: number): string[] };
-		inspector.handleInput("3");
+		inspector.handleInput("4");
 		const inspected = inspector.render(1000).join("\n");
 		assert.match(inspected, /\[Compare\]/);
 		assert.match(inspected, /Preset: quick \(project-approval-required\)/);

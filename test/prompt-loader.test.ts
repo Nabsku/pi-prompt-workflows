@@ -2802,6 +2802,8 @@ test("loadPromptsWithModel parses valid prompt budgets and rejects invalid budge
 		writeFileSync(join(promptsDir, "invalid-zero.md"), "---\nbudget:\n  maxTokens: 0\n---\nhello");
 		writeFileSync(join(promptsDir, "invalid-order.md"), "---\nbudget:\n  warnTokens: 300\n  maxTokens: 200\n---\nhello");
 		writeFileSync(join(promptsDir, "invalid-shape.md"), "---\nbudget: 100\n---\nhello");
+		writeFileSync(join(promptsDir, "invalid-chain.md"), "---\nchain: valid -> warning-only\nbudget:\n  maxTokens: 200\n---\nignored");
+		writeFileSync(join(promptsDir, "invalid-deterministic.md"), "---\nrun: git status --short\nbudget:\n  maxTokens: 200\n---\nSummarize");
 
 		const result = loadPromptsWithModel(cwd, true);
 		assert.deepEqual(result.prompts.get("valid")?.budget, { warnTokens: 100, maxTokens: 200 });
@@ -2810,5 +2812,9 @@ test("loadPromptsWithModel parses valid prompt budgets and rejects invalid budge
 		assert.equal(result.prompts.has("invalid-order"), false);
 		assert.equal(result.prompts.has("invalid-shape"), false);
 		assert.equal(result.diagnostics.filter((item) => item.code === "invalid-budget").length, 3);
+		assert.equal(result.prompts.has("invalid-chain"), false);
+		assert.equal(result.prompts.has("invalid-deterministic"), false);
+		assert.equal(result.diagnostics.filter((item) => item.code === "invalid-budget-chain").length, 1);
+		assert.equal(result.diagnostics.filter((item) => item.code === "invalid-budget-deterministic").length, 1);
 	});
 });
