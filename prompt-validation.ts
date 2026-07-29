@@ -1,5 +1,6 @@
 import { resolve as resolvePath } from "node:path";
 import { loadBestOfNPresetCatalog, type ResolvedBestOfNPreset } from "./best-of-n-presets.js";
+import { substituteArgs } from "./args.js";
 import { parseChainDeclaration, type ChainStep, type ChainStepOrParallel } from "./chain-parser.js";
 import { evaluatePromptBudget, type PromptBudgetResult } from "./prompt-budget.js";
 import { collectPromptIncludeGraphs, type PromptIncludeGraph, type PromptIncludeGraphEdge, type PromptIncludeGraphNode } from "./prompt-includes.js";
@@ -567,7 +568,7 @@ export function validatePromptTemplates(cwd: string, options: PromptValidationOp
 
 	for (const prompt of loaded.prompts.values()) {
 		if (!prompt.budget) continue;
-		const budget = evaluatePromptBudget(prompt.content, prompt.budget);
+		const budget = evaluatePromptBudget(substituteArgs(prompt.content, []), prompt.budget);
 		budgets.push({ promptName: prompt.name, filePath: prompt.filePath, ...budget });
 		if (budget.verdict === "exceeded" && !prompt.content.includes("<if-model")) {
 			result.diagnostics.push(createValidationDiagnostic(

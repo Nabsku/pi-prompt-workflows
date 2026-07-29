@@ -31,6 +31,13 @@ export interface PromptExecutionBudgetCheck {
 	warning?: string;
 }
 
+export class PromptBudgetExceededError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "PromptBudgetExceededError";
+	}
+}
+
 export function checkPromptExecutionBudget(
 	prompt: Pick<PromptWithModel, "name" | "budget">,
 	content: string,

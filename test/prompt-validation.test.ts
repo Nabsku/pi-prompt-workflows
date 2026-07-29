@@ -1160,3 +1160,16 @@ test("validatePromptTemplates defers hard budget failure for unresolved model co
 		assert.equal(result.diagnostics.some((item) => item.code === "prompt-budget-exceeded"), false);
 	});
 });
+
+test("validatePromptTemplates estimates argument placeholders after representative empty substitution", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const promptsDir = join(cwd, ".pi", "prompts");
+		mkdirSync(promptsDir, { recursive: true });
+		writeFileSync(join(promptsDir, "args.md"), "---\nmodel: openai/gpt-test\nbudget:\n  maxTokens: 1\n---\n$@ $@ $@ $@");
+
+		const result = validatePromptTemplates(cwd);
+		assert.equal(result.diagnostics.some((item) => item.code === "prompt-budget-exceeded"), false);
+		assert.equal(result.budgets?.[0]?.estimatedTokens, 1);
+	});
+});
