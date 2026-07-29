@@ -257,6 +257,25 @@ test("compare dry-run budgets effective lineup tasks and blocks exceeded verdict
 		assert.equal(result.budget?.verdict, "exceeded");
 		assert.match(result.error, /Compare lineup task estimated .* exceeds configured maximum/);
 		assert.equal(result.comparePreflight?.diagnostics.some((diagnostic) => diagnostic.code === "prompt-budget-exceeded"), true);
+
+		const warning = assertOk(await createPromptDryRun(
+			prompt({ workers: [{ agent: "worker", taskSuffix: "this worker-specific suffix is larger than the shared task" }], budget: { warnTokens: 5, maxTokens: 200 } }),
+			options(root),
+		));
+		assert.equal(warning.budget.verdict, "warning");
+		assert.ok(warning.budget.bytes > Buffer.byteLength(warning.content, "utf8"));
+		assert.equal(warning.comparePreflight?.diagnostics.some((diagnostic) => diagnostic.code === "prompt-budget-warning"), true);
+	});
+});
+
+test("compare dry-run includes statically known reviewer phase preambles", async () => {
+	await withTempHome(async (root) => {
+		const result = assertOk(await createPromptDryRun(
+			prompt({ workers: [{ agent: "worker" }], reviewers: [{ agent: "reviewer" }] }),
+			options(root),
+		));
+		const reviewerTask = result.comparePreflight?.slots.reviewers[0]?.effectiveTask ?? "";
+		assert.ok(result.budget.bytes > Buffer.byteLength(reviewerTask, "utf8"));
 	});
 });
 
