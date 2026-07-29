@@ -1,4 +1,4 @@
-import type { Model } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
 import { substituteArgs } from "./args.js";
 import { getResolvedModelRef, selectModelCandidate, type RegistryLike, type SelectedModelCandidate } from "./model-selection.js";
 import type { PromptWithModel } from "./prompt-loader.js";
@@ -35,6 +35,60 @@ export class PromptBudgetExceededError extends Error {
 	constructor(message: string) {
 		super(message);
 		this.name = "PromptBudgetExceededError";
+	}
+}
+
+export type StepExecutionStatus = "succeeded" | "failed" | "blocked";
+
+export type StepExecutionOutcome<TResult> =
+	| { status: "succeeded"; result: TResult }
+	| { status: "failed"; result: TResult }
+	| { status: "failed" | "blocked"; error: unknown };
+
+/** Adaptive-runtime adapter. Legacy callers continue to receive/throw their original values. */
+export async function captureStepExecutionOutcome<TResult>(
+	execute: () => Promise<TResult>,
+): Promise<StepExecutionOutcome<TResult>> {
+	try {
+		return { status: "succeeded", result: await execute() };
+	} catch (error) {
+		return error instanceof PromptBudgetExceededError
+			? { status: "blocked", error }
+			: { status: "failed", error };
+	}
+}
+
+/** Normalize Pi's structured assistant completion state without inferring from prose. */
+export function normalizePromptCompletionOutcome(
+	message: AssistantMessage,
+): StepExecutionOutcome<AssistantMessage> {
+	switch (message.stopReason) {
+		case "stop":
+		case "length":
+		case "toolUse":
+			return { status: "succeeded", result: message };
+		case "error":
+		case "aborted":
+			return { status: "failed", result: message };
+		default:
+			throw new Error(`Assistant completion has unknown or missing stopReason: ${String(message.stopReason)}`);
+	}
+}
+
+/** Adaptive prompt seam: budget preflight happens before the execution callback. */
+export async function capturePromptExecutionOutcome(
+	prompt: Pick<PromptWithModel, "name" | "budget">,
+	content: string,
+	execute: () => Promise<AssistantMessage>,
+): Promise<StepExecutionOutcome<AssistantMessage>> {
+	const budgetCheck = checkPromptExecutionBudget(prompt, content);
+	if (budgetCheck.message) {
+		return { status: "blocked", error: new PromptBudgetExceededError(budgetCheck.message) };
+	}
+	try {
+		return normalizePromptCompletionOutcome(await execute());
+	} catch (error) {
+		return { status: "failed", error };
 	}
 }
 

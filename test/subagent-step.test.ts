@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { executeSubagentPromptStep } from "../subagent-step.ts";
+import { executeSubagentPromptStep, executeSubagentPromptStepOutcome } from "../subagent-step.ts";
 import {
 	PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT,
 	PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT,
@@ -152,6 +152,57 @@ test("executeSubagentPromptStep returns delegated change info", async () => {
 		});
 		assert.equal(result?.changed, true);
 		assert.equal(pi.customMessages.length, 1);
+	});
+});
+
+test("executeSubagentPromptStepOutcome preserves delegated success payload", async () => {
+	await withDelegationBridge(async (root) => {
+		const pi = createPi();
+		const ctx = createCtx(root);
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+			const request = data as any;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				...request,
+				messages: [{ role: "assistant", content: [{ type: "text", text: "Done." }] }],
+				isError: false,
+			});
+		});
+
+		const outcome = await executeSubagentPromptStepOutcome({ pi, prompt, args: [], ctx, currentModel: ctx.model });
+		assert.equal(outcome.status, "succeeded");
+		assert.equal("result" in outcome ? outcome.result?.text : undefined, "Done.");
+	});
+});
+
+test("executeSubagentPromptStepOutcome classifies delegated failures and budget preflight blocking", async () => {
+	await withDelegationBridge(async (root) => {
+		const ctx = createCtx(root);
+		const failurePi = createPi();
+		failurePi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+			const request = data as any;
+			failurePi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			failurePi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, { ...request, messages: [], isError: true, errorText: "boom" });
+		});
+		assert.equal((await executeSubagentPromptStepOutcome({ pi: failurePi, prompt, args: [], ctx, currentModel: ctx.model })).status, "failed");
+
+		const cancelledPi = createPi();
+		const controller = new AbortController();
+		controller.abort();
+		assert.equal((await executeSubagentPromptStepOutcome({
+			pi: cancelledPi, prompt, args: [], ctx, currentModel: ctx.model, signal: controller.signal,
+		})).status, "failed");
+
+		const blockedPi = createPi();
+		let requests = 0;
+		blockedPi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, () => { requests += 1; });
+		const blocked = await executeSubagentPromptStepOutcome({
+			pi: blockedPi,
+			prompt: { ...prompt, content: "12345678", budget: { maxTokens: 1 } },
+			args: [], ctx, currentModel: ctx.model,
+		});
+		assert.equal(blocked.status, "blocked");
+		assert.equal(requests, 0);
 	});
 });
 
