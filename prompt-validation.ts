@@ -5,6 +5,8 @@ import { parseChainDeclaration, type ChainStep, type ChainStepOrParallel } from 
 import { evaluatePromptBudget, type PromptBudgetResult } from "./prompt-budget.js";
 import { collectPromptIncludeGraphs, type PromptIncludeGraph, type PromptIncludeGraphEdge, type PromptIncludeGraphNode } from "./prompt-includes.js";
 import { collectPromptSourceRecords, discoverFilesystemSkills, loadPromptsWithModel, readSkillContent, resolveSkillPath, type PromptLoaderDiagnostic, type PromptSource, type PromptSourceRecord, type PromptWithModel } from "./prompt-loader.js";
+import { buildSkillLoadedMessage, getRequestedSkills, resolvePromptSkills } from "./prompt-skills.js";
+import { hasValidModelConditionals } from "./template-conditionals.js";
 
 export interface RegisteredPromptSkill {
 	skillName: string;
@@ -568,9 +570,17 @@ export function validatePromptTemplates(cwd: string, options: PromptValidationOp
 
 	for (const prompt of loaded.prompts.values()) {
 		if (!prompt.budget) continue;
-		const budget = evaluatePromptBudget(substituteArgs(prompt.content, []), prompt.budget);
+		let staticContent = substituteArgs(prompt.content, []);
+		if (prompt.subagent) {
+			const commands = (options.registeredSkills ?? []).map((skill) => ({ name: skill.skillName, sourceInfo: { path: skill.skillPath } }));
+			const resolved = resolvePromptSkills(getRequestedSkills(prompt), cwd, commands);
+			if (resolved.kind === "ready" && resolved.skills.length > 0) {
+				staticContent = `${buildSkillLoadedMessage(resolved.skills).content}\n\n---\n\n${staticContent}`;
+			}
+		}
+		const budget = evaluatePromptBudget(staticContent, prompt.budget);
 		budgets.push({ promptName: prompt.name, filePath: prompt.filePath, ...budget });
-		if (budget.verdict === "exceeded" && !prompt.content.includes("<if-model")) {
+		if (budget.verdict === "exceeded" && !hasValidModelConditionals(prompt.content)) {
 			result.diagnostics.push(createValidationDiagnostic(
 				"prompt-budget-exceeded",
 				prompt.filePath,

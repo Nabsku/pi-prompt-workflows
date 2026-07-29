@@ -397,11 +397,37 @@ export async function createPromptDryRun(
 			pathArgumentPromptName: options.pathArgumentPromptName,
 			renderedTask: prepared.content,
 		});
-		const lineupTasks = [
-			...preflight.slots.workers,
-			...preflight.slots.reviewers,
-			...(preflight.slots.finalApplier ? [preflight.slots.finalApplier] : []),
-		].map((slot) => slot.effectiveTask).filter((task): task is string => task !== undefined);
+		const sharedTask = preflight.task.renderedTask ?? "";
+		const workerTasks = preflight.slots.workers.map((slot) => slot.effectiveTask).filter((task): task is string => task !== undefined);
+		const reviewerTasks = preflight.slots.reviewers.map((slot) => [
+			"[Original implementation task]",
+			sharedTask,
+			"",
+			"[Worker outputs and worktree summaries]",
+			"",
+			slot.effectiveTask ?? "",
+		].join("\n"));
+		const finalApplierTasks = preflight.slots.finalApplier ? [[
+			"[Original implementation task]",
+			sharedTask,
+			"",
+			"[Worker outputs and worktree summaries]",
+			"",
+			"[Reviewer findings]",
+			"",
+			"[Final apply instructions]",
+			"Pick one winner or synthesize/cherry-pick from multiple variants, apply the final patch directly in the current repo, keep edits minimal, run obvious relevant verification when practical, and report changed files plus verification run.",
+			"",
+			preflight.slots.finalApplier.effectiveTask ?? "",
+			...(preflight.policies.commit.mode === "ask" ? [
+				"",
+				"Commit approval mode:",
+				"- Do not run `git add`, `git commit`, or any command that stages or commits changes.",
+				"- Leave all changes unstaged in the worktree for the user to review and approve after you finish.",
+				"- If you need git for verification or reporting, use read-only commands such as `git status` or `git diff`.",
+			] : []),
+		].join("\n")] : [];
+		const lineupTasks = [...workerTasks, ...reviewerTasks, ...finalApplierTasks];
 		const budget = evaluateDryRunBudget(lineupTasks.length > 0 ? lineupTasks : (preflight.task.renderedTask ?? ""), prompt);
 		if (budget.verdict === "exceeded") {
 			preflight.diagnostics.push({ severity: "error", code: "prompt-budget-exceeded", message: `Compare lineup task estimated ${budget.estimatedTokens} tokens exceeds configured maximum of ${budget.config?.maxTokens}.`, source: prompt.source, filePath: prompt.filePath });
@@ -419,7 +445,7 @@ export async function createPromptDryRun(
 			model: prepared.selectedModel.model,
 			modelAlreadyActive: prepared.selectedModel.alreadyActive,
 			warnings,
-			budget: evaluateDryRunBudget(preflight.task.renderedTask ?? "", prompt),
+			budget,
 			skills: [],
 			details: { skills: [] },
 			runtime,

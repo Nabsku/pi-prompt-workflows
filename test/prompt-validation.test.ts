@@ -1173,3 +1173,30 @@ test("validatePromptTemplates estimates argument placeholders after representati
 		assert.equal(result.budgets?.[0]?.estimatedTokens, 1);
 	});
 });
+
+test("validatePromptTemplates does not defer malformed model-like text", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const promptsDir = join(cwd, ".pi", "prompts");
+		mkdirSync(promptsDir, { recursive: true });
+		writeFileSync(join(promptsDir, "literal.md"), "---\nmodel: openai/gpt-test\nbudget:\n  maxTokens: 1\n---\n<if-modelish>always oversized text");
+
+		const result = validatePromptTemplates(cwd);
+		assert.equal(result.diagnostics.some((item) => item.code === "prompt-budget-exceeded"), true);
+	});
+});
+
+test("validatePromptTemplates includes delegated skill payloads in static budgets", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const promptsDir = join(cwd, ".pi", "prompts");
+		const skillDir = join(cwd, ".pi", "skills", "large");
+		mkdirSync(promptsDir, { recursive: true });
+		mkdirSync(skillDir, { recursive: true });
+		writeFileSync(join(skillDir, "SKILL.md"), "this delegated skill payload is deliberately large");
+		writeFileSync(join(promptsDir, "delegated.md"), "---\nmodel: openai/gpt-test\nsubagent: true\nskill: large\nbudget:\n  maxTokens: 3\n---\nx");
+
+		const result = validatePromptTemplates(cwd);
+		assert.equal(result.diagnostics.some((item) => item.code === "prompt-budget-exceeded"), true);
+	});
+});
