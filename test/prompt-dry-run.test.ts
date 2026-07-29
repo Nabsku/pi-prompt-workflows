@@ -279,6 +279,19 @@ test("compare dry-run includes statically known reviewer phase preambles", async
 	});
 });
 
+test("compare dry-run includes skill preambles in lineup budgets", async () => {
+	await withTempHome(async (root) => {
+		const skillPath = writeProjectSkill(root, "large", "this compare skill payload is deliberately large");
+		const result = assertOk(await createPromptDryRun(
+			prompt({ workers: [{ agent: "worker" }], skills: ["large"], budget: { warnTokens: 5, maxTokens: 500 } }),
+			options(root),
+		));
+		assert.equal(result.budget.verdict, "warning");
+		assert.deepEqual(result.skills, [{ skillName: "large", skillPath }]);
+		assert.equal(result.budget.sources?.some((source) => source.kind === "skill"), true);
+	});
+});
+
 test("compare preflight dry-run renders model conditionals like runtime", async () => {
 	await withTempHome(async (root) => {
 		const result = assertOk(await createPromptDryRun(

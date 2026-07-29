@@ -283,6 +283,21 @@ export function hasValidModelConditionals(content: string): boolean {
 	return parsed.ok && containsConditional(parsed.nodes);
 }
 
+function renderMinimumNodes(nodes: Node[]): string {
+	return nodes.map((node) => {
+		if (node.type === "text") return node.value;
+		const truthy = renderMinimumNodes(node.truthy);
+		const falsy = renderMinimumNodes(node.falsy);
+		return Buffer.byteLength(truthy, "utf8") <= Buffer.byteLength(falsy, "utf8") ? truthy : falsy;
+	}).join("");
+}
+
+export function minimumTemplateConditionalContent(content: string): string | undefined {
+	const parsed = parseNodes(content);
+	if (!parsed.ok || !containsConditional(parsed.nodes)) return undefined;
+	return renderMinimumNodes(parsed.nodes);
+}
+
 export function renderTemplateConditionals(
 	content: string,
 	model: ResolvedModelRef,
