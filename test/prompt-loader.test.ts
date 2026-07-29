@@ -2792,3 +2792,23 @@ test("project prompt includes plain prompt-library fragment absent from runtime 
 		assert.equal(result.prompts.has("rules"), false);
 	});
 });
+test("loadPromptsWithModel parses valid prompt budgets and rejects invalid budgets", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const promptsDir = join(cwd, ".pi", "prompts");
+		mkdirSync(promptsDir, { recursive: true });
+		writeFileSync(join(promptsDir, "valid.md"), "---\nbudget:\n  warnTokens: 100\n  maxTokens: 200\n---\nhello");
+		writeFileSync(join(promptsDir, "warning-only.md"), "---\nbudget:\n  warnTokens: 50\n---\nhello");
+		writeFileSync(join(promptsDir, "invalid-zero.md"), "---\nbudget:\n  maxTokens: 0\n---\nhello");
+		writeFileSync(join(promptsDir, "invalid-order.md"), "---\nbudget:\n  warnTokens: 300\n  maxTokens: 200\n---\nhello");
+		writeFileSync(join(promptsDir, "invalid-shape.md"), "---\nbudget: 100\n---\nhello");
+
+		const result = loadPromptsWithModel(cwd, true);
+		assert.deepEqual(result.prompts.get("valid")?.budget, { warnTokens: 100, maxTokens: 200 });
+		assert.deepEqual(result.prompts.get("warning-only")?.budget, { warnTokens: 50 });
+		assert.equal(result.prompts.has("invalid-zero"), false);
+		assert.equal(result.prompts.has("invalid-order"), false);
+		assert.equal(result.prompts.has("invalid-shape"), false);
+		assert.equal(result.diagnostics.filter((item) => item.code === "invalid-budget").length, 3);
+	});
+});
