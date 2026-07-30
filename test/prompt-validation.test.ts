@@ -1323,6 +1323,26 @@ test("changed-gate validation checks ordinary prompt predecessors in the session
 	});
 });
 
+test("changed-gate Git probes ignore inherited repository redirection", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project"); const decoy = join(root, "decoy");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true }); mkdirSync(decoy);
+		execFileSync("git", ["init", "-q"], { cwd: decoy });
+		writeFileSync(join(cwd, ".pi", "prompts", "mutate.md"), "mutate");
+		writeFileSync(join(cwd, ".pi", "prompts", "review.md"), "review");
+		writeFileSync(join(cwd, ".pi", "prompts", "flow.md"), "---\nchain:\n  - id: mutate\n    prompt: mutate\n  - id: review\n    prompt: review\n    when: changed\n---\nignored");
+		const names = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] as const;
+		const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+		try {
+			process.env.GIT_DIR = join(decoy, ".git"); process.env.GIT_WORK_TREE = decoy; process.env.GIT_INDEX_FILE = join(decoy, ".git", "index");
+			const result = validatePromptTemplates(cwd);
+			assert.equal(result.diagnostics.some((item) => item.code === "adaptive-changed-requires-git"), true);
+		} finally {
+			for (const name of names) { const value = saved[name]; if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+		}
+	});
+});
+
 test("changed-gate validation handles run predecessors reached by explicit transitions", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project"); const gitCwd = join(cwd, "repo");

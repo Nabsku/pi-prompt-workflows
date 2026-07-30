@@ -12,6 +12,7 @@ import { minimumTemplateConditionalContent, renderTemplateConditionals } from ".
 import { createAdaptivePreflight, type AdaptivePreflight } from "./adaptive-preflight.js";
 import { createAdaptiveChainState, routeAdaptiveChain, type AdaptiveChainState, type ChainObservation } from "./adaptive-chain.js";
 import { capSanitizedText, capSanitizedUtf8Bytes, sanitizeForTerminal, utf8ByteLength } from "./render-safe.js";
+import { sanitizedGitEnvironment } from "./git-environment.js";
 
 export interface RegisteredPromptSkill {
 	skillName: string;
@@ -438,7 +439,7 @@ function isGitRepository(cwd: string, context: GitProbeContext): GitProbeResult 
 	if (remaining <= 0) { context.limitFailure = "deadline"; return "inconclusive"; }
 	context.probes++;
 	try {
-		const output = execFileSync("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.pager=cat", "rev-parse", "--is-inside-work-tree"], { cwd: canonical, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: Math.min(VALIDATION_GIT_PROBE_MAX_CALL_MS, remaining), maxBuffer: 4096, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "Never", GIT_PAGER: "cat", PAGER: "cat" } }).trim() === "true" ? "git" : "not-git";
+		const output = execFileSync("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.pager=cat", "rev-parse", "--is-inside-work-tree"], { cwd: canonical, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: Math.min(VALIDATION_GIT_PROBE_MAX_CALL_MS, remaining), maxBuffer: 4096, env: sanitizedGitEnvironment() }).trim() === "true" ? "git" : "not-git";
 		context.cache.set(canonical, output); return output;
 	} catch (cause: any) {
 		const timedOut = cause?.code === "ETIMEDOUT" || cause?.signal === "SIGTERM" && cause?.status === null;
