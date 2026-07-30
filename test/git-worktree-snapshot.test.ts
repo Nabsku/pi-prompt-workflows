@@ -68,6 +68,15 @@ test("replacement refs are part of snapshot identity", () => {
 	assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, false);
 });
 
+test("submodule replacement refs are part of parent snapshot identity", () => {
+	const { cwd, submodule } = repoWithSubmodule();
+	const before = captureGitWorktreeSnapshot(cwd);
+	execFileSync("git", ["replace", "HEAD", "HEAD^"], { cwd: submodule });
+	assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, true);
+	execFileSync("git", ["replace", "-d", "HEAD"], { cwd: submodule });
+	assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, false);
+});
+
 test("pre-existing dirty state counts only when its content changes", () => {
 	const cwd = repo();
 	writeFileSync(join(cwd, "tracked.txt"), "dirty\n");
@@ -152,6 +161,20 @@ test("core.filemode controls whether regular-file executable changes are observa
 		chmodSync(join(cwd, "tracked.txt"), 0o644);
 		assert.equal(changed(cwd, () => chmodSync(join(cwd, "tracked.txt"), 0o755)), expected);
 	}
+});
+
+test("root core.symlinks is validated snapshot identity", () => {
+	const cwd = repo();
+	const path = join(cwd, "portable-link");
+	symlinkSync("tracked.txt", path);
+	execFileSync("git", ["add", "portable-link"], { cwd });
+	execFileSync("git", ["commit", "-qm", "link"], { cwd });
+	rmSync(path); writeFileSync(path, "tracked.txt");
+	execFileSync("git", ["config", "core.symlinks", "false"], { cwd });
+	const before = captureGitWorktreeSnapshot(cwd);
+	assert.deepEqual(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)), { changed: false });
+	execFileSync("git", ["config", "core.symlinks", "true"], { cwd });
+	assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, true);
 });
 
 test("symlinks fingerprint target text and never follow target contents", () => {
@@ -523,11 +546,25 @@ test("intent-to-add becoming fully staged changes semantic index identity", () =
 
 test("HEAD verification accepts true unborn refs but rejects existing refs with missing objects", () => {
 	const unborn = mkdtempSync(join(tmpdir(), "git-snapshot-unborn-")); execFileSync("git", ["init", "-q"], { cwd: unborn });
-	assert.match(captureGitWorktreeSnapshot(unborn).headIdentity, /^unborn:/);
+	assert.match(captureGitWorktreeSnapshot(unborn).headIdentity, /^unborn-sha256:/);
 	const broken = repo();
 	writeFileSync(join(broken, ".git", "refs", "heads", "broken"), `${"1".repeat(40)}\n`);
 	execFileSync("git", ["symbolic-ref", "HEAD", "refs/heads/broken"], { cwd: broken });
 	assert.throws(() => captureGitWorktreeSnapshot(broken), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "GIT_ERROR");
+});
+
+test("long symbolic HEAD names have bounded identity and remain ref-sensitive", () => {
+	const cwd = repo();
+	const longRef = `refs/heads/${Array.from({ length: 80 }, (_, i) => `segment-${String(i).padStart(3, "0")}`).join("/")}`;
+	const oid = execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
+	writeFileSync(join(cwd, ".git", "packed-refs"), `# pack-refs with: peeled fully-peeled sorted \n${oid} ${longRef}\n`);
+	execFileSync("git", ["branch", "other"], { cwd });
+	execFileSync("git", ["symbolic-ref", "HEAD", longRef], { cwd });
+	const before = captureGitWorktreeSnapshot(cwd);
+	assert.ok(before.headIdentity.length < 256);
+	assert.deepEqual(compareGitWorktreeSnapshots(before, structuredClone(before)), { changed: false });
+	execFileSync("git", ["symbolic-ref", "HEAD", "refs/heads/other"], { cwd });
+	assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, true);
 });
 
 test("clearing resolve-undo metadata changes semantic index identity", () => {
