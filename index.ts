@@ -399,6 +399,10 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		return undefined;
 	}
 
+	function isAbortedStepResult(result: PromptStepResult | "aborted"): boolean {
+		return result === "aborted" || result.aborted === true;
+	}
+
 	async function executePromptStep(
 		prompt: PromptWithModel,
 		args: string[],
@@ -584,7 +588,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			: undefined;
 		const boomerangTargetId = prompt.boomerang ? ctx.sessionManager.getLeafId() : null;
 		const result = await executePromptStep(prompt, args, ctx, currentModel, override, inheritedModel, undefined, undefined, promptTurnRestore, adaptiveAbortStatus);
-		if (result === "aborted" || result.aborted) return result;
+		if (isAbortedStepResult(result)) return result;
 		if (isDelegatedPrompt && result.text) {
 			const parentStartId = ctx.sessionManager.getLeafId();
 			pi.sendUserMessage(`[Delegated result: ${name}]\n\n${result.text}`);
@@ -2111,7 +2115,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					undefined,
 					loopContext,
 				);
-				if (stepResult === "aborted") {
+				if (isAbortedStepResult(stepResult)) {
 					loopAborted = true;
 					break;
 				}
@@ -2459,7 +2463,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 								taskPreamble,
 								stepLoopContext,
 							);
-							if (stepResult === "aborted" || stepResult.aborted) {
+							if (isAbortedStepResult(stepResult)) {
 								chainAborted = true;
 								aborted = true;
 								break;
@@ -2870,7 +2874,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					const effective = { ...prompt, ...(runtimeCwd ? { cwd: runtimeCwd } : {}), ...(runtime.model ? { models: [runtime.model] } : {}) };
 					let abortStatus: "failed" | "blocked" = "failed";
 					const result = await executeOrdinaryPrompt(prompt.name, effective, stepArgs, ctx, getCurrentModel(ctx), undefined, (status) => { abortStatus = status; }, savedModel);
-					if (result === "aborted" || result.aborted) return { status: abortStatus, error: new Error(`Adaptive prompt step ${prompt.name} did not complete`) };
+					if (isAbortedStepResult(result)) return { status: abortStatus, error: new Error(`Adaptive prompt step ${prompt.name} did not complete`) };
 					if (!result.terminalAssistantMessage) {
 						const error = new Error(`Adaptive prompt step ${prompt.name} produced no terminal assistant message`);
 						notify(ctx, error.message, "error");

@@ -157,6 +157,30 @@ test("symlinks fingerprint target text and never follow target contents", () => 
 	assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, true);
 });
 
+test("opaque embedded untracked repositories are directory fingerprints", () => {
+	const cwd = repo();
+	const before = captureGitWorktreeSnapshot(cwd);
+	const embedded = join(cwd, "nested");
+	mkdirSync(embedded);
+	execFileSync("git", ["init", "-q"], { cwd: embedded });
+	const after = captureGitWorktreeSnapshot(cwd);
+	assert.equal(after.files.find((entry) => Buffer.from(entry.path, "base64").toString() === "nested")?.kind, "directory");
+	assert.equal(compareGitWorktreeSnapshots(before, after).changed, true);
+	rmSync(embedded, { recursive: true });
+	assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, false);
+});
+
+test("nested gitlink rejects a symlinked ancestor before submodule Git probing", () => {
+	const source = repo(), cwd = repo();
+	mkdirSync(join(cwd, "nested"));
+	execFileSync("git", ["-c", "protocol.file.allow=always", "submodule", "add", "-q", source, "nested/sub"], { cwd });
+	execFileSync("git", ["commit", "-qam", "nested submodule"], { cwd });
+	const outside = repo();
+	rmSync(join(cwd, "nested"), { recursive: true });
+	symlinkSync(outside, join(cwd, "nested"));
+	assert.throws(() => captureGitWorktreeSnapshot(cwd), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "UNSAFE_PATH");
+});
+
 test("mutate then restore is no change at final comparison", () => {
 	const cwd = repo();
 	const before = captureGitWorktreeSnapshot(cwd);

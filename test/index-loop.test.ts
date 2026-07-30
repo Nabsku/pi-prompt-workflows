@@ -396,6 +396,22 @@ test("bounded --loop N runs requested iterations when no-converge is set", async
 	});
 });
 
+test("cancelled ordinary loop does not count or continue the aborted iteration", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "cancel-loop.md"), `---\nmodel: ${MODEL_ID}\nloop: 3\nconverge: false\n---\nCANCEL`);
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const entries = () => pi.userMessages.length === 0 ? [] : [{ id: "aborted", type: "message", message: { role: "assistant", stopReason: "aborted", content: [] } }];
+		const { ctx, getNotifications } = createContext(cwd, pi, [ACTIVE_MODEL], { branchEntries: entries });
+		await pi.emit("session_start", {}, ctx);
+		await pi.commands.get("cancel-loop")!.handler("", ctx);
+		assert.equal(pi.userMessages.length, 1);
+		assert.doesNotMatch(getNotifications().join("\n"), /completed 1 iteration/i);
+	});
+});
+
 test("loop rotation cycles models across iterations", async () => {
 	await withTempHome(async (root) => {
 		const cwd = join(root, "project");
