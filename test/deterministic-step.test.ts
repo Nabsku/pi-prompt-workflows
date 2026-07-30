@@ -217,11 +217,18 @@ test("timeout kills a live detached leader and same-PGID descendant when ps is u
 		process.env.PATH = root;
 		try {
 			const started = performance.now();
-			const result = await runDeterministicStep(
+			let startTimeout!: () => void;
+			const timeoutStart = new Promise<void>((resolve) => { startTimeout = resolve; });
+			const resultPromise = runDeterministicStep(
 				{ filePath: join(root, "prompt.md") } as never,
 				{ execution: { kind: "command", command: process.execPath, args: ["-e", leader], shell: false }, handoff: "never", nonInteractive: true, timeoutMs: 100 },
 				root,
+				undefined,
+				{ timeoutStart },
 			);
+			while (!existsSync(pidFile)) await new Promise<void>((resolve) => setImmediate(resolve));
+			startTimeout();
+			const result = await resultPromise;
 			assert.equal(result.timedOut, true);
 			assert.equal(result.processGroupExtinct, true);
 			assert.equal(result.cleanupError, undefined);
