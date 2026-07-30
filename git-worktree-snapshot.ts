@@ -217,14 +217,25 @@ function semanticIndexIdentity(stageOutput: Buffer, flagOutput: Buffer, resolveU
 	const intentToAdd = normalizeIntentToAdd(stageOutput, debugOutput);
 	return createHash("sha256").update(stageOutput).update(Buffer.from([0])).update(flagOutput).update(Buffer.from([0])).update(resolveUndoOutput).update(Buffer.from([0])).update(intentToAdd).digest("hex");
 }
-function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: number, deadline: CaptureDeadline): void {
+function parseSkipWorktreePaths(output: Buffer): Set<string> {
+	const paths = new Set<string>();
+	for (const record of splitNul(output, "INVALID_INDEX")) {
+		if (record.length < 3 || record[1] !== 0x20) throw new GitWorktreeSnapshotError("INVALID_INDEX", "Malformed Git index flag record");
+		if (record[0] === 0x53) paths.add(record.subarray(2).toString("base64"));
+	}
+	return paths;
+}
+function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: number, deadline: CaptureDeadline, skipWorktree = false): boolean {
 	const relative = path.toString("utf8");
 	if (!Buffer.from(relative).equals(path)) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule path is not safely observable");
 	assertNoSymlinkedAncestors(Buffer.from(root), path);
 	const full = join(root, relative);
 	let stat: Stats;
 	try { stat = lstatSync(full); }
-	catch (cause) { throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule is uninitialized or unobservable", { cause }); }
+	catch (cause: any) {
+		if (skipWorktree && (cause?.code === "ENOENT" || cause?.code === "ENOTDIR")) return false;
+		throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule is uninitialized or unobservable", { cause });
+	}
 	if (!stat.isDirectory() || stat.isSymbolicLink()) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule is uninitialized or unobservable");
 	const match = /^160000 ([0-9a-f]+) 0$/.exec(metadata.toString("ascii"));
 	if (!match) throw new GitWorktreeSnapshotError("INVALID_INDEX", "Malformed Git submodule index entry");
@@ -239,6 +250,7 @@ function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: n
 		// compare every indexed path to its raw, no-filter object id.
 		runGit(full, ["diff-index", "--cached", "--quiet", "HEAD", "--"], "GIT_ERROR", maxGit, deadline);
 		const records = splitNul(runGit(full, ["ls-files", "--stage", "-z"], "GIT_ERROR", maxGit, deadline), "INVALID_INDEX");
+		const skipped = parseSkipWorktreePaths(runGit(full, ["ls-files", "-v", "-z"], "GIT_ERROR", maxGit, deadline));
 		if (records.length > DEFAULT_MAX_FILES) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule file limit exceeded");
 		let consumed = 0;
 		for (const record of records) {
@@ -250,6 +262,7 @@ function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: n
 			const relativeSubPath = subPath.toString("utf8");
 			if (!Buffer.from(relativeSubPath).equals(subPath)) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule path is not safely observable");
 			const first = fingerprint(Buffer.from(full), subPath, DEFAULT_MAX_BYTES - consumed, fileMode); consumed += first.consumed;
+			if (first.snapshot.kind === "missing" && skipped.has(subPath.toString("base64"))) continue;
 			const expectedKind = entry[1] === "120000" && symlinks ? "symlink" : "file";
 			const expectedMode = entry[1] === "120000" ? undefined : fileMode ? Number.parseInt(entry[1].slice(3), 8) : 0o644;
 			if (first.snapshot.kind !== expectedKind || expectedMode !== undefined && first.snapshot.mode !== expectedMode) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule path type or mode differs from its index");
@@ -264,6 +277,7 @@ function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: n
 		if (cause instanceof GitWorktreeSnapshotError && cause.code === "UNSUPPORTED_SUBMODULE") throw cause;
 		throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule is dirty or unobservable", { cause });
 	}
+	return true;
 }
 function resolveRepositoryIdentity(cwd: string, maxGit: number, deadline: CaptureDeadline): { canonicalRoot: string; repositoryIdentity: GitWorktreeSnapshot["repositoryIdentity"] } {
 	try {
@@ -308,6 +322,7 @@ export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorkt
 	const statusPaths = parseUntrackedPaths(status);
 	const indexOutput = runGit(canonicalRoot, ["ls-files", "--stage", "-z"], "GIT_ERROR", maxGit, deadline);
 	const indexFlagsOutput = runGit(canonicalRoot, ["ls-files", "-v", "-z"], "GIT_ERROR", maxGit, deadline);
+	const skipWorktreePaths = parseSkipWorktreePaths(indexFlagsOutput);
 	const resolveUndoOutput = runGit(canonicalRoot, ["ls-files", "--resolve-undo", "-z"], "GIT_ERROR", maxGit, deadline);
 	const indexDebugOutput = runGit(canonicalRoot, ["ls-files", "--debug", "-z"], "GIT_ERROR", maxGit, deadline);
 	const indexTree = semanticIndexIdentity(indexOutput, indexFlagsOutput, resolveUndoOutput, indexDebugOutput);
@@ -317,7 +332,7 @@ export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorkt
 	if (paths.length > maxFiles) throw new GitWorktreeSnapshotError("FILE_LIMIT_EXCEEDED", `Working-tree snapshot file limit exceeded (${paths.length} > ${maxFiles})`);
 	const index = fingerprintIndex(paths, indexOutput, maxFiles * 3); const files: GitWorktreeFileSnapshot[] = []; let consumed = 0; const rootBytes = Buffer.from(canonicalRoot);
 	const gitlinks = new Map(index.flatMap((entry) => entry.entries.filter((encoded) => Buffer.from(encoded, "base64").toString("ascii").startsWith("160000 ")).map((encoded) => [entry.path, Buffer.from(encoded, "base64")] as const)));
-	for (const path of paths) { const gitlink = gitlinks.get(path.toString("base64")); if (gitlink) { verifySubmodule(canonicalRoot, path, gitlink, maxGit, deadline); files.push({ path: path.toString("base64"), kind: "directory" }); continue; } const result = fingerprint(rootBytes, path, maxBytes - consumed, fileMode); consumed += result.consumed; files.push(result.snapshot); }
+	for (const path of paths) { const key = path.toString("base64"); const gitlink = gitlinks.get(key); if (gitlink) { const materialized = verifySubmodule(canonicalRoot, path, gitlink, maxGit, deadline, skipWorktreePaths.has(key)); files.push({ path: key, kind: materialized ? "directory" : "missing" }); continue; } const result = fingerprint(rootBytes, path, maxBytes - consumed, fileMode); consumed += result.consumed; files.push(result.snapshot); }
 	const finalIdentity = resolveRepositoryIdentity(canonicalRoot, maxGit, deadline);
 	const verifiedFileMode = readCoreFileMode(canonicalRoot, maxGit, deadline);
 	if (finalIdentity.canonicalRoot !== canonicalRoot || finalIdentity.repositoryIdentity.rootFileId !== repositoryIdentity.rootFileId || finalIdentity.repositoryIdentity.gitDir !== repositoryIdentity.gitDir || finalIdentity.repositoryIdentity.commonDir !== repositoryIdentity.commonDir || finalIdentity.repositoryIdentity.gitDirFileId !== repositoryIdentity.gitDirFileId || finalIdentity.repositoryIdentity.commonDirFileId !== repositoryIdentity.commonDirFileId) throw new GitWorktreeSnapshotError("RACE_DETECTED", "Git repository identity changed during snapshot capture");
@@ -346,7 +361,7 @@ export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorkt
 	const verifiedIndexTree = semanticIndexIdentity(verifiedIndexOutput, verifiedIndexFlagsOutput, verifiedResolveUndoOutput, verifiedIndexDebugOutput);
 	const verifiedIndex = fingerprintIndex(paths, verifiedIndexOutput, maxFiles * 3);
 	const verifiedFiles: GitWorktreeFileSnapshot[] = []; let verifiedConsumed = 0;
-	for (const path of paths) { const gitlink = gitlinks.get(path.toString("base64")); if (gitlink) { verifySubmodule(canonicalRoot, path, gitlink, maxGit, deadline); verifiedFiles.push({ path: path.toString("base64"), kind: "directory" }); continue; } const result = fingerprint(rootBytes, path, maxBytes - verifiedConsumed, fileMode); verifiedConsumed += result.consumed; verifiedFiles.push(result.snapshot); }
+	for (const path of paths) { const key = path.toString("base64"); const gitlink = gitlinks.get(key); if (gitlink) { const materialized = verifySubmodule(canonicalRoot, path, gitlink, maxGit, deadline, skipWorktreePaths.has(key)); verifiedFiles.push({ path: key, kind: materialized ? "directory" : "missing" }); continue; } const result = fingerprint(rootBytes, path, maxBytes - verifiedConsumed, fileMode); verifiedConsumed += result.consumed; verifiedFiles.push(result.snapshot); }
 	const equalFiles = files.length === verifiedFiles.length && files.every((entry, i) => {
 		const verified = verifiedFiles[i]!;
 		return entry.path === verified.path && entry.kind === verified.kind && entry.mode === verified.mode && entry.size === verified.size && entry.fingerprint === verified.fingerprint;
@@ -393,7 +408,7 @@ function canonicalSnapshot(value: unknown): GitWorktreeSnapshot | undefined {
 		const x = dataRecord(rawIndex[i], ["entries", "fingerprint", "path"]); const entries0 = x && dataArray(x.entries); if (!x || x.path !== path || typeof x.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(x.fingerprint) || !entries0 || entries0.length > 3) return undefined;
 		const entries: string[] = []; let prior = ""; for (const entry of entries0) { const decoded = canonicalBase64(entry); if (!decoded || !/^[0-7]{6} [0-9a-f]{40,64} [0-3]$/.test(decoded.toString("ascii")) || (prior && (entry as string) <= prior)) return undefined; prior = entry as string; entries.push(entry as string); }
 		const isGitlink = entries.length === 1 && Buffer.from(entries[0]!, "base64").toString("ascii").startsWith("160000 ");
-		if (isGitlink && f.kind !== "directory") return undefined;
+		if (isGitlink && f.kind !== "directory" && f.kind !== "missing") return undefined;
 		const hash = createHash("sha256").update(Buffer.from(path, "base64")).update(Buffer.from([0])); if (!entries.length) hash.update("absent"); else entries.forEach((e) => hash.update(Buffer.from(e, "base64")).update(Buffer.from([0]))); if (hash.digest("hex") !== x.fingerprint) return undefined;
 		index.push({ path, entries, fingerprint: x.fingerprint });
 	}

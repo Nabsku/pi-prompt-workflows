@@ -424,6 +424,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		const skillResolution = resolvePromptSkills(requestedSkills, ctx.cwd, pi.getCommands() as RuntimeSkillCommand[]);
 		if (skillResolution.kind === "error") {
 			notify(ctx, skillResolution.error, "error");
+			adaptiveAbortStatus?.("blocked");
 			return "aborted";
 		}
 		let deterministicPreamble: string | undefined;
@@ -514,11 +515,13 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				: await preparePromptExecution(prompt, args, currentModel, ctx.modelRegistry, { inheritedModel });
 		if (!prepared) {
 			notify(ctx, `No available model from: ${prompt.models.join(", ")}`, "error");
+			adaptiveAbortStatus?.("blocked");
 			return "aborted";
 		}
 		if ("message" in prepared) {
 			if (prepared.warning) notify(ctx, prepared.warning, "warning");
 			notify(ctx, prepared.message, "error");
+			adaptiveAbortStatus?.("blocked");
 			return "aborted";
 		}
 		if (prepared.warning) {
@@ -541,6 +544,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			const switched = await pi.setModel(prepared.selectedModel.model);
 			if (!switched) {
 				notify(ctx, `Failed to switch to model ${prepared.selectedModel.model.provider}/${prepared.selectedModel.model.id}`, "error");
+				adaptiveAbortStatus?.("blocked");
 				return "aborted";
 			}
 			runtimeModel = prepared.selectedModel.model;
@@ -549,7 +553,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		if (prompt.thinking) {
 			pi.setThinkingLevel(prompt.thinking);
 		}
-		pendingSkillMessage = skillResolution.kind === "ready" ? buildSkillLoadedMessage(skillResolution.skills) : undefined;
+		const ownedPendingSkillMessage = skillResolution.kind === "ready" ? buildSkillLoadedMessage(skillResolution.skills) : undefined;
+		pendingSkillMessage = ownedPendingSkillMessage;
 		if (promptTurnRestore) {
 			const currentModel = getCurrentModel(ctx);
 			if (promptTurnRestore.originalModel && currentModel && !sameModel(promptTurnRestore.originalModel, currentModel)) {
@@ -2778,6 +2783,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		let savedModel: Model<any> | undefined;
 		let savedThinking: ThinkingLevel | undefined;
 		let executionStarted = false;
+		const pendingSkillMessageAtStart = pendingSkillMessage;
 		try {
 			refreshPrompts(ctx.cwd, ctx);
 			wrapper = adaptivePrompts.get(name);
@@ -2905,6 +2911,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					// restore markers must not leak into the next unrelated turn.
 					previousModel = undefined;
 					previousThinking = undefined;
+					if (pendingSkillMessage !== pendingSkillMessageAtStart) pendingSkillMessage = pendingSkillMessageAtStart;
 					if (executionStarted && wrapper?.restore) await restoreSessionState(ctx, savedModel, savedThinking, getCurrentModel(ctx), pi.getThinkingLevel());
 				} finally {
 					releaseWorkflowOwner(owner);

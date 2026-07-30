@@ -134,3 +134,19 @@ test("adaptive approval refusal routes through onBlocked", async () => {
 		assert.deepEqual(messages, ["BLOCKED ROUTE"]);
 	} finally { process.env.HOME = oldHome; rmSync(root, { recursive: true, force: true }); }
 });
+
+test("adaptive send failure does not leak its pending skill payload into a later turn", async () => {
+	const root = mkdtempSync(join(tmpdir(), "adaptive-skill-cleanup-")); const oldHome = process.env.HOME; process.env.HOME = join(root, "home");
+	try {
+		const cwd = join(root, "repo"); const promptDir = join(cwd, ".pi", "prompts"); const skillPath = join(root, "SKILL.md");
+		mkdirSync(promptDir, { recursive: true }); mkdirSync(process.env.HOME, { recursive: true }); execFileSync("git", ["init", "-q"], { cwd });
+		writeFileSync(skillPath, "DO NOT LEAK");
+		writeFileSync(join(promptDir, "skilled.md"), "---\nmodel: test/model\nskill: cleanup\n---\nTASK");
+		writeFileSync(join(promptDir, "flow.md"), "---\nchain:\n  - prompt: skilled\nlimits:\n  maxSteps: 1\n  maxModelCalls: 1\n---\nignored");
+		const commands = new Map<string, any>(); const handlers = new Map<string, any>();
+		const pi: any = { registerCommand(name: string, command: any) { commands.set(name, command); }, registerMessageRenderer() {}, registerTool() {}, getCommands() { return [{ name: "cleanup", source: "skill", sourceInfo: { path: skillPath } }]; }, on(event: string, handler: any) { handlers.set(event, handler); }, async setModel() { return true; }, getThinkingLevel() { return "medium"; }, setThinkingLevel() {}, sendUserMessage() { throw new Error("send-crash"); }, sendMessage() {} };
+		const ctx: any = { cwd, model: MODEL, signal: new AbortController().signal, hasUI: false, modelRegistry: { find: () => MODEL, getAll: () => [MODEL], getAvailable: () => [MODEL] }, ui: { notify() {}, setStatus() {}, setWorkingMessage() {}, onTerminalInput() { return () => {}; }, theme: { fg(_x: string, value: string) { return value; } } }, isIdle: () => false, waitForIdle: async () => {}, sessionManager: { getLeafId: () => "root", getBranch: () => [] }, navigateTree: async () => ({ cancelled: false }) };
+		promptModelExtension(pi); await handlers.get("session_start")({}, ctx); await commands.get("flow").handler("", ctx);
+		assert.equal(await handlers.get("before_agent_start")({ systemPrompt: "BASE" }, ctx), undefined);
+	} finally { process.env.HOME = oldHome; rmSync(root, { recursive: true, force: true }); }
+});
