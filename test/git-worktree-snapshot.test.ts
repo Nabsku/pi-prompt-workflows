@@ -372,6 +372,16 @@ test("detects a staged gitlink change while allowing the matching clean submodul
 	assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, true);
 });
 
+test("clean sparse submodule paths may be absent while materialized changes fail closed", () => {
+	const { cwd, submodule } = repoWithSubmodule();
+	execFileSync("git", ["update-index", "--skip-worktree", "tracked.txt"], { cwd: submodule });
+	rmSync(join(submodule, "tracked.txt"));
+	const sparse = captureGitWorktreeSnapshot(cwd);
+	assert.deepEqual(compareGitWorktreeSnapshots(sparse, captureGitWorktreeSnapshot(cwd)), { changed: false });
+	writeFileSync(join(submodule, "tracked.txt"), "dirty sparse materialization\n");
+	assert.throws(() => captureGitWorktreeSnapshot(cwd), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "UNSUPPORTED_SUBMODULE");
+});
+
 test("non-git cwd and caps fail visibly with structured errors", () => {
 	const nonGit = mkdtempSync(join(tmpdir(), "not-git-"));
 	assert.throws(() => captureGitWorktreeSnapshot(nonGit), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "NOT_GIT_REPOSITORY");
