@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildDeterministicPreamble, formatDeterministicExecution, runDeterministicStep, shouldHandoffToLlm } from "../deterministic-step.ts";
 import type { DeterministicStep } from "../prompt-loader.ts";
+import { assertProcessExtinct } from "./process-extinction.ts";
 
 async function withTempDir(run: (root: string) => Promise<void>) {
 	const root = mkdtempSync(join(tmpdir(), "pi-prompt-deterministic-step-"));
@@ -182,7 +183,6 @@ test("abort escalates a TERM-resistant same-group descendant after the leader ex
 		assert.equal(result.processGroupExtinct, true);
 		assert.ok(performance.now() - started < 2_000, "cleanup must not leak to the 8s deadline");
 		const pid = Number((await import("node:fs")).readFileSync(pidFile, "utf8"));
-		await new Promise((resolve) => setTimeout(resolve, 50));
-		assert.throws(() => process.kill(pid, 0));
+		await assertProcessExtinct(pid);
 	});
 });

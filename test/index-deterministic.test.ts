@@ -1,6 +1,5 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +9,7 @@ import {
 	PROMPT_TEMPLATE_DETERMINISTIC_COMPLETION_MESSAGE_TYPE,
 	PROMPT_TEMPLATE_DETERMINISTIC_MESSAGE_TYPE,
 } from "../deterministic-step.ts";
+import { assertProcessExtinct } from "./process-extinction.ts";
 
 const MODEL = { provider: "anthropic", id: "claude-sonnet-4-20250514" };
 
@@ -299,22 +299,7 @@ test("deterministic cancellation kills a SIGTERM-resistant descendant before res
 		assert.equal(result.cleanupScope, "process-group");
 		assert.equal(result.processGroupExtinct, true);
 		assert.equal(existsSync(delayedWrite), false, "descendant wrote after cancellation");
-		for (const pid of [pids.parent, pids.descendant]) {
-			const goneDeadline = Date.now() + 2_000;
-			let operationallyAlive = true;
-			while (operationallyAlive && Date.now() < goneDeadline) {
-				try {
-					process.kill(pid, 0);
-					const state = execFileSync("/bin/ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8", timeout: 500 }).trim();
-					operationallyAlive = state.length > 0 && !state.startsWith("Z");
-				} catch (error) {
-					if ((error as NodeJS.ErrnoException).code === "ESRCH" || (error as { status?: number }).status === 1) operationallyAlive = false;
-					else throw error;
-				}
-				if (operationallyAlive) await new Promise((resolve) => setTimeout(resolve, 10));
-			}
-			assert.equal(operationallyAlive, false, `process ${pid} survived cancellation`);
-		}
+		for (const pid of [pids.parent, pids.descendant]) await assertProcessExtinct(pid);
 	});
 });
 

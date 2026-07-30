@@ -303,6 +303,55 @@ test("tracked assume-unchanged and skip-worktree edits remain observable", () =>
 	}
 });
 
+test("toggling assume-unchanged and skip-worktree changes semantic index identity", () => {
+	for (const [setFlag, clearFlag] of [["--assume-unchanged", "--no-assume-unchanged"], ["--skip-worktree", "--no-skip-worktree"]]) {
+		const cwd = repo();
+		const before = captureGitWorktreeSnapshot(cwd);
+		execFileSync("git", ["update-index", setFlag, "tracked.txt"], { cwd });
+		const flagged = captureGitWorktreeSnapshot(cwd);
+		assert.equal(compareGitWorktreeSnapshots(before, flagged).changed, true, `${setFlag} was omitted from index identity`);
+		execFileSync("git", ["update-index", clearFlag, "tracked.txt"], { cwd });
+		assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, false);
+	}
+});
+
+test("tracked file-to-directory and directory-to-file replacements are safe changed states", () => {
+	const fileToDirectory = repo();
+	const beforeFile = captureGitWorktreeSnapshot(fileToDirectory);
+	rmSync(join(fileToDirectory, "tracked.txt"));
+	mkdirSync(join(fileToDirectory, "tracked.txt"));
+	writeFileSync(join(fileToDirectory, "tracked.txt", "child.txt"), "bounded child\n");
+	const afterDirectory = captureGitWorktreeSnapshot(fileToDirectory);
+	assert.equal(compareGitWorktreeSnapshots(beforeFile, afterDirectory).changed, true);
+	assert.ok(afterDirectory.files.some((entry) => Buffer.from(entry.path, "base64").toString() === "tracked.txt/child.txt" && entry.kind === "file"));
+
+	const directoryToFile = repo();
+	mkdirSync(join(directoryToFile, "nested"));
+	writeFileSync(join(directoryToFile, "nested", "child.txt"), "tracked child\n");
+	execFileSync("git", ["add", "nested/child.txt"], { cwd: directoryToFile });
+	execFileSync("git", ["commit", "-qm", "nested"], { cwd: directoryToFile });
+	const beforeDirectory = captureGitWorktreeSnapshot(directoryToFile);
+	rmSync(join(directoryToFile, "nested"), { recursive: true });
+	writeFileSync(join(directoryToFile, "nested"), "replacement file\n");
+	assert.equal(compareGitWorktreeSnapshots(beforeDirectory, captureGitWorktreeSnapshot(directoryToFile)).changed, true);
+});
+
+test("tracked descendants reject a symlinked ancestor before external content is read", () => {
+	const cwd = repo();
+	mkdirSync(join(cwd, "nested"));
+	writeFileSync(join(cwd, "nested", "child.txt"), "tracked child\n");
+	execFileSync("git", ["add", "nested/child.txt"], { cwd });
+	execFileSync("git", ["commit", "-qm", "nested"], { cwd });
+	const outside = mkdtempSync(join(tmpdir(), "git-snapshot-external-dir-"));
+	writeFileSync(join(outside, "child.txt"), "external secret one\n");
+	rmSync(join(cwd, "nested"), { recursive: true });
+	symlinkSync(outside, join(cwd, "nested"));
+	for (const content of ["external secret two\n", "external secret three\n"]) {
+		writeFileSync(join(outside, "child.txt"), content);
+		assert.throws(() => captureGitWorktreeSnapshot(cwd), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "UNSAFE_PATH" && /symlinked.*ancestor/i.test(error.message));
+	}
+});
+
 test("capture maxBytes public cap self-validates at the boundary", () => {
 	const cwd = repo();
 	const boundary = 64 * 1024 * 1024;
