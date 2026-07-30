@@ -24,6 +24,8 @@ export interface GitWorktreeFileSnapshot {
 export interface GitIndexPathSnapshot { readonly path: string; readonly entries: readonly string[]; readonly fingerprint: string; }
 export interface GitWorktreeSnapshot {
 	readonly version: 1;
+	/** Effective checkout representation for 120000 index entries. */
+	readonly coreSymlinks: boolean;
 	readonly repositoryRoot: string;
 	/** Canonical git-dir and common-dir, separated to distinguish linked worktrees/repository replacement. */
 	readonly repositoryIdentity: { readonly rootFileId: string; readonly gitDir: string; readonly commonDir: string; readonly gitDirFileId: string; readonly commonDirFileId: string };
@@ -225,7 +227,7 @@ function parseSkipWorktreePaths(output: Buffer): Set<string> {
 	}
 	return paths;
 }
-function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: number, deadline: CaptureDeadline, remainingBytes: number, remainingFiles: number, skipWorktree = false): { materialized: boolean; consumed: number; files: number } {
+function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: number, deadline: CaptureDeadline, remainingBytes: number, remainingFiles: number, skipWorktree = false): { materialized: boolean; consumed: number; files: number; replacementRefs: string } {
 	const relative = path.toString("utf8");
 	if (!Buffer.from(relative).equals(path)) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule path is not safely observable");
 	assertNoSymlinkedAncestors(Buffer.from(root), path);
@@ -233,7 +235,7 @@ function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: n
 	let stat: Stats;
 	try { stat = lstatSync(full); }
 	catch (cause: any) {
-		if (skipWorktree && (cause?.code === "ENOENT" || cause?.code === "ENOTDIR")) return { materialized: false, consumed: 0, files: 0 };
+		if (skipWorktree && (cause?.code === "ENOENT" || cause?.code === "ENOTDIR")) return { materialized: false, consumed: 0, files: 0, replacementRefs: createHash("sha256").digest("hex") };
 		throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule is uninitialized or unobservable", { cause });
 	}
 	if (!stat.isDirectory() || stat.isSymbolicLink()) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule is uninitialized or unobservable");
@@ -244,6 +246,7 @@ function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: n
 	catch (cause) { throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule is uninitialized or unobservable", { cause }); }
 	if (head !== match[1]) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule HEAD does not match its staged gitlink");
 	let consumed = 0, verifiedFiles = 0;
+	const replacementRefs = replacementRefsIdentity(full, maxGit, deadline);
 	try {
 		const fileMode = readCoreFileMode(full, maxGit, deadline);
 		const symlinks = readCoreSymlinks(full, maxGit, deadline);
@@ -274,11 +277,12 @@ function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: n
 			if (oid !== entry[2] || JSON.stringify(first.snapshot) !== JSON.stringify(second.snapshot)) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule worktree differs from its index");
 		}
 		if (runGit(full, ["ls-files", "--others", "--exclude-standard", "-z"], "GIT_ERROR", maxGit, deadline).length) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule has untracked content");
+		if (replacementRefsIdentity(full, maxGit, deadline) !== replacementRefs) throw new GitWorktreeSnapshotError("RACE_DETECTED", "Submodule replacement refs changed during snapshot capture");
 	} catch (cause) {
-		if (cause instanceof GitWorktreeSnapshotError && (cause.code === "UNSUPPORTED_SUBMODULE" || cause.code === "BYTE_LIMIT_EXCEEDED" || cause.code === "FILE_LIMIT_EXCEEDED")) throw cause;
+		if (cause instanceof GitWorktreeSnapshotError && (cause.code === "UNSUPPORTED_SUBMODULE" || cause.code === "BYTE_LIMIT_EXCEEDED" || cause.code === "FILE_LIMIT_EXCEEDED" || cause.code === "RACE_DETECTED")) throw cause;
 		throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule is dirty or unobservable", { cause });
 	}
-	return { materialized: true, consumed, files: verifiedFiles };
+	return { materialized: true, consumed, files: verifiedFiles, replacementRefs };
 }
 
 function replacementRefsIdentity(cwd: string, maxGit: number, deadline: CaptureDeadline): string {
@@ -296,6 +300,15 @@ function replacementRefsIdentity(cwd: string, maxGit: number, deadline: CaptureD
 	const hash = createHash("sha256");
 	for (const [name, oid] of refs) hash.update(name).update(Buffer.from([0])).update(oid).update(Buffer.from([0]));
 	return hash.digest("hex");
+}
+function symbolicRefIdentity(symbolic: string): string {
+	return createHash("sha256").update(Buffer.from(symbolic)).digest("hex");
+}
+function resolvedHeadIdentity(symbolic: string, oid: string, replaceIdentity: string): string {
+	return `${symbolic ? `symbolic-sha256:${symbolicRefIdentity(symbolic)}:${oid}` : `detached:${oid}`}:replace:${replaceIdentity}`;
+}
+function unbornHeadIdentity(symbolic: string, replaceIdentity: string): string {
+	return `unborn-sha256:${symbolicRefIdentity(symbolic)}:replace:${replaceIdentity}`;
 }
 function resolveRepositoryIdentity(cwd: string, maxGit: number, deadline: CaptureDeadline): { canonicalRoot: string; repositoryIdentity: GitWorktreeSnapshot["repositoryIdentity"] } {
 	try {
@@ -317,13 +330,14 @@ export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorkt
 	const deadline = { expiresAt: performance.now() + deadlineMs };
 	const { canonicalRoot, repositoryIdentity } = resolveRepositoryIdentity(cwd, maxGit, deadline);
 	const fileMode = readCoreFileMode(canonicalRoot, maxGit, deadline);
+	const coreSymlinks = readCoreSymlinks(canonicalRoot, maxGit, deadline);
 	let symbolic = "";
 	try { symbolic = oneLine(runGit(canonicalRoot, ["symbolic-ref", "-q", "HEAD"], "GIT_ERROR", maxGit, deadline), "symbolic HEAD"); }
 	catch (error: any) { const status = error?.cause?.status; if (status !== 1) throw error; }
 	let headIdentity: string;
 	try {
 		const oid = oneLine(runGit(canonicalRoot, ["rev-parse", "--verify", "HEAD^{commit}"], "GIT_ERROR", maxGit, deadline), "HEAD");
-		headIdentity = `${symbolic ? `symbolic:${symbolic}:${oid}` : `detached:${oid}`}:replace:${replacementRefsIdentity(canonicalRoot, maxGit, deadline)}`;
+		headIdentity = resolvedHeadIdentity(symbolic, oid, replacementRefsIdentity(canonicalRoot, maxGit, deadline));
 	} catch (error) {
 		if (!symbolic) throw error;
 		try {
@@ -332,7 +346,7 @@ export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorkt
 		} catch (targetError: any) {
 			if (!(targetError instanceof GitWorktreeSnapshotError) || (targetError as any).cause?.status !== 1) throw targetError;
 		}
-		headIdentity = `unborn:${symbolic}:replace:${replacementRefsIdentity(canonicalRoot, maxGit, deadline)}`;
+		headIdentity = unbornHeadIdentity(symbolic, replacementRefsIdentity(canonicalRoot, maxGit, deadline));
 	}
 	// Avoid `git status`: it can run configured clean/process filters. Tracked
 	// paths are covered by the index and raw worktree fingerprints already.
@@ -351,9 +365,10 @@ export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorkt
 	const index = fingerprintIndex(paths, indexOutput, maxFiles * 3); const files: GitWorktreeFileSnapshot[] = []; let consumed = 0; const rootBytes = Buffer.from(canonicalRoot);
 	const gitlinks = new Map(index.flatMap((entry) => entry.entries.filter((encoded) => Buffer.from(encoded, "base64").toString("ascii").startsWith("160000 ")).map((encoded) => [entry.path, Buffer.from(encoded, "base64")] as const)));
 	let submoduleFiles = 0;
-	for (const path of paths) { const key = path.toString("base64"); const gitlink = gitlinks.get(key); if (gitlink) { const result = verifySubmodule(canonicalRoot, path, gitlink, maxGit, deadline, maxBytes - consumed, maxFiles - paths.length - submoduleFiles, skipWorktreePaths.has(key)); consumed += result.consumed; submoduleFiles += result.files; files.push({ path: key, kind: result.materialized ? "directory" : "missing" }); continue; } const result = fingerprint(rootBytes, path, maxBytes - consumed, fileMode); consumed += result.consumed; files.push(result.snapshot); }
+	for (const path of paths) { const key = path.toString("base64"); const gitlink = gitlinks.get(key); if (gitlink) { const result = verifySubmodule(canonicalRoot, path, gitlink, maxGit, deadline, maxBytes - consumed, maxFiles - paths.length - submoduleFiles, skipWorktreePaths.has(key)); consumed += result.consumed; submoduleFiles += result.files; files.push(result.materialized ? { path: key, kind: "directory", fingerprint: result.replacementRefs } : { path: key, kind: "missing" }); continue; } const result = fingerprint(rootBytes, path, maxBytes - consumed, fileMode); consumed += result.consumed; files.push(result.snapshot); }
 	const finalIdentity = resolveRepositoryIdentity(canonicalRoot, maxGit, deadline);
 	const verifiedFileMode = readCoreFileMode(canonicalRoot, maxGit, deadline);
+	const verifiedCoreSymlinks = readCoreSymlinks(canonicalRoot, maxGit, deadline);
 	if (finalIdentity.canonicalRoot !== canonicalRoot || finalIdentity.repositoryIdentity.rootFileId !== repositoryIdentity.rootFileId || finalIdentity.repositoryIdentity.gitDir !== repositoryIdentity.gitDir || finalIdentity.repositoryIdentity.commonDir !== repositoryIdentity.commonDir || finalIdentity.repositoryIdentity.gitDirFileId !== repositoryIdentity.gitDirFileId || finalIdentity.repositoryIdentity.commonDirFileId !== repositoryIdentity.commonDirFileId) throw new GitWorktreeSnapshotError("RACE_DETECTED", "Git repository identity changed during snapshot capture");
 	let verifiedSymbolic = "";
 	try { verifiedSymbolic = oneLine(runGit(canonicalRoot, ["symbolic-ref", "-q", "HEAD"], "GIT_ERROR", maxGit, deadline), "symbolic HEAD"); }
@@ -361,7 +376,7 @@ export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorkt
 	let verifiedHeadIdentity: string;
 	try {
 		const oid = oneLine(runGit(canonicalRoot, ["rev-parse", "--verify", "HEAD^{commit}"], "GIT_ERROR", maxGit, deadline), "HEAD");
-		verifiedHeadIdentity = `${verifiedSymbolic ? `symbolic:${verifiedSymbolic}:${oid}` : `detached:${oid}`}:replace:${replacementRefsIdentity(canonicalRoot, maxGit, deadline)}`;
+		verifiedHeadIdentity = resolvedHeadIdentity(verifiedSymbolic, oid, replacementRefsIdentity(canonicalRoot, maxGit, deadline));
 	} catch (error) {
 		if (!verifiedSymbolic) throw error;
 		try {
@@ -370,7 +385,7 @@ export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorkt
 		} catch (targetError: any) {
 			if (!(targetError instanceof GitWorktreeSnapshotError) || (targetError as any).cause?.status !== 1) throw targetError;
 		}
-		verifiedHeadIdentity = `unborn:${verifiedSymbolic}:replace:${replacementRefsIdentity(canonicalRoot, maxGit, deadline)}`;
+		verifiedHeadIdentity = unbornHeadIdentity(verifiedSymbolic, replacementRefsIdentity(canonicalRoot, maxGit, deadline));
 	}
 	const verifiedStatus = runGit(canonicalRoot, ["ls-files", "--others", "--exclude-standard", "-z"], "GIT_ERROR", maxGit, deadline);
 	const verifiedIndexOutput = runGit(canonicalRoot, ["ls-files", "--stage", "-z"], "GIT_ERROR", maxGit, deadline);
@@ -381,7 +396,7 @@ export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorkt
 	const verifiedIndex = fingerprintIndex(paths, verifiedIndexOutput, maxFiles * 3);
 	const verifiedFiles: GitWorktreeFileSnapshot[] = []; let verifiedConsumed = 0;
 	let verifiedSubmoduleFiles = 0;
-	for (const path of paths) { const key = path.toString("base64"); const gitlink = gitlinks.get(key); if (gitlink) { const result = verifySubmodule(canonicalRoot, path, gitlink, maxGit, deadline, maxBytes - verifiedConsumed, maxFiles - paths.length - verifiedSubmoduleFiles, skipWorktreePaths.has(key)); verifiedConsumed += result.consumed; verifiedSubmoduleFiles += result.files; verifiedFiles.push({ path: key, kind: result.materialized ? "directory" : "missing" }); continue; } const result = fingerprint(rootBytes, path, maxBytes - verifiedConsumed, fileMode); verifiedConsumed += result.consumed; verifiedFiles.push(result.snapshot); }
+	for (const path of paths) { const key = path.toString("base64"); const gitlink = gitlinks.get(key); if (gitlink) { const result = verifySubmodule(canonicalRoot, path, gitlink, maxGit, deadline, maxBytes - verifiedConsumed, maxFiles - paths.length - verifiedSubmoduleFiles, skipWorktreePaths.has(key)); verifiedConsumed += result.consumed; verifiedSubmoduleFiles += result.files; verifiedFiles.push(result.materialized ? { path: key, kind: "directory", fingerprint: result.replacementRefs } : { path: key, kind: "missing" }); continue; } const result = fingerprint(rootBytes, path, maxBytes - verifiedConsumed, fileMode); verifiedConsumed += result.consumed; verifiedFiles.push(result.snapshot); }
 	const equalFiles = files.length === verifiedFiles.length && files.every((entry, i) => {
 		const verified = verifiedFiles[i]!;
 		return entry.path === verified.path && entry.kind === verified.kind && entry.mode === verified.mode && entry.size === verified.size && entry.fingerprint === verified.fingerprint;
@@ -390,8 +405,8 @@ export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorkt
 		const verified = verifiedIndex[i]!;
 		return entry.path === verified.path && entry.fingerprint === verified.fingerprint && entry.entries.length === verified.entries.length && entry.entries.every((value, j) => value === verified.entries[j]);
 	});
-	if (verifiedFileMode !== fileMode || verifiedHeadIdentity !== headIdentity || verifiedIndexTree !== indexTree || !verifiedStatus.equals(status) || !equalFiles || !equalIndex) throw new GitWorktreeSnapshotError("RACE_DETECTED", "Git configuration, HEAD, index, status, or relevant content changed during snapshot capture");
-	return { version: 1, repositoryRoot: rootBytes.toString("base64"), repositoryIdentity, headIdentity, indexTree, status: status.toString("base64"), files, index };
+	if (verifiedFileMode !== fileMode || verifiedCoreSymlinks !== coreSymlinks || verifiedHeadIdentity !== headIdentity || verifiedIndexTree !== indexTree || !verifiedStatus.equals(status) || !equalFiles || !equalIndex) throw new GitWorktreeSnapshotError("RACE_DETECTED", "Git configuration, HEAD, index, status, or relevant content changed during snapshot capture");
+	return { version: 1, coreSymlinks, repositoryRoot: rootBytes.toString("base64"), repositoryIdentity, headIdentity, indexTree, status: status.toString("base64"), files, index };
 }
 function dataRecord(value: unknown, keys: readonly string[]): Record<string, unknown> | undefined {
 	if (!value || typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) return undefined;
@@ -412,33 +427,35 @@ function dataArray(value: unknown): readonly unknown[] | undefined {
 function canonicalBase64(value: unknown, maxBytes = DEFAULT_MAX_GIT_OUTPUT_BYTES): Buffer | undefined { if (typeof value !== "string" || value.length > Math.ceil(maxBytes / 3) * 4) return undefined; const decoded = Buffer.from(value, "base64"); return decoded.length <= maxBytes && decoded.toString("base64") === value ? decoded : undefined; }
 function safeRelativePath(value: unknown): string | undefined { const bytes = canonicalBase64(value, 1024 * 1024); if (!bytes) return undefined; try { absolutePath(Buffer.from("/root"), bytes); } catch { return undefined; } return value as string; }
 function canonicalSnapshot(value: unknown): GitWorktreeSnapshot | undefined {
-	const top = dataRecord(value, ["files", "headIdentity", "index", "indexTree", "repositoryIdentity", "repositoryRoot", "status", "version"]); if (!top || top.version !== 1) return undefined;
+	const top = dataRecord(value, ["coreSymlinks", "files", "headIdentity", "index", "indexTree", "repositoryIdentity", "repositoryRoot", "status", "version"]); if (!top || top.version !== 1 || typeof top.coreSymlinks !== "boolean") return undefined;
 	const root = canonicalBase64(top.repositoryRoot, 1024 * 1024), status = canonicalBase64(top.status); if (!root || !status || !root.length || root.includes(0) || !Buffer.from(root.toString("utf8")).equals(root) || !isPlatformAbsolutePath(root.toString("utf8"))) return undefined;
 	const identity = dataRecord(top.repositoryIdentity, ["commonDir", "commonDirFileId", "gitDir", "gitDirFileId", "rootFileId"]); if (!identity) return undefined;
 	if (![identity.gitDir, identity.commonDir].every((x) => typeof x === "string" && x.length <= 1024 * 1024 && isPlatformAbsolutePath(x) && !x.includes("\0")) || ![identity.rootFileId, identity.gitDirFileId, identity.commonDirFileId].every((x) => typeof x === "string" && x.length <= 64 && /^\d+:\d+$/.test(x))) return undefined;
-	if (typeof top.headIdentity !== "string" || top.headIdentity.length > 1200 || !/^(?:(?:symbolic:[^:\0]+|detached):[0-9a-f]{40,64}|unborn:[^:\0]+):replace:[0-9a-f]{64}$/.test(top.headIdentity) || typeof top.indexTree !== "string" || !/^[0-9a-f]{40,64}$/.test(top.indexTree)) return undefined;
+	if (typeof top.headIdentity !== "string" || top.headIdentity.length > 256 || !/^(?:(?:symbolic-sha256:[0-9a-f]{64}|detached):[0-9a-f]{40,64}|unborn-sha256:[0-9a-f]{64}):replace:[0-9a-f]{64}$/.test(top.headIdentity) || typeof top.indexTree !== "string" || !/^[0-9a-f]{40,64}$/.test(top.indexTree)) return undefined;
 	const rawFiles = dataArray(top.files), rawIndex = dataArray(top.index); if (!rawFiles || !rawIndex || rawFiles.length > DEFAULT_MAX_FILES || rawIndex.length !== rawFiles.length) return undefined;
 	const files: GitWorktreeFileSnapshot[] = [], index: GitIndexPathSnapshot[] = []; let previous = "", bytes = 0;
 	for (let i = 0; i < rawFiles.length; i++) {
 		const f0 = rawFiles[i]; if (!f0 || typeof f0 !== "object") return undefined; const names = Object.keys(Object.getOwnPropertyDescriptors(f0)); const f = dataRecord(f0, names.sort()); if (!f || !names.every((k) => ["fingerprint", "kind", "mode", "path", "size"].includes(k))) return undefined;
 		const path = safeRelativePath(f.path); if (!path || (previous && previous.localeCompare(path) >= 0)) return undefined; previous = path;
 		if (!(["missing", "file", "symlink", "directory"] as unknown[]).includes(f.kind)) return undefined;
-		if (f.kind === "missing" || f.kind === "directory") { if (names.length !== 2 || !names.includes("kind") || !names.includes("path")) return undefined; files.push({ path, kind: f.kind }); }
+		if (f.kind === "missing") { if (names.length !== 2 || !names.includes("kind") || !names.includes("path")) return undefined; files.push({ path, kind: f.kind }); }
+		else if (f.kind === "directory") { if (!([2, 3] as number[]).includes(names.length) || !names.includes("kind") || !names.includes("path") || names.length === 3 && (typeof f.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(f.fingerprint))) return undefined; files.push(names.length === 3 ? { path, kind: f.kind, fingerprint: f.fingerprint as string } : { path, kind: f.kind }); }
 		else { if (names.length !== 5 || typeof f.mode !== "number" || !Number.isSafeInteger(f.mode) || f.mode < 0 || f.mode > 0o7777 || typeof f.size !== "number" || !Number.isSafeInteger(f.size) || f.size < 0 || typeof f.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(f.fingerprint)) return undefined; bytes += f.size; if (bytes > DEFAULT_MAX_BYTES) return undefined; files.push({ path, kind: f.kind as "file" | "symlink", mode: f.mode, size: f.size, fingerprint: f.fingerprint }); }
 		const x = dataRecord(rawIndex[i], ["entries", "fingerprint", "path"]); const entries0 = x && dataArray(x.entries); if (!x || x.path !== path || typeof x.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(x.fingerprint) || !entries0 || entries0.length > 3) return undefined;
 		const entries: string[] = []; let prior = ""; for (const entry of entries0) { const decoded = canonicalBase64(entry); if (!decoded || !/^[0-7]{6} [0-9a-f]{40,64} [0-3]$/.test(decoded.toString("ascii")) || (prior && (entry as string) <= prior)) return undefined; prior = entry as string; entries.push(entry as string); }
 		const isGitlink = entries.length === 1 && Buffer.from(entries[0]!, "base64").toString("ascii").startsWith("160000 ");
-		if (isGitlink && f.kind !== "directory" && f.kind !== "missing") return undefined;
+		if (isGitlink && (f.kind !== "directory" && f.kind !== "missing" || f.kind === "directory" && typeof f.fingerprint !== "string")) return undefined;
+		if (!isGitlink && f.kind === "directory" && f.fingerprint !== undefined) return undefined;
 		const hash = createHash("sha256").update(Buffer.from(path, "base64")).update(Buffer.from([0])); if (!entries.length) hash.update("absent"); else entries.forEach((e) => hash.update(Buffer.from(e, "base64")).update(Buffer.from([0]))); if (hash.digest("hex") !== x.fingerprint) return undefined;
 		index.push({ path, entries, fingerprint: x.fingerprint });
 	}
 	let statusPaths: Buffer[]; try { statusPaths = parseUntrackedPaths(status); } catch { return undefined; } const filePaths = new Set(files.map((file) => file.path)); if (statusPaths.some((p) => !filePaths.has(p.toString("base64")))) return undefined;
-	return { version: 1, repositoryRoot: root.toString("base64"), repositoryIdentity: { rootFileId: identity.rootFileId as string, gitDir: identity.gitDir as string, commonDir: identity.commonDir as string, gitDirFileId: identity.gitDirFileId as string, commonDirFileId: identity.commonDirFileId as string }, headIdentity: top.headIdentity, indexTree: top.indexTree, status: status.toString("base64"), files, index };
+	return { version: 1, coreSymlinks: top.coreSymlinks, repositoryRoot: root.toString("base64"), repositoryIdentity: { rootFileId: identity.rootFileId as string, gitDir: identity.gitDir as string, commonDir: identity.commonDir as string, gitDirFileId: identity.gitDirFileId as string, commonDirFileId: identity.commonDirFileId as string }, headIdentity: top.headIdentity, indexTree: top.indexTree, status: status.toString("base64"), files, index };
 }
 export function compareGitWorktreeSnapshots(before: GitWorktreeSnapshot, after: GitWorktreeSnapshot): { changed: boolean } {
 	const a = canonicalSnapshot(before), b = canonicalSnapshot(after); if (!a || !b) throw new GitWorktreeSnapshotError("INVALID_SNAPSHOT", "Invalid Git working-tree snapshot");
 	if (a.repositoryRoot !== b.repositoryRoot || a.repositoryIdentity.rootFileId !== b.repositoryIdentity.rootFileId || a.repositoryIdentity.gitDir !== b.repositoryIdentity.gitDir || a.repositoryIdentity.commonDir !== b.repositoryIdentity.commonDir || a.repositoryIdentity.gitDirFileId !== b.repositoryIdentity.gitDirFileId || a.repositoryIdentity.commonDirFileId !== b.repositoryIdentity.commonDirFileId) throw new GitWorktreeSnapshotError("INVALID_SNAPSHOT", "Cannot compare snapshots from different repositories");
 	const equalFiles = a.files.length === b.files.length && a.files.every((x, i) => { const y = b.files[i]!; return x.path === y.path && x.kind === y.kind && x.mode === y.mode && x.size === y.size && x.fingerprint === y.fingerprint; });
 	const equalIndex = a.index.length === b.index.length && a.index.every((x, i) => { const y = b.index[i]!; return x.path === y.path && x.fingerprint === y.fingerprint && x.entries.length === y.entries.length && x.entries.every((e, j) => e === y.entries[j]); });
-	return { changed: a.headIdentity !== b.headIdentity || a.indexTree !== b.indexTree || a.status !== b.status || !equalFiles || !equalIndex };
+	return { changed: a.coreSymlinks !== b.coreSymlinks || a.headIdentity !== b.headIdentity || a.indexTree !== b.indexTree || a.status !== b.status || !equalFiles || !equalIndex };
 }
