@@ -291,8 +291,10 @@ test("deterministic cancellation kills a SIGTERM-resistant descendant before res
 		while (!existsSync(pidFile) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
 		assert.ok(existsSync(pidFile), "child did not publish process identities");
 		const pids = JSON.parse(readFileSync(pidFile, "utf8")) as { parent: number; descendant: number };
+		const abortedAt = performance.now();
 		controller.abort();
 		const result = await execution;
+		assert.ok(performance.now() - abortedAt >= 70, "SIGKILL escalation did not preserve the TERM grace period");
 		assert.equal(result.termination, "cancelled");
 		assert.equal(result.cleanupScope, "process-group");
 		assert.equal(result.processGroupExtinct, true);
@@ -313,5 +315,28 @@ test("deterministic cancellation kills a SIGTERM-resistant descendant before res
 			}
 			assert.equal(operationallyAlive, false, `process ${pid} survived cancellation`);
 		}
+	});
+});
+
+test("deterministic cancellation gives a SIGTERM handler time to exit cleanly", { skip: process.platform === "win32" }, async () => {
+	await withTempHome(async (root) => {
+		const ready = join(root, "ready"), handled = join(root, "term-handled");
+		const controller = new AbortController();
+		const script = `const fs=require('node:fs'); fs.writeFileSync(${JSON.stringify(ready)}, 'ready'); process.on('SIGTERM', () => { fs.writeFileSync(${JSON.stringify(handled)}, 'handled'); process.exit(0); }); setInterval(() => {}, 1000);`;
+		const execution = runDeterministicStep(
+			{ filePath: join(root, "step.md") },
+			{ execution: { kind: "command", command: process.execPath, args: ["-e", script], shell: false }, handoff: "never", nonInteractive: true },
+			root,
+			controller.signal,
+		);
+		const deadline = Date.now() + 2_000;
+		while (!existsSync(ready) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+		assert.ok(existsSync(ready), "child did not become ready");
+		controller.abort();
+		const result = await execution;
+		assert.equal(readFileSync(handled, "utf8"), "handled");
+		assert.equal(result.termination, "cancelled");
+		assert.equal(result.signal, undefined);
+		assert.equal(result.processGroupExtinct, true);
 	});
 });
