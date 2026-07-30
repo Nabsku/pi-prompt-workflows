@@ -6,6 +6,7 @@ import type { PromptWithModel } from "../prompt-loader.ts";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { estimatePromptTokens } from "../prompt-budget.ts";
 
 function prompt(name: string, extra: Partial<PromptWithModel> = {}): PromptWithModel {
 	return { name, description: `${name} description`, content: "body", models: ["test/model"], restore: false, source: "user", rootKind: "prompt", filePath: `/tmp/${name}.md`, ...extra } as PromptWithModel;
@@ -190,6 +191,29 @@ test("adaptive prompt bounds include the separately injected resolved skill payl
 	assert.equal(result.targets[0]!.promptCost!.estimatedTokens, 1);
 	assert.ok(result.targets[0]!.skillPromptCost!.estimatedTokens > 100);
 	assert.equal(result.promptCostBounds.initialFallthrough, result.targets[0]!.promptCost!.estimatedTokens + result.targets[0]!.skillPromptCost!.estimatedTokens);
+});
+
+test("adaptive bounds retain skill cost when the chain-start rendering is empty but a switched-model route is valid", async () => {
+	const root = mkdtempSync(join(tmpdir(), "adaptive-empty-skill-")); const skillPath = join(root, "SKILL.md");
+	writeFileSync(skillPath, "x".repeat(400));
+	const wrapper = prompt("flow", { adaptiveChain: { limits: { maxSteps: 2, maxModelCalls: 2 }, steps: [
+		{ id: "switch", kind: "prompt", target: "switch", when: "always" },
+		{ id: "skilled", kind: "prompt", target: "skilled", when: "always" },
+	] } });
+	const catalog = new Map([
+		["switch", prompt("switch", { models: ["test/b"], content: "switch" })],
+		["skilled", prompt("skilled", { models: ["test/a", "test/b"], content: "<if-model is=\"test/a\"></if-model><if-model is=\"test/b\">body</if-model>", skills: ["large"], budget: { maxTokens: 2 } })],
+	]);
+	const a = { provider: "test", id: "a" } as any, b = { provider: "test", id: "b" } as any;
+	const registry = { find: (provider: string, id: string) => [a, b].find((model) => model.provider === provider && model.id === id), getAll: () => [a, b], getAvailable: () => [a, b] } as any;
+	const result = await prepareAdaptivePreflight(wrapper, catalog, { cwd: root, args: [], currentModel: a, modelRegistry: registry, commands: [{ name: "large", source: "skill", sourceInfo: { path: skillPath } }] });
+	assert.equal(result.status, "ready", result.diagnostics.join("\n"));
+	const skillCost = result.targets[1]!.skillPromptCost!.estimatedTokens;
+	assert.ok(skillCost > 100);
+	const exactCost = estimatePromptTokens("switch").estimatedTokens + estimatePromptTokens("body").estimatedTokens + skillCost;
+	assert.equal(result.promptCostBounds.minimumCompleting, exactCost);
+	assert.equal(result.promptCostBounds.maximumCompleting, exactCost);
+	assert.equal(result.promptCostBounds.initialFallthrough, exactCost);
 });
 
 test("adaptive renderers sanitize and cap untrusted fields and show outcomes", () => {
