@@ -13,8 +13,13 @@ chain:
     onBlocked: blocked-review
   - id: blocked-review
     prompt: adaptive-review
+    onSuccess: done
+    onFailure: done
+    onBlocked: done
   - id: review
     prompt: adaptive-review
+  - id: done
+    run: adaptive-status
 limits:
   maxSteps: 4
   maxModelCalls: 3
