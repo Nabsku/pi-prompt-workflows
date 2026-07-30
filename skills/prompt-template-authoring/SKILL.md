@@ -176,7 +176,7 @@ limits:
   maxModelCalls: 2
 ```
 
-Prompt actions cost one model call; run and skipped actions cost zero. `run` targets must be deterministic with `handoff: never`. Prompt targets cannot be loops, delegated/parallel, boomerang, compare, deterministic, or nested chains. Changed evidence is a fail-closed before/after Git snapshot, so use a readable Git worktree. For read-only Git companions, disable configured helpers and refresh side effects explicitly, as in `git --no-optional-locks -c core.fsmonitor=false status --porcelain=v1` and `git --no-pager diff --no-ext-diff --no-textconv --check`. Always run `/validate-prompts` and `/dry-run-prompt <chain> --plain` first; preflight is read-only and runtime revalidates targets, skills, models, budgets, cwd, and snapshots.
+Prompt actions cost one model call; run and skipped actions cost zero. `run` targets must be deterministic with `handoff: never`. Prompt targets cannot be loops, delegated/parallel, boomerang, compare, deterministic, or nested chains. Changed evidence is a fail-closed before/after Git snapshot, so use a readable Git worktree. For read-only Git companions, put `--no-optional-locks -c core.fsmonitor=false` before the subcommand and disable helpers explicitly, as in `git --no-optional-locks -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --check`. Always run `/validate-prompts` and `/dry-run-prompt <chain> --plain` first; preflight is read-only and runtime revalidates targets, skills, models, budgets, cwd, and snapshots.
 
 ## Model Conditionals
 

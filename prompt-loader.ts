@@ -1941,9 +1941,9 @@ function loadPromptsWithModelFromDir(
 					}
 				}
 				if (adaptiveChain) {
-					const legacyLoopControls = ["loop", "fresh", "converge"].filter((key) => Object.hasOwn(frontmatter, key));
+					const legacyLoopControls = ["chainContext", "loop", "fresh", "converge"].filter((key) => Object.hasOwn(frontmatter, key));
 					if (legacyLoopControls.length > 0) {
-						diagnostics.push(createDiagnostic("invalid-adaptive-loop-controls", fullPath, source, `Skipping adaptive chain template at ${fullPath}: structured chain wrappers do not support legacy loop controls (${legacyLoopControls.join(", ")}).`));
+						diagnostics.push(createDiagnostic("invalid-adaptive-loop-controls", fullPath, source, `Skipping adaptive chain template at ${fullPath}: structured chain wrappers do not support legacy chain-context or loop controls (${legacyLoopControls.join(", ")}).`));
 						continue;
 					}
 				}

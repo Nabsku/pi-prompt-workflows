@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildDeterministicPreamble, formatDeterministicExecution, runDeterministicStep, shouldHandoffToLlm } from "../deterministic-step.ts";
@@ -164,14 +164,21 @@ test("formatDeterministicExecution formats command and script executions for dis
 	assert.match(formatDeterministicExecution({ kind: "script", path: "./demo.sh", args: ["--x"] }, "/tmp/demo.sh"), /\/tmp\/demo\.sh/);
 });
 
-test("timeout escalates a TERM-resistant same-group descendant after the leader exits", { skip: process.platform === "win32" }, async () => {
+test("abort escalates a TERM-resistant same-group descendant after the leader exits", { skip: process.platform === "win32" }, async () => {
 	await withTempDir(async (root) => {
 		const pidFile = join(root, "descendant.pid");
 		const leader = `const {spawn}=require('node:child_process'); const fs=require('node:fs'); const child=spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)\"],{stdio:['ignore','ignore','ignore']}); fs.writeFileSync(${JSON.stringify(pidFile)},String(child.pid)); process.on('SIGTERM',()=>process.exit(0)); setInterval(()=>{},1000);`;
 		const command = `node -e ${JSON.stringify(leader)}`;
+		const controller = new AbortController();
+		const running = runDeterministicStep({ filePath: join(root, "prompt.md") } as never, { execution: { kind: "run", command }, handoff: "never", nonInteractive: true, timeoutMs: 8_000 }, root, controller.signal);
+		const readyDeadline = performance.now() + 2_000;
+		while (!existsSync(pidFile) && performance.now() < readyDeadline) await new Promise((resolve) => setTimeout(resolve, 10));
+		assert.equal(existsSync(pidFile), true, "descendant PID must be published within the bounded readiness wait");
 		const started = performance.now();
-		const result = await runDeterministicStep({ filePath: join(root, "prompt.md") } as never, { execution: { kind: "run", command }, handoff: "never", nonInteractive: true, timeoutMs: 1_000 }, root);
-		assert.equal(result.timedOut, true);
+		controller.abort();
+		const result = await running;
+		assert.equal(result.timedOut, false);
+		assert.equal(result.termination, "cancelled");
 		assert.equal(result.processGroupExtinct, true);
 		assert.ok(performance.now() - started < 2_000, "cleanup must not leak to the 8s deadline");
 		const pid = Number((await import("node:fs")).readFileSync(pidFile, "utf8"));

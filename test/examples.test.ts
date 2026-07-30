@@ -56,7 +56,7 @@ test("packaged Git checks use exact hardened argv and bypass configured helpers"
 	withExamplePrompts((cwd) => {
 		const loaded = loadPromptsWithModel(cwd);
 		const expectedStatusArgs = ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v1"];
-		const expectedDiffCommand = "git --no-pager diff --no-ext-diff --no-textconv --check && git --no-pager diff --cached --no-ext-diff --no-textconv --check";
+		const expectedDiffCommand = "git --no-optional-locks -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --check && git --no-optional-locks -c core.fsmonitor=false --no-pager diff --cached --no-ext-diff --no-textconv --check";
 		for (const name of ["adaptive-status", "adaptive-validate"]) {
 			const execution = loaded.prompts.get(name)?.deterministic?.execution;
 			assert.equal(execution?.kind, "command");
@@ -114,11 +114,12 @@ test("packaged Git checks use exact hardened argv and bypass configured helpers"
 		execFileSync("/bin/sh", ["-c", diffExecution!.command], { cwd, env: hostileEnv, timeout: 5000 });
 		writeFileSync(join(cwd, "sample.txt"), "staged trailing whitespace   \n");
 		execFileSync("git", ["add", "sample.txt"], { cwd });
+		rmSync(markers.fsmonitor, { force: true });
 		assert.throws(
 			() => execFileSync("/bin/sh", ["-c", diffExecution!.command], { cwd, env: hostileEnv, timeout: 5000 }),
 			"staged whitespace errors must fail the combined check",
 		);
-		for (const marker of [markers.externalDiff, markers.textconv, markers.pager, markers.editor]) {
+		for (const marker of [markers.fsmonitor, markers.externalDiff, markers.textconv, markers.pager, markers.editor]) {
 			assert.equal(existsSync(marker), false, `helper must not run: ${marker}`);
 		}
 	});
