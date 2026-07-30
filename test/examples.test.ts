@@ -56,7 +56,7 @@ test("packaged Git checks use exact hardened argv and bypass configured helpers"
 	withExamplePrompts((cwd) => {
 		const loaded = loadPromptsWithModel(cwd);
 		const expectedStatusArgs = ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v1"];
-		const expectedDiffCommand = "git --no-optional-locks -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv --check && git --no-optional-locks -c core.fsmonitor=false --no-pager diff --cached --no-ext-diff --no-textconv --check";
+		const expectedDiffCommand = "git --no-optional-locks -c core.fsmonitor=false --no-pager diff --cached --no-ext-diff --no-textconv --check";
 		for (const name of ["adaptive-status", "adaptive-validate"]) {
 			const execution = loaded.prompts.get(name)?.deterministic?.execution;
 			assert.equal(execution?.kind, "command");
@@ -81,20 +81,26 @@ test("packaged Git checks use exact hardened argv and bypass configured helpers"
 			textconv: join(markerDir, "textconv"),
 			pager: join(markerDir, "pager"),
 			editor: join(markerDir, "editor"),
+			clean: join(markerDir, "clean"),
+			process: join(markerDir, "process"),
 		};
 		const fsmonitor = helper("fsmonitor");
 		const externalDiff = helper("external-diff");
 		const textconv = helper("textconv");
 		const pager = helper("pager");
 		const editor = helper("editor");
+		const clean = helper("clean");
+		const processFilter = helper("process");
 
-		writeFileSync(join(cwd, ".gitattributes"), "sample.txt diff=hostile\n");
+		writeFileSync(join(cwd, ".gitattributes"), "sample.txt diff=hostile filter=hostile\n");
 		writeFileSync(join(cwd, "sample.txt"), "clean\n");
 		execFileSync("git", ["add", ".gitattributes", "sample.txt"], { cwd });
 		execFileSync("git", ["-c", "user.name=Example Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture"], { cwd });
 		execFileSync("git", ["config", "core.fsmonitor", fsmonitor], { cwd });
 		execFileSync("git", ["config", "diff.external", externalDiff], { cwd });
 		execFileSync("git", ["config", "diff.hostile.textconv", textconv], { cwd });
+		execFileSync("git", ["config", "filter.hostile.clean", clean], { cwd });
+		execFileSync("git", ["config", "filter.hostile.process", processFilter], { cwd });
 		writeFileSync(join(cwd, "sample.txt"), "changed\n");
 
 		const hostileEnv = { ...process.env, GIT_PAGER: pager, PAGER: pager, GIT_EDITOR: editor, EDITOR: editor };
@@ -112,6 +118,10 @@ test("packaged Git checks use exact hardened argv and bypass configured helpers"
 		assert.equal(diffExecution!.kind, "run");
 		if (diffExecution!.kind !== "run") return;
 		execFileSync("/bin/sh", ["-c", diffExecution!.command], { cwd, env: hostileEnv, timeout: 5000 });
+		assert.equal(existsSync(markers.clean), false, "staged-only check must not invoke configured clean filters");
+		assert.equal(existsSync(markers.process), false, "staged-only check must not invoke configured process filters");
+		execFileSync("git", ["config", "--unset", "filter.hostile.clean"], { cwd });
+		execFileSync("git", ["config", "--unset", "filter.hostile.process"], { cwd });
 		writeFileSync(join(cwd, "sample.txt"), "staged trailing whitespace   \n");
 		execFileSync("git", ["add", "sample.txt"], { cwd });
 		rmSync(markers.fsmonitor, { force: true });

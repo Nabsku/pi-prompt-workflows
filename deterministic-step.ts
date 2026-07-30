@@ -351,11 +351,13 @@ export async function runDeterministicStep(
 				finishEscalation = resolveEscalation;
 				escalationHandle = setTimeout(() => {
 					escalationHandle = undefined;
-					// While the original child is still live, its ChildProcess handle remains
-					// sufficient authority to escalate directly even when `ps` is unavailable.
-					// Once it exits, only an exactly re-attributed process group may be killed.
+					// While the original detached leader is still live, its PID is also the
+					// owned PGID, so the whole group can be escalated without external
+					// inspection. Once it exits, require exact group re-attribution.
 					if (child.exitCode === null && child.signalCode === null) {
-						try { child.kill("SIGKILL"); } catch { /* The child raced with escalation. */ }
+						try { process.kill(-child.pid!, "SIGKILL"); } catch (error) {
+							if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+						}
 					} else if (typeof child.pid === "number") {
 						killAttributedProcessGroup(child.pid);
 					}
