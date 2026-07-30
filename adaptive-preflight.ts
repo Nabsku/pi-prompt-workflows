@@ -50,7 +50,7 @@ export function createInvalidAdaptivePreflight(name: string, diagnostics: readon
 	return { status: "blocked", name, limits: { maxSteps: 0, maxModelCalls: 0 }, steps: [], targets: [], warnings: [], callBounds: { minimum: 0, maximum: 0, exact: true, explanation: "Graph unavailable/invalid; no executable paths were analyzed." }, promptCostBounds: { minimumCompleting: 0, maximumCompleting: 0, maximumReachable: 0, initialFallthrough: 0, initialPathStatus: "exhausted", exact: true, method: PROMPT_TOKEN_ESTIMATE_METHOD, explanation: "Graph unavailable/invalid; prompt costs were not evaluated." }, diagnostics: diagnostics.map((item) => capSanitizedText(item, 500)), pathAnalysis: { hasCompletingPath: false, hasExhaustedPath: false, exhaustedReasons: [], exhaustedPathCount: 0 }, analysis: { complete: false, analyzedStates: 0, enqueuedStates: 0, stateLimit: MAX_ADAPTIVE_PREFLIGHT_STATES }, graphAvailable: false };
 }
 
-type ModelRoute = ReadonlyMap<string, { readonly cost: number; readonly selected: string; readonly issue?: string; readonly warning?: string }>;
+type ModelRoute = ReadonlyMap<string, { readonly cost: number; readonly selected: string; readonly issue?: string; readonly warnings?: readonly string[] }>;
 function analyzeInitialPath(steps: readonly StructuredChainStep[], limits: { maxSteps: number; maxModelCalls: number }, promptCosts: readonly number[], modelRoutes?: readonly ModelRoute[], initialModel = ""): { cost: number; status: "completed" | "exhausted" } {
 	let state = createAdaptiveChainState();
 	let observation: ChainObservation | undefined;
@@ -125,7 +125,7 @@ function analyzeCalls(steps: readonly StructuredChainStep[], maxSteps: number, m
 		const stepIndex = indexes.get(step.id) ?? -1;
 		const modelRoute = step.kind === "prompt" ? modelRoutes?.[stepIndex]?.get(state.activeModel) : undefined;
 		if (modelRoute?.issue) routeDiagnostics.add(`Step ${step.id} (${step.target}) for active model ${state.activeModel || "runtime/default"}: ${modelRoute.issue}`);
-		if (modelRoute?.warning) routeWarnings.add(modelRoute.warning);
+		for (const warning of modelRoute?.warnings ?? []) routeWarnings.add(warning);
 		const addedCost = step.kind === "prompt" ? (modelRoute?.cost ?? promptCosts[stepIndex] ?? 0) : 0;
 		const nextActiveModel = modelRoute?.selected ?? state.activeModel;
 		reachableCosts.push(state.cost + addedCost);
@@ -242,7 +242,7 @@ export async function prepareAdaptivePreflight(wrapper: PromptWithModel, catalog
 		return { ...base, targets, diagnostics: [...diagnostics, diagnostic], status: "blocked", analysis: { complete: false, analyzedStates: 0, enqueuedStates: activeModels.size, stateLimit: MAX_ADAPTIVE_PREFLIGHT_STATES }, callBounds: { ...base.callBounds, exact: false, explanation: diagnostic }, promptCostBounds: { ...base.promptCostBounds, exact: false, explanation: diagnostic } };
 	}
 	const modelRoutes: ModelRoute[] = await Promise.all(base.steps.map(async (step, index) => {
-		const routes = new Map<string, { cost: number; selected: string; issue?: string; warning?: string }>();
+		const routes = new Map<string, { cost: number; selected: string; issue?: string; warnings?: readonly string[] }>();
 		const target = catalog.get(step.target);
 		if (step.kind !== "prompt" || !target || base.targets[index]!.issues.length) return routes;
 		for (const [activeKey, activeModel] of activeModels) {
@@ -261,8 +261,8 @@ export async function prepareAdaptivePreflight(wrapper: PromptWithModel, catalog
 			const skillCost = targets[index]!.skillPromptCost?.estimatedTokens ?? 0;
 			const budget = checkPromptExecutionBudget(target, prepared.content);
 			const issue = targetIndependentIssues[index] ?? (budget.message ? capSanitizedText(budget.message, 500) : undefined);
-			const warning = prepared.warning ? capSanitizedText(prepared.warning, 500) : undefined;
-			routes.set(activeKey, { cost: bodyCost + skillCost, selected, ...(issue ? { issue } : {}), ...(warning ? { warning } : {}) });
+			const warnings = [prepared.warning, budget.warning].filter((warning): warning is string => !!warning).map((warning) => capSanitizedText(warning, 500));
+			routes.set(activeKey, { cost: bodyCost + skillCost, selected, ...(issue ? { issue } : {}), ...(warnings.length ? { warnings } : {}) });
 		}
 		return routes;
 	}));

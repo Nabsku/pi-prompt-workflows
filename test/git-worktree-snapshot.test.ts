@@ -359,6 +359,29 @@ test("submodule core.filemode=false accepts a non-executable 100755 worktree fil
 	assert.doesNotThrow(() => captureGitWorktreeSnapshot(cwd));
 });
 
+test("submodule effective core.filemode is part of parent snapshot identity", () => {
+	const { cwd, submodule } = repoWithSubmodule();
+	const path = join(submodule, "executable.sh");
+	writeFileSync(path, "#!/bin/sh\necho ok\n"); chmodSync(path, 0o755);
+	execFileSync("git", ["add", "executable.sh"], { cwd: submodule });
+	execFileSync("git", ["commit", "-qm", "executable"], { cwd: submodule });
+	execFileSync("git", ["add", "submodule"], { cwd }); execFileSync("git", ["commit", "-qm", "update"], { cwd });
+	execFileSync("git", ["config", "core.filemode", "false"], { cwd: submodule });
+	const before = captureGitWorktreeSnapshot(cwd);
+	assert.deepEqual(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)), { changed: false });
+	execFileSync("git", ["config", "core.filemode", "true"], { cwd: submodule });
+	assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, true);
+});
+
+test("submodule symbolic versus detached HEAD form is part of parent snapshot identity", () => {
+	const { cwd, submodule } = repoWithSubmodule();
+	const oid = execFileSync("git", ["rev-parse", "HEAD"], { cwd: submodule, encoding: "utf8" }).trim();
+	const before = captureGitWorktreeSnapshot(cwd);
+	assert.deepEqual(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)), { changed: false });
+	execFileSync("git", ["checkout", "--detach", "-q", oid], { cwd: submodule });
+	assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, true);
+});
+
 test("submodule core.symlinks=false accepts link text materialized as a regular file", () => {
 	const { cwd, submodule } = repoWithSubmodule();
 	const path = join(submodule, "portable-link");
