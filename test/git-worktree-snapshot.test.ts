@@ -35,6 +35,8 @@ function repoWithSubmodule(): { cwd: string; submodule: string; commits: [string
 	const second = execFileSync("git", ["rev-parse", "HEAD"], { cwd: source, encoding: "utf8" }).trim();
 	const cwd = repo();
 	execFileSync("git", ["-c", "protocol.file.allow=always", "submodule", "add", "-q", source, "submodule"], { cwd });
+	execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: join(cwd, "submodule") });
+	execFileSync("git", ["config", "user.name", "Test User"], { cwd: join(cwd, "submodule") });
 	execFileSync("git", ["commit", "-qam", "add submodule"], { cwd });
 	return { cwd, submodule: join(cwd, "submodule"), commits: [first, second] };
 }
@@ -129,6 +131,15 @@ test("detects add, remove, delete, rename, mode, and paths with spaces", () => {
 		const cwd = repo();
 		const expected = action.toString().includes("gone.txt") ? false : true;
 		assert.equal(changed(cwd, () => action(cwd)), expected);
+	}
+});
+
+test("core.filemode controls whether regular-file executable changes are observable", () => {
+	for (const [value, expected] of [["false", false], ["true", true]] as const) {
+		const cwd = repo();
+		execFileSync("git", ["config", "core.filemode", value], { cwd });
+		chmodSync(join(cwd, "tracked.txt"), 0o644);
+		assert.equal(changed(cwd, () => chmodSync(join(cwd, "tracked.txt"), 0o755)), expected);
 	}
 });
 
@@ -242,6 +253,24 @@ test("clean committed submodules capture and compare unchanged", () => {
 	const after = captureGitWorktreeSnapshot(cwd);
 	assert.equal(compareGitWorktreeSnapshots(before, after).changed, false);
 	assert.equal(after.files.find((entry) => Buffer.from(entry.path, "base64").toString() === "submodule")?.kind, "directory");
+});
+
+test("tracked submodule symlinks hash link text without dereferencing their targets", () => {
+	const { cwd, submodule } = repoWithSubmodule();
+	const outside = mkdtempSync(join(tmpdir(), "git-submodule-link-target-"));
+	writeFileSync(join(outside, "one"), "one\n");
+	writeFileSync(join(outside, "two"), "two\n");
+	symlinkSync(join(outside, "one"), join(submodule, "tracked-link"));
+	execFileSync("git", ["add", "tracked-link"], { cwd: submodule });
+	execFileSync("git", ["commit", "-qm", "tracked symlink"], { cwd: submodule });
+	execFileSync("git", ["add", "submodule"], { cwd });
+	execFileSync("git", ["commit", "-qm", "update submodule"], { cwd });
+	const before = captureGitWorktreeSnapshot(cwd);
+	writeFileSync(join(outside, "one"), "changed target content\n");
+	assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, false);
+	rmSync(join(submodule, "tracked-link"));
+	symlinkSync(join(outside, "two"), join(submodule, "tracked-link"));
+	assert.throws(() => captureGitWorktreeSnapshot(cwd), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "UNSUPPORTED_SUBMODULE");
 });
 
 test("dirty and uninitialized submodules fail closed", () => {

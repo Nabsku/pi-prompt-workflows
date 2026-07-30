@@ -319,6 +319,7 @@ export async function runDeterministicStep(
 	step: DeterministicStep,
 	cwd: string,
 	signal?: AbortSignal,
+	testHooks?: { readonly timeoutStart?: Promise<void> },
 ): Promise<DeterministicExecutionResult> {
 	const startedAt = Date.now();
 	const execution = step.execution;
@@ -381,12 +382,15 @@ export async function runDeterministicStep(
 		appendCapturedOutput(stderr, chunk.toString());
 	});
 
-	const timeoutHandle = step.timeoutMs
-		? setTimeout(() => {
+	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+	let settled = false;
+	void (testHooks?.timeoutStart ?? Promise.resolve()).then(() => {
+		if (settled || !step.timeoutMs) return;
+		timeoutHandle = setTimeout(() => {
 			timedOut = true;
 			terminate();
-		}, step.timeoutMs)
-		: undefined;
+		}, step.timeoutMs);
+	});
 
 	const clearEscalation = () => {
 		if (!terminationRequested || cleanupScope !== "process-group") {
@@ -398,7 +402,6 @@ export async function runDeterministicStep(
 	};
 
 	return await new Promise((resolveResult) => {
-		let settled = false;
 		child.on("error", (error) => {
 			if (settled) return;
 			settled = true;

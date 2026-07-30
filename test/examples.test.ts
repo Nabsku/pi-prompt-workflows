@@ -55,7 +55,7 @@ test("packaged adaptive examples load and validate with their companion targets"
 test("packaged Git checks use exact hardened argv and bypass configured helpers", () => {
 	withExamplePrompts((cwd) => {
 		const loaded = loadPromptsWithModel(cwd);
-		const expectedStatusArgs = ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v1"];
+		const expectedStatusArgs = ["--no-optional-locks", "-c", "core.fsmonitor=false", "ls-files", "--modified", "--deleted", "--others", "--exclude-standard"];
 		const expectedDiffCommand = "git --no-optional-locks -c core.fsmonitor=false --no-pager diff --cached --no-ext-diff --no-textconv --check";
 		for (const name of ["adaptive-status", "adaptive-validate"]) {
 			const execution = loaded.prompts.get(name)?.deterministic?.execution;
@@ -113,7 +113,9 @@ test("packaged Git checks use exact hardened argv and bypass configured helpers"
 			execFileSync(execution.command, execution.args, { cwd, env: hostileEnv, timeout: 5000 });
 			assert.deepEqual(readFileSync(indexPath), indexBefore, `${name} must not refresh the index`);
 		}
-		assert.equal(existsSync(markers.fsmonitor), false, "status must disable configured fsmonitor");
+		assert.equal(existsSync(markers.fsmonitor), false, "change observation must disable configured fsmonitor");
+		assert.equal(existsSync(markers.clean), false, "change observation must not invoke configured clean filters");
+		assert.equal(existsSync(markers.process), false, "change observation must not invoke configured process filters");
 
 		assert.equal(diffExecution!.kind, "run");
 		if (diffExecution!.kind !== "run") return;
