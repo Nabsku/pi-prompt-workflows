@@ -149,7 +149,7 @@ test("literal pathspecs isolate magic, colon, option-like, and spaced dirty path
 	execFileSync("git", ["--literal-pathspecs", "add", "--", ...names], { cwd }); execFileSync("git", ["commit", "-qm", "names"], { cwd });
 	for (const name of names) writeFileSync(join(cwd, name), `dirty ${name}\n`);
 	const snapshot = captureGitWorktreeSnapshot(cwd);
-	assert.deepEqual(snapshot.index.map((x) => Buffer.from(x.path, "base64").toString()), names.map((x) => x).sort((a, b) => Buffer.from(a).toString("base64").localeCompare(Buffer.from(b).toString("base64"))));
+	assert.deepEqual(snapshot.index.map((x) => Buffer.from(x.path, "base64").toString()), [...names, "tracked.txt", "delete.txt"].sort((a, b) => Buffer.from(a).toString("base64").localeCompare(Buffer.from(b).toString("base64"))));
 	assert.ok(snapshot.index.every((x) => x.entries.length === 1));
 	assert.throws(() => captureGitWorktreeSnapshot(cwd, { maxFiles: 3 }), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "FILE_LIMIT_EXCEEDED");
 });
@@ -245,4 +245,23 @@ test("capture enforces one aggregate deadline and returns a structured timeout w
 	assert.ok(performance.now() - started < 1700);
 	const pid = Number(readFileSync(pidFile, "utf8"));
 	assert.throws(() => process.kill(pid, 0));
+});
+
+test("tracked assume-unchanged and skip-worktree edits remain observable", () => {
+	for (const flag of ["--assume-unchanged", "--skip-worktree"]) {
+		const cwd = repo();
+		execFileSync("git", ["update-index", flag, "tracked.txt"], { cwd });
+		const before = captureGitWorktreeSnapshot(cwd);
+		writeFileSync(join(cwd, "tracked.txt"), `${flag} edit\n`);
+		assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd, encoding: "utf8" }), "");
+		assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, true);
+	}
+});
+
+test("capture maxBytes public cap self-validates at the boundary", () => {
+	const cwd = repo();
+	const boundary = 64 * 1024 * 1024;
+	const snapshot = captureGitWorktreeSnapshot(cwd, { maxBytes: boundary });
+	assert.deepEqual(compareGitWorktreeSnapshots(snapshot, snapshot), { changed: false });
+	assert.throws(() => captureGitWorktreeSnapshot(cwd, { maxBytes: boundary + 1 }), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "INVALID_SNAPSHOT" && /cannot exceed/.test(error.message));
 });

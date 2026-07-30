@@ -270,25 +270,33 @@ function signalProcessTree(child: ReturnType<typeof spawnProcess>, signal: NodeJ
 	return "direct-child";
 }
 
-function processGroupExists(pid: number): { exists: boolean; probeError?: string } {
+function processGroupExists(pid: number): { exists: boolean; attributable: boolean; probeError?: string } {
 	try {
 		process.kill(-pid, 0);
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ESRCH") return { exists: false };
-		return { exists: true, probeError: error instanceof Error ? error.message : String(error) };
+		if ((error as NodeJS.ErrnoException).code === "ESRCH") return { exists: false, attributable: false };
+		return { exists: true, attributable: false, probeError: error instanceof Error ? error.message : String(error) };
 	}
 	// A killed descendant can remain as a zombie until its external reaper runs.
-	// Zombies cannot execute or write, so they are operationally extinct. Use only
-	// read-only inspection and never signal the group after the leader closes.
+	// Zombies cannot execute or write, so they are operationally extinct. Exact
+	// live PGID membership also preserves authority after the leader closes.
 	if (process.platform !== "win32") {
-		const inspected = spawnSync("ps", ["-o", "stat=", "-g", String(pid)], { encoding: "utf8", timeout: PROCESS_GROUP_PROBE_TIMEOUT_MS });
+		const inspected = spawnSync("ps", ["-o", "pgid=,stat=", "-g", String(pid)], { encoding: "utf8", timeout: PROCESS_GROUP_PROBE_TIMEOUT_MS });
 		if (inspected.status === 0) {
-			const states = inspected.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
-			if (states.length > 0 && states.every((state) => state.startsWith("Z"))) return { exists: false };
+			const members = inspected.stdout.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => /^(\d+)\s+(\S+)/.exec(line));
+			if (members.length === 0 || members.some((member) => !member || Number(member[1]) !== pid)) return { exists: true, attributable: false, probeError: "process group membership could not be attributed to the original PGID" };
+			if (members.every((member) => member![2]!.startsWith("Z"))) return { exists: false, attributable: true };
+			return { exists: true, attributable: true };
 		}
-		else return { exists: true, probeError: inspected.error?.message ?? `ps exited with status ${String(inspected.status)}` };
+		else return { exists: true, attributable: false, probeError: inspected.error?.message ?? `ps exited with status ${String(inspected.status)}` };
 	}
-	return { exists: true };
+	return { exists: true, attributable: false };
+}
+
+function killAttributedProcessGroup(pid: number): void {
+	const probe = processGroupExists(pid);
+	if (!probe.exists || !probe.attributable) return;
+	try { process.kill(-pid, "SIGKILL"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
 }
 
 async function waitForProcessGroupExtinction(pid: number): Promise<void> {
@@ -330,7 +338,6 @@ export async function runDeterministicStep(
 	let timedOut = false;
 	let cancelled = false;
 	let terminationRequested = false;
-	let childClosed = false;
 	let escalationHandle: ReturnType<typeof setTimeout> | undefined;
 	let finishEscalation: (() => void) | undefined;
 	let escalationPromise: Promise<void> | undefined;
@@ -344,9 +351,9 @@ export async function runDeterministicStep(
 				finishEscalation = resolveEscalation;
 				escalationHandle = setTimeout(() => {
 					escalationHandle = undefined;
-					// The spawned leader is the group-authority token. Never signal its
-					// numeric group after Node has observed exit/close: that PID may be reused.
-					if (!childClosed && child.exitCode === null && child.signalCode === null) signalProcessTree(child, "SIGKILL");
+					// The leader may exit while a TERM-resistant descendant remains. Retain
+					// authority only after exact live PGID membership is revalidated.
+					if (typeof child.pid === "number") killAttributedProcessGroup(child.pid);
 					finishEscalation = undefined;
 					resolveEscalation();
 				}, PROCESS_GROUP_TERM_GRACE_MS);
@@ -375,11 +382,12 @@ export async function runDeterministicStep(
 		: undefined;
 
 	const clearEscalation = () => {
-		childClosed = true;
-		if (escalationHandle) clearTimeout(escalationHandle);
-		escalationHandle = undefined;
-		finishEscalation?.();
-		finishEscalation = undefined;
+		if (!terminationRequested || cleanupScope !== "process-group") {
+			if (escalationHandle) clearTimeout(escalationHandle);
+			escalationHandle = undefined;
+			finishEscalation?.();
+			finishEscalation = undefined;
+		}
 	};
 
 	return await new Promise((resolveResult) => {

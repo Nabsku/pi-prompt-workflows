@@ -1940,6 +1940,13 @@ function loadPromptsWithModelFromDir(
 						adaptiveChain = { steps: parsedChainDeclarationResult.steps, limits: parsedChainDeclarationResult.limits };
 					}
 				}
+				if (adaptiveChain) {
+					const legacyLoopControls = ["loop", "fresh", "converge"].filter((key) => Object.hasOwn(frontmatter, key));
+					if (legacyLoopControls.length > 0) {
+						diagnostics.push(createDiagnostic("invalid-adaptive-loop-controls", fullPath, source, `Skipping adaptive chain template at ${fullPath}: structured chain wrappers do not support legacy loop controls (${legacyLoopControls.join(", ")}).`));
+						continue;
+					}
+				}
 				let subagent = normalizeSubagent(frontmatter.subagent, fullPath, source, diagnostics);
 				const cwd = normalizeCwd(frontmatter.cwd, fullPath, source, diagnostics);
 				const inheritContext = normalizeInheritContext(frontmatter.inheritContext, fullPath, source, diagnostics);

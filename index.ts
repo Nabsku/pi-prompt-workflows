@@ -2832,6 +2832,13 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				}
 			}
 
+			const adaptiveSteps = wrapper.adaptiveChain.steps;
+			const changedGateAnalysis = collectChangedGatePredecessors(adaptiveSteps, wrapper.adaptiveChain.limits);
+			if (!changedGateAnalysis.complete) {
+				notify(ctx, `Adaptive chain ${name} cannot start: changed-gate predecessor analysis exceeded its bounded 4096-state cap or was inconclusive.`, "error");
+				return;
+			}
+
 			if (!(await ensureProjectPromptLibraryApproved(wrapper, ctx))) return;
 			storedCommandCtx = ctx;
 			const stepArgs = parseCommandArgs(runtime.args);
@@ -2839,8 +2846,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			savedThinking = pi.getThinkingLevel();
 			executionStarted = true;
 			const fallbackCwd = wrapper.cwd ?? ctx.cwd;
-			const adaptiveSteps = wrapper.adaptiveChain.steps;
-			const changedEvidenceSuppliers = new Set([...collectChangedGatePredecessors(adaptiveSteps, wrapper.adaptiveChain.limits).predecessors.values()].flatMap((ids) => [...ids]));
+			const changedEvidenceSuppliers = new Set([...changedGateAnalysis.predecessors.values()].flatMap((ids) => [...ids]));
 			const freshAdaptiveTarget = (target: string) => loadPromptsWithModel(ctx.cwd, true, { includeAdaptiveChains: true }).prompts.get(target);
 			const report = await executeAdaptiveChain(wrapper.adaptiveChain, {
 				signal: ctx.signal,

@@ -157,6 +157,7 @@ function resolveRepositoryIdentity(cwd: string, maxGit: number, deadline: Captur
 }
 export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorktreeSnapshotOptions = {}): GitWorktreeSnapshot {
 	const maxFiles = positiveLimit(options.maxFiles, DEFAULT_MAX_FILES, "maxFiles"), maxBytes = positiveLimit(options.maxBytes, DEFAULT_MAX_BYTES, "maxBytes"), maxGit = positiveLimit(options.maxGitOutputBytes, DEFAULT_MAX_GIT_OUTPUT_BYTES, "maxGitOutputBytes");
+	if (maxBytes > DEFAULT_MAX_BYTES) throw new GitWorktreeSnapshotError("INVALID_SNAPSHOT", `maxBytes cannot exceed ${DEFAULT_MAX_BYTES}`);
 	const deadlineMs = positiveLimit(options.deadlineMs, GIT_WORKTREE_SNAPSHOT_DEADLINE_MS, "deadlineMs");
 	const deadline = { expiresAt: performance.now() + deadlineMs };
 	const { canonicalRoot, repositoryIdentity } = resolveRepositoryIdentity(cwd, maxGit, deadline);
@@ -173,19 +174,12 @@ export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorkt
 	}
 	let indexTree: string; try { indexTree = oneLine(runGit(canonicalRoot, ["write-tree"], "INVALID_INDEX", maxGit, deadline), "index tree"); } catch (error) { if (error instanceof GitWorktreeSnapshotError && error.code === "INVALID_INDEX") throw error; throw error; }
 	const status = runGit(canonicalRoot, ["-c", "core.quotepath=false", "status", "--no-ahead-behind", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"], "GIT_ERROR", maxGit, deadline);
-	const paths = parseStatusPaths(status); if (paths.length > maxFiles) throw new GitWorktreeSnapshotError("FILE_LIMIT_EXCEEDED", `Working-tree snapshot file limit exceeded (${paths.length} > ${maxFiles})`);
-	const indexParts: Buffer[] = []; let indexBytes = 0;
-	// This Git lacks ls-files --pathspec-from-file. Query each already-bounded status path
-	// separately: no aggregate argv/ARG_MAX exposure, and `--` prevents option injection.
-	for (const path of paths) {
-		const text = path.toString("utf8");
-		if (!Buffer.from(text).equals(path)) throw new GitWorktreeSnapshotError("UNSAFE_PATH", "Git path is not valid UTF-8 on this platform");
-		const part = runGit(canonicalRoot, ["--literal-pathspecs", "ls-files", "--stage", "-z", "--", text], "GIT_ERROR", maxGit, deadline);
-		indexBytes += part.length;
-		if (indexBytes > maxGit) throw new GitWorktreeSnapshotError("LIMIT_EXCEEDED", "Git index query output limit exceeded");
-		indexParts.push(part);
-	}
-	const indexOutput = Buffer.concat(indexParts, indexBytes);
+	const statusPaths = parseStatusPaths(status);
+	const indexOutput = runGit(canonicalRoot, ["ls-files", "--stage", "-z"], "GIT_ERROR", maxGit, deadline);
+	const trackedPaths = splitNul(indexOutput, "INVALID_INDEX").map((record) => { const tab = record.indexOf(9); if (tab < 0) throw new GitWorktreeSnapshotError("INVALID_INDEX", "Malformed Git index record"); return Buffer.from(record.subarray(tab + 1)); });
+	const uniquePaths = new Map<string, Buffer>(); for (const path of [...statusPaths, ...trackedPaths]) uniquePaths.set(path.toString("base64"), path);
+	const paths = [...uniquePaths].sort(([a], [b]) => a.localeCompare(b)).map(([, path]) => path);
+	if (paths.length > maxFiles) throw new GitWorktreeSnapshotError("FILE_LIMIT_EXCEEDED", `Working-tree snapshot file limit exceeded (${paths.length} > ${maxFiles})`);
 	const index = fingerprintIndex(paths, indexOutput, maxFiles * 3); const files: GitWorktreeFileSnapshot[] = []; let consumed = 0; const rootBytes = Buffer.from(canonicalRoot);
 	for (const path of paths) { const result = fingerprint(rootBytes, path, maxBytes - consumed); consumed += result.consumed; files.push(result.snapshot); }
 	const finalIdentity = resolveRepositoryIdentity(canonicalRoot, maxGit, deadline);
@@ -203,14 +197,8 @@ export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorkt
 	}
 	const verifiedIndexTree = oneLine(runGit(canonicalRoot, ["write-tree"], "INVALID_INDEX", maxGit, deadline), "index tree");
 	const verifiedStatus = runGit(canonicalRoot, ["-c", "core.quotepath=false", "status", "--no-ahead-behind", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"], "GIT_ERROR", maxGit, deadline);
-	const verifiedIndexParts: Buffer[] = []; let verifiedIndexBytes = 0;
-	for (const path of paths) {
-		const part = runGit(canonicalRoot, ["--literal-pathspecs", "ls-files", "--stage", "-z", "--", path.toString("utf8")], "GIT_ERROR", maxGit, deadline);
-		verifiedIndexBytes += part.length;
-		if (verifiedIndexBytes > maxGit) throw new GitWorktreeSnapshotError("LIMIT_EXCEEDED", "Git index verification output limit exceeded");
-		verifiedIndexParts.push(part);
-	}
-	const verifiedIndex = fingerprintIndex(paths, Buffer.concat(verifiedIndexParts, verifiedIndexBytes), maxFiles * 3);
+	const verifiedIndexOutput = runGit(canonicalRoot, ["ls-files", "--stage", "-z"], "GIT_ERROR", maxGit, deadline);
+	const verifiedIndex = fingerprintIndex(paths, verifiedIndexOutput, maxFiles * 3);
 	const verifiedFiles: GitWorktreeFileSnapshot[] = []; let verifiedConsumed = 0;
 	for (const path of paths) { const result = fingerprint(rootBytes, path, maxBytes - verifiedConsumed); verifiedConsumed += result.consumed; verifiedFiles.push(result.snapshot); }
 	const equalFiles = files.length === verifiedFiles.length && files.every((entry, i) => {
@@ -261,7 +249,7 @@ function canonicalSnapshot(value: unknown): GitWorktreeSnapshot | undefined {
 		const hash = createHash("sha256").update(Buffer.from(path, "base64")).update(Buffer.from([0])); if (!entries.length) hash.update("absent"); else entries.forEach((e) => hash.update(Buffer.from(e, "base64")).update(Buffer.from([0]))); if (hash.digest("hex") !== x.fingerprint) return undefined;
 		index.push({ path, entries, fingerprint: x.fingerprint });
 	}
-	let statusPaths: Buffer[]; try { statusPaths = parseStatusPaths(status); } catch { return undefined; } if (statusPaths.length !== files.length || statusPaths.some((p, i) => p.toString("base64") !== files[i]!.path)) return undefined;
+	let statusPaths: Buffer[]; try { statusPaths = parseStatusPaths(status); } catch { return undefined; } const filePaths = new Set(files.map((file) => file.path)); if (statusPaths.some((p) => !filePaths.has(p.toString("base64")))) return undefined;
 	return { version: 1, repositoryRoot: root.toString("base64"), repositoryIdentity: { rootFileId: identity.rootFileId as string, gitDir: identity.gitDir as string, commonDir: identity.commonDir as string, gitDirFileId: identity.gitDirFileId as string, commonDirFileId: identity.commonDirFileId as string }, headIdentity: top.headIdentity, indexTree: top.indexTree, status: status.toString("base64"), files, index };
 }
 export function compareGitWorktreeSnapshots(before: GitWorktreeSnapshot, after: GitWorktreeSnapshot): { changed: boolean } {
