@@ -37,7 +37,7 @@ import {
 	type DelegationLineupSlot,
 	type PromptWithModel,
 } from "./prompt-loader.js";
-import { createInvalidAdaptivePreflight } from "./adaptive-preflight.js";
+import { createInvalidAdaptivePreflight, isAdaptivePromptTarget, isAdaptiveRunTarget } from "./adaptive-preflight.js";
 import {
 	buildSkillLoadedMessage,
 	getRequestedSkills,
@@ -70,7 +70,7 @@ import {
 	createCompareRunDetailViewModel,
 	type CompareRunHistoryTuiResult,
 } from "./best-of-n-run-history-tui.js";
-import { formatPromptValidationReport, validatePromptTemplates, type RegisteredPromptSkill } from "./prompt-validation.js";
+import { collectChangedGatePredecessors, formatPromptValidationReport, validatePromptTemplates, type RegisteredPromptSkill } from "./prompt-validation.js";
 import {
 	DRY_RUN_CHAIN_UNSUPPORTED,
 	DRY_RUN_DETERMINISTIC_UNSUPPORTED,
@@ -2454,7 +2454,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 								taskPreamble,
 								stepLoopContext,
 							);
-							if (stepResult === "aborted") {
+							if (stepResult === "aborted" || stepResult.aborted) {
 								chainAborted = true;
 								aborted = true;
 								break;
@@ -2814,15 +2814,14 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					return;
 				}
 				if (step.kind === "prompt") {
-					const expandsCalls = target.deterministic || target.subagent || target.inheritContext || target.parallel || target.loop !== undefined || target.boomerang || target.workers || target.reviewers || target.finalApplier || target.preset;
-					if (expandsCalls) {
+					if (!isAdaptivePromptTarget(target)) {
 						notify(ctx, `Adaptive prompt target ${JSON.stringify(step.target)} uses a delegated, loop, boomerang, compare/final-applier, deterministic, or parallel mode. Multi-call modes are unsupported until the router can reserve their exact top-level model calls.`, "error");
 						return;
 					}
 				} else if (!target.deterministic) {
 					notify(ctx, `Adaptive run target ${JSON.stringify(step.target)} is not deterministic.`, "error");
 					return;
-				} else if (target.deterministic.handoff !== "never") {
+				} else if (!isAdaptiveRunTarget(target)) {
 					notify(ctx, `Adaptive run target ${JSON.stringify(step.target)} requests a delegated handoff. Multi-call modes are unsupported until the router can reserve exact top-level model calls.`, "error");
 					return;
 				}
@@ -2835,24 +2834,32 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			savedThinking = pi.getThinkingLevel();
 			executionStarted = true;
 			const fallbackCwd = wrapper.cwd ?? ctx.cwd;
+			const adaptiveSteps = wrapper.adaptiveChain.steps;
+			const changedEvidenceSuppliers = new Set([...collectChangedGatePredecessors(adaptiveSteps, wrapper.adaptiveChain.limits).predecessors.values()].flatMap((ids) => [...ids]));
+			const freshAdaptiveTarget = (target: string) => loadPromptsWithModel(ctx.cwd, true, { includeAdaptiveChains: true }).prompts.get(target);
 			const report = await executeAdaptiveChain(wrapper.adaptiveChain, {
 				signal: ctx.signal,
 				resolvePrompt(target) {
-					const prompt = chainPrompts.get(target);
-					return prompt && !prompt.chain && !prompt.adaptiveChain && !prompt.deterministic ? prompt : undefined;
+					const prompt = freshAdaptiveTarget(target);
+					return prompt && isAdaptivePromptTarget(prompt) ? prompt : undefined;
 				},
 				resolveRun(target) {
-					const prompt = chainPrompts.get(target);
-					return prompt?.deterministic && !prompt.chain && !prompt.adaptiveChain ? prompt : undefined;
+					const prompt = freshAdaptiveTarget(target);
+					return isAdaptiveRunTarget(prompt) ? prompt : undefined;
 				},
 				resolveSnapshotCwd(step, prompt) {
-					return resolvePath(runtimeCwd ?? (step.kind === "run" ? prompt.deterministic?.cwd : prompt.cwd) ?? fallbackCwd);
+					// Ordinary in-session prompts execute in the session cwd; prompt cwd is
+					// execution-shaping only for delegated paths (which adaptive rejects).
+					return resolvePath(step.kind === "run" ? runtimeCwd ?? prompt.deterministic?.cwd ?? fallbackCwd : ctx.cwd);
+				},
+				shouldCaptureSnapshot(step) {
+					return changedEvidenceSuppliers.has(step.id);
 				},
 				async executePrompt(prompt) {
 					const effective = { ...prompt, ...(runtimeCwd ? { cwd: runtimeCwd } : {}), ...(runtime.model ? { models: [runtime.model] } : {}) };
 					let abortStatus: "failed" | "blocked" = "failed";
-					const result = await executeOrdinaryPrompt(prompt.name, effective, stepArgs, ctx, getCurrentModel(ctx), undefined, (status) => { abortStatus = status; });
-					if (result === "aborted") return { status: abortStatus, error: new Error(`Adaptive prompt step ${prompt.name} did not complete`) };
+					const result = await executeOrdinaryPrompt(prompt.name, effective, stepArgs, ctx, savedModel, undefined, (status) => { abortStatus = status; });
+					if (result === "aborted" || result.aborted) return { status: abortStatus, error: new Error(`Adaptive prompt step ${prompt.name} did not complete`) };
 					if (!result.terminalAssistantMessage) {
 						const error = new Error(`Adaptive prompt step ${prompt.name} produced no terminal assistant message`);
 						notify(ctx, error.message, "error");
@@ -2862,6 +2869,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					catch (error) { notify(ctx, error instanceof Error ? error.message : String(error), "error"); return { status: "failed", error }; }
 				},
 				async executeRun(prompt) {
+					if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return { status: "blocked", error: new Error(`Adaptive run step ${prompt.name} was not approved`) };
 					const deterministic = { ...prompt.deterministic!, cwd: runtimeCwd ?? prompt.deterministic!.cwd ?? fallbackCwd };
 					return normalizeDeterministicExecutionOutcome(await runDeterministicStep(prompt, deterministic, ctx.cwd, ctx.signal));
 				},
@@ -2878,6 +2886,10 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		} finally {
 			if (workflowOwner === owner) {
 				try {
+					// agent_end is suppressed while adaptive owns the workflow, so per-target
+					// restore markers must not leak into the next unrelated turn.
+					previousModel = undefined;
+					previousThinking = undefined;
 					if (executionStarted && wrapper?.restore) await restoreSessionState(ctx, savedModel, savedThinking, getCurrentModel(ctx), pi.getThinkingLevel());
 				} finally {
 					releaseWorkflowOwner(owner);
@@ -2898,8 +2910,6 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			notify(ctx, `Prompt "${name}" is no longer available as a slash command`, "error");
 			return;
 		}
-		if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return;
-
 		const subagent = extractSubagentOverride(args);
 		const runtimeCwd = subagent.cwd ? expandCwdPath(subagent.cwd) : undefined;
 		if (subagent.cwd && !runtimeCwd) {
@@ -2942,6 +2952,13 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 
 		if (prompt.chain) {
+			const owner = claimWorkflowOwner(`legacy:${name}`);
+			if (!owner) {
+				notify(ctx, `Legacy chain ${name} cannot start while another prompt workflow is active.`, "error");
+				return;
+			}
+			try {
+			if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return;
 			if (subagent.model) notify(ctx, `--model is not supported on chain prompts (ignored)`, "warning");
 			if (subagent.fork) notify(ctx, `--fork is not supported on chain prompts (ignored)`, "warning");
 			const worktreeExtraction = extractWorktreeFlag(argsWithoutSubagent);
@@ -2990,9 +3007,15 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				chainContextEnabled,
 				prompt.worktree === true,
 				cliWorktree,
+				owner,
 			);
 			return;
+			} finally {
+				releaseWorkflowOwner(owner);
+			}
 		}
+
+		if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return;
 
 		const promptOverrides: Partial<Pick<PromptWithModel, "models" | "inheritContext">> = {
 			...(subagent.model ? { models: [subagent.model] } : {}),

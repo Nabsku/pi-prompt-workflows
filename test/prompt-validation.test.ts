@@ -1308,7 +1308,7 @@ test("adaptive validation report sanitizes and caps malicious target diagnostics
 	});
 });
 
-test("changed-gate validation checks every selected predecessor cwd, not the gated target", () => {
+test("changed-gate validation checks ordinary prompt predecessors in the session cwd, not wrapper cwd", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project"); const gitCwd = join(cwd, "repo");
 		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true }); mkdirSync(gitCwd, { recursive: true });
@@ -1316,13 +1316,10 @@ test("changed-gate validation checks every selected predecessor cwd, not the gat
 		writeFileSync(join(cwd, ".pi", "prompts", "mutate.md"), "mutate");
 		writeFileSync(join(cwd, ".pi", "prompts", "review.md"), "review");
 		writeFileSync(join(cwd, ".pi", "prompts", "flow.md"), `---\ncwd: ${gitCwd}\nchain:\n  - id: mutate\n    prompt: mutate\n    onSuccess: skipped\n  - id: skipped\n    prompt: review\n    when: failed\n  - id: changed-review\n    prompt: review\n    when: changed\n---\nignored`);
-		const valid = validatePromptTemplates(cwd);
-		assert.equal(valid.diagnostics.some((item) => item.code === "adaptive-changed-requires-git"), false, valid.diagnostics.map((item) => item.message).join("\n"));
-		writeFileSync(join(cwd, ".pi", "prompts", "flow.md"), `---\ncwd: ${cwd}\nchain:\n  - id: mutate\n    prompt: mutate\n    onSuccess: skipped\n  - id: skipped\n    prompt: review\n    when: failed\n  - id: changed-review\n    prompt: review\n    when: changed\n---\nignored`);
 		const invalid = validatePromptTemplates(cwd);
 		const diagnostic = invalid.diagnostics.find((item) => item.code === "adaptive-changed-requires-git");
 		assert.match(diagnostic?.message ?? "", /selected predecessor "mutate" \(prompt:mutate\)/);
-		assert.doesNotMatch(diagnostic?.message ?? "", /prompt:review.*runtime-effective/);
+		assert.match(diagnostic?.message ?? "", /runtime-effective cwd/);
 	});
 });
 
@@ -1330,6 +1327,7 @@ test("changed-gate validation handles run predecessors reached by explicit trans
 	withTempHome((root) => {
 		const cwd = join(root, "project"); const gitCwd = join(cwd, "repo");
 		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true }); mkdirSync(gitCwd, { recursive: true });
+		execFileSync("git", ["init", "-q"], { cwd });
 		execFileSync("git", ["init", "-q"], { cwd: gitCwd });
 		writeFileSync(join(cwd, ".pi", "prompts", "run.md"), `---\ndeterministic:\n  run:\n    command: git\n    args: [status, --porcelain=v1]\n  cwd: ${gitCwd}\n  handoff: never\n---\n`);
 		writeFileSync(join(cwd, ".pi", "prompts", "review.md"), "review");

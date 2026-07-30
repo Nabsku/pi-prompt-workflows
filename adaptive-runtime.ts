@@ -15,6 +15,7 @@ export interface AdaptiveRuntimeDependencies<TPrompt = unknown, TRun = unknown> 
 	executePrompt(prompt: TPrompt, step: StructuredChainStep): Promise<StepExecutionOutcome<unknown>>;
 	executeRun(run: TRun, step: StructuredChainStep): Promise<StepExecutionOutcome<unknown>>;
 	resolveSnapshotCwd(step: StructuredChainStep, target: TPrompt | TRun): string;
+	shouldCaptureSnapshot?(step: StructuredChainStep): boolean;
 	captureSnapshot(step: StructuredChainStep, cwd: string): Promise<GitWorktreeSnapshot> | GitWorktreeSnapshot;
 	compareSnapshots(before: GitWorktreeSnapshot, after: GitWorktreeSnapshot): { changed: boolean };
 	onDecision?(decision: AdaptiveChainDecision): void;
@@ -93,7 +94,8 @@ export async function executeAdaptiveChain<TPrompt, TRun>(
 		if (target === undefined) throw new Error(`Adaptive chain ${step.kind} target ${JSON.stringify(step.target)} is missing or mismatched`);
 
 		const snapshotCwd = dependencies.resolveSnapshotCwd(step, target as TPrompt | TRun);
-		const before = await dependencies.captureSnapshot(step, snapshotCwd);
+		const shouldSnapshot = dependencies.shouldCaptureSnapshot?.(step) ?? true;
+		const before = shouldSnapshot ? await dependencies.captureSnapshot(step, snapshotCwd) : undefined;
 		throwIfCancelled();
 		let outcome: StepExecutionOutcome<unknown>;
 		try {
@@ -103,8 +105,8 @@ export async function executeAdaptiveChain<TPrompt, TRun>(
 		} catch (error) {
 			outcome = { status: "failed", error };
 		}
-		const after = await dependencies.captureSnapshot(step, snapshotCwd);
-		const changed = dependencies.compareSnapshots(before, after).changed;
+		const after = shouldSnapshot ? await dependencies.captureSnapshot(step, snapshotCwd) : undefined;
+		const changed = before && after ? dependencies.compareSnapshots(before, after).changed : false;
 		const status = dependencies.signal?.aborted ? "failed" : outcomeStatus(outcome);
 		observation = { outcome: status, changed };
 		const errorReason = "error" in outcome ? String(outcome.error instanceof Error ? outcome.error.message : outcome.error) : undefined;

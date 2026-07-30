@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { AdaptiveChainCancelledError, executeAdaptiveChain, type AdaptiveRuntimeTraceEntry } from "../adaptive-runtime.ts";
 import type { StructuredChainStep } from "../chain-parser.ts";
 import type { GitWorktreeSnapshot } from "../git-worktree-snapshot.ts";
+import { isAdaptivePromptTarget, isAdaptiveRunTarget } from "../adaptive-preflight.ts";
+import type { PromptWithModel } from "../prompt-loader.ts";
 
 const prompt = (target: string, extra: Partial<StructuredChainStep> = {}): StructuredChainStep => ({ id: target, kind: "prompt", target, when: "always", ...extra });
 const run = (target: string, extra: Partial<StructuredChainStep> = {}): StructuredChainStep => ({ id: target, kind: "run", target, when: "always", ...extra });
@@ -69,6 +71,28 @@ test("fails closed before side effects for missing targets and snapshot failures
 		compareSnapshots: () => ({ changed: false }),
 	}), /snapshot unavailable/);
 	assert.equal(executed, false);
+});
+
+test("fresh adaptive resolution rejects targets mutated after preflight before side effects", async () => {
+	for (const kind of ["prompt", "run"] as const) {
+		let current = (kind === "prompt"
+			? { name: "target", content: "safe" }
+			: { name: "target", content: "", deterministic: { handoff: "never" } }) as PromptWithModel;
+		assert.equal(kind === "prompt" ? isAdaptivePromptTarget(current) : isAdaptiveRunTarget(current), true);
+		current = (kind === "prompt"
+			? { ...current, subagent: "worker" }
+			: { ...current, deterministic: { ...current.deterministic!, handoff: "always" } }) as PromptWithModel;
+		let dispatched = false;
+		await assert.rejects(executeAdaptiveChain({ steps: [kind === "prompt" ? prompt("target") : run("target")], limits: { maxSteps: 1, maxModelCalls: 1 } }, {
+			resolvePrompt: () => isAdaptivePromptTarget(current) ? current : undefined,
+			resolveRun: () => isAdaptiveRunTarget(current) ? current : undefined,
+			resolveSnapshotCwd: () => "/repo",
+			executePrompt: async () => { dispatched = true; return { status: "succeeded", result: undefined }; },
+			executeRun: async () => { dispatched = true; return { status: "succeeded", result: undefined }; },
+			captureSnapshot: () => snapshot(0), compareSnapshots: () => ({ changed: false }),
+		}), /missing or mismatched/);
+		assert.equal(dispatched, false);
+	}
 });
 
 test("enforces model and step limits before the next action", async () => {

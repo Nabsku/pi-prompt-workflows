@@ -450,7 +450,7 @@ function isGitRepository(cwd: string, context: GitProbeContext): GitProbeResult 
 
 const ADAPTIVE_GATE_ANALYSIS_CAP = 4096;
 
-function collectChangedGatePredecessors(steps: readonly import("./chain-parser.js").StructuredChainStep[], limits: import("./chain-parser.js").ChainLimits): { complete: boolean; predecessors: Map<string, Set<string>> } {
+export function collectChangedGatePredecessors(steps: readonly import("./chain-parser.js").StructuredChainStep[], limits: import("./chain-parser.js").ChainLimits): { complete: boolean; predecessors: Map<string, Set<string>> } {
 	const predecessors = new Map<string, Set<string>>();
 	const queue: Array<{ state: AdaptiveChainState; selected: string }> = [];
 	const seen = new Set<string>();
@@ -485,7 +485,7 @@ function collectChangedGatePredecessors(steps: readonly import("./chain-parser.j
 
 function effectiveAdaptiveActionCwd(wrapper: LoadedPrompt, step: import("./chain-parser.js").StructuredChainStep, prompts: ReturnType<typeof loadPromptsWithModel>["prompts"], cwd: string): string {
 	const target = prompts.get(step.target);
-	return (step.kind === "run" ? target?.deterministic?.cwd : target?.cwd) ?? wrapper.cwd ?? cwd;
+	return step.kind === "run" ? target?.deterministic?.cwd ?? wrapper.cwd ?? cwd : cwd;
 }
 
 function validateAdaptiveChains(cwd: string, result: PromptValidationResult, prompts: ReturnType<typeof loadPromptsWithModel>["prompts"]): void {
