@@ -1,5 +1,65 @@
 # Changelog
 
+## [0.17.0](https://github.com/Nabsku/pi-prompt-workflows/compare/v0.16.1...v0.17.0) (2026-07-30)
+
+
+### Features
+
+* add adaptive chain schema ([f91e23d](https://github.com/Nabsku/pi-prompt-workflows/commit/f91e23d2a1731b98d9ee34c2c03d61d3e16a855e))
+* add bounded adaptive chain routing ([6026cca](https://github.com/Nabsku/pi-prompt-workflows/commit/6026cca4bcb84f2ddfe75e07b19561eca13c3800))
+* add prompt budget estimates ([306b419](https://github.com/Nabsku/pi-prompt-workflows/commit/306b419244824c554f6d96751c7241b26451f68a))
+* add verified worktree change snapshots ([7b3a039](https://github.com/Nabsku/pi-prompt-workflows/commit/7b3a0393513324e1a05eaff33299abf0e0d23501))
+* enforce and report prompt budgets ([85a8ff2](https://github.com/Nabsku/pi-prompt-workflows/commit/85a8ff23910e4d6f9d40d7b3f29c4c25835df8a3))
+* execute bounded adaptive chains ([7abf59e](https://github.com/Nabsku/pi-prompt-workflows/commit/7abf59e76ea00852b4005e6a47351487fd3d9f35))
+* improve compare UX guidance ([be72803](https://github.com/Nabsku/pi-prompt-workflows/commit/be728031eb9f5a1b97c663f5bb51ceb5e6065c99))
+* inspect adaptive chain execution ([8259fab](https://github.com/Nabsku/pi-prompt-workflows/commit/8259fab59132632d140efe0f5813b4ca8cfb20aa))
+* normalize adaptive step outcomes ([7ab6661](https://github.com/Nabsku/pi-prompt-workflows/commit/7ab6661134fe9dfd0acb4283dbacada012fd5651))
+* polish compare run history recovery ([96a8545](https://github.com/Nabsku/pi-prompt-workflows/commit/96a85452c96c3854c3fb9e8be9bf362c735fd094))
+* tighten compare run recovery UX ([1c3f2a7](https://github.com/Nabsku/pi-prompt-workflows/commit/1c3f2a7e856d8525b9d27d45c55d8d2964debe08))
+* validate and document adaptive chains ([5042066](https://github.com/Nabsku/pi-prompt-workflows/commit/5042066b9118c4c893ba311c13245a70caf5797e))
+
+
+### Bug Fixes
+
+* address compare recovery review feedback ([ad01b78](https://github.com/Nabsku/pi-prompt-workflows/commit/ad01b78e05efbcb8ab33ef27deeeac6bd5097f34))
+* address compare review recovery commands ([47f9b96](https://github.com/Nabsku/pi-prompt-workflows/commit/47f9b96f01931baa403abf236d73296afd52bf06))
+* align adaptive Git observation ([e24f291](https://github.com/Nabsku/pi-prompt-workflows/commit/e24f291975d8f87bce1ede6deb9e5d97382ad63d))
+* align adaptive preflight state ([d669f56](https://github.com/Nabsku/pi-prompt-workflows/commit/d669f56db7227cff3bd6534ff9d54f6c9bce1e77))
+* align adaptive runtime semantics ([92d4588](https://github.com/Nabsku/pi-prompt-workflows/commit/92d4588e755bd32ad5f9c97251f3b6e820f0dbec))
+* align budget preflight with runtime ([0ab9f88](https://github.com/Nabsku/pi-prompt-workflows/commit/0ab9f883c47046293704b2826d6a86dfe2531587))
+* align budget validation edge cases ([4128b74](https://github.com/Nabsku/pi-prompt-workflows/commit/4128b74f0b04a9b3d78483e34213cf4200c1a818))
+* bound adaptive snapshot analysis ([ee86520](https://github.com/Nabsku/pi-prompt-workflows/commit/ee865207ba0247d0f21291aac9edc146b750cedc))
+* close adaptive execution gaps ([146b46a](https://github.com/Nabsku/pi-prompt-workflows/commit/146b46a8ad8b0a9c6ba36a8d36bcdf414b21c7f6))
+* close adaptive lifecycle edge cases ([15f4840](https://github.com/Nabsku/pi-prompt-workflows/commit/15f4840409b227a1a6eed30cd274dbe3a89adb97))
+* close adaptive review gaps ([187662c](https://github.com/Nabsku/pi-prompt-workflows/commit/187662c96f0c098aebb2495b74d7a9e2934d3519))
+* close adaptive state edge cases ([f5e8e32](https://github.com/Nabsku/pi-prompt-workflows/commit/f5e8e3258fc669bd2c7bdb5410c32472437df6d6))
+* close compare UX blocker gaps ([5103f5e](https://github.com/Nabsku/pi-prompt-workflows/commit/5103f5e054f0d7da98987fa29c8cb39d5f062195))
+* close follow-up compare review gaps ([95ecf5c](https://github.com/Nabsku/pi-prompt-workflows/commit/95ecf5c9c110fc8d76995e960eaec4f5dff3bd04))
+* close remaining budget validation gaps ([949699f](https://github.com/Nabsku/pi-prompt-workflows/commit/949699fe9a0911bc92dce981a191d27c75d47d0b))
+* complete adaptive chain inspection ([6c23125](https://github.com/Nabsku/pi-prompt-workflows/commit/6c231251a55013f2e8693bda0d6355c369323b9a))
+* complete adaptive snapshot identity ([477a1c0](https://github.com/Nabsku/pi-prompt-workflows/commit/477a1c0c16e605969c1f5e6c3690bc5c71d638dc))
+* complete adaptive submodule evidence ([c7ba3dc](https://github.com/Nabsku/pi-prompt-workflows/commit/c7ba3dc327a4ac94d6994191720b8406ce29069a))
+* complete static budget preflight ([cbd4549](https://github.com/Nabsku/pi-prompt-workflows/commit/cbd45495c41faebeed12711d6fde4449a2ebd67c))
+* defer conditional budget validation ([2b6578b](https://github.com/Nabsku/pi-prompt-workflows/commit/2b6578be33770fb05989baa3b220556a6cc4fcdb))
+* enforce budgets on dispatched prompts ([06fcec4](https://github.com/Nabsku/pi-prompt-workflows/commit/06fcec4be0a0084be1ae31c44db31d28b94d89ad))
+* harden adaptive path snapshots ([06d4c24](https://github.com/Nabsku/pi-prompt-workflows/commit/06d4c24465e10ffa06d7f0d9dfcc2668cc8b1502))
+* isolate adaptive snapshot probes ([1941761](https://github.com/Nabsku/pi-prompt-workflows/commit/194176148b3cc7643e7b667adaf2c6d7f872dfb1))
+* keep adaptive validation read-only ([1aeee37](https://github.com/Nabsku/pi-prompt-workflows/commit/1aeee37292bfc351dd360d62cb5f700f7858db4b))
+* make adaptive snapshots semantically stable ([abba442](https://github.com/Nabsku/pi-prompt-workflows/commit/abba4425d57f5e7598cb0be3e005e4d5adbca5fe))
+* package Git environment helper ([3a2c17b](https://github.com/Nabsku/pi-prompt-workflows/commit/3a2c17bfc4284175b91f1d31051cf7f8bc2870cb))
+* parse quoted runtime flag values ([012d1a8](https://github.com/Nabsku/pi-prompt-workflows/commit/012d1a8f03564856f994bf12a12f5713c7ac37c8))
+* preserve adaptive execution evidence ([605759a](https://github.com/Nabsku/pi-prompt-workflows/commit/605759a732a7beea31dcff643703ae655d0c550e))
+* preserve adaptive index semantics ([a7f2266](https://github.com/Nabsku/pi-prompt-workflows/commit/a7f226621c2eb4ffd7dd31166286ddd237256563))
+* preserve adaptive route guards ([e233543](https://github.com/Nabsku/pi-prompt-workflows/commit/e233543a8a3849c9079a001a2a5d0a42f41fa8d4))
+* preserve adaptive routing semantics ([f49c5d9](https://github.com/Nabsku/pi-prompt-workflows/commit/f49c5d9d3ff4ed8cdb697a44e32e9e75c47a3330))
+* preserve compare history cwd in recovery UI ([7f8c35f](https://github.com/Nabsku/pi-prompt-workflows/commit/7f8c35f4c39819006561f05575a4da8336ad4e5a))
+* preserve Git output limit errors ([8a0e1fb](https://github.com/Nabsku/pi-prompt-workflows/commit/8a0e1fb396ab33ec226e7eb85c4de7ea8da262c8))
+* report adaptive observations honestly ([ce69991](https://github.com/Nabsku/pi-prompt-workflows/commit/ce69991b9509d462fe68b8581382221f7154af7c))
+* retain adaptive snapshot settings ([8501505](https://github.com/Nabsku/pi-prompt-workflows/commit/850150578b53e9e584a2dda523c8e4e80b17acc5))
+* stabilize adaptive snapshots and cleanup ([e7b243f](https://github.com/Nabsku/pi-prompt-workflows/commit/e7b243f98bdff2f29abccb62e6b98a967d372cc7))
+* summarize rendered static budgets ([84643f7](https://github.com/Nabsku/pi-prompt-workflows/commit/84643f7dd10c3ca4edefb1b66e884efe7e490f22))
+* validate budgets against pinned models ([6138976](https://github.com/Nabsku/pi-prompt-workflows/commit/6138976f123e97923d2dd0d8209a607fcebb363a))
+
 ## [0.16.1](https://github.com/Nabsku/pi-prompt-workflows/compare/v0.16.0...v0.16.1) (2026-07-06)
 
 
