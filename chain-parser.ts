@@ -363,8 +363,20 @@ function parseStructuredChainDeclaration(chain: unknown[], limitsValue?: unknown
 	const cyclic = (id: string): boolean => { if (visiting.has(id)) return true; if (visited.has(id)) return false; visiting.add(id); for (const next of edges.get(id) ?? []) if (cyclic(next)) return true; visiting.delete(id); visited.add(id); return false; };
 	if (cyclic(steps[0].id)) return fail("structured chain contains a cycle");
 	const reachable = new Set<string>();
-	const visit = (id: string) => { if (reachable.has(id)) return; reachable.add(id); for (const next of edges.get(id) ?? []) visit(next); };
-	visit(steps[0].id);
+	const reachStates = new Set<string>();
+	const visit = (id: string, hasObservation: boolean) => {
+		const state = `${hasObservation ? 1 : 0}:${id}`;
+		if (reachStates.has(state)) return;
+		reachStates.add(state); reachable.add(id);
+		const index = steps.findIndex((step) => step.id === id); const step = steps[index];
+		if (!step) return;
+		if (!hasObservation && step.when !== "always") {
+			const fallthrough = steps[index + 1]; if (fallthrough) visit(fallthrough.id, false);
+			return;
+		}
+		for (const next of edges.get(id) ?? []) visit(next, true);
+	};
+	visit(steps[0].id, false);
 	const unreachable = steps.find((step) => !reachable.has(step.id));
 	if (unreachable) return fail(`structured chain has unreachable target ${JSON.stringify(unreachable.id)}`);
 	return { steps, limits, invalidSegments: [] };

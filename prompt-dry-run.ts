@@ -372,6 +372,7 @@ export async function createPromptDryRun(
 		if (parsed.runtimeCwd && !runtimeCwd) return errorResult(prompt, "Invalid --cwd path: must be absolute", warnings, runtime);
 		if (runtimeCwd) runtime.cwd = runtimeCwd;
 		const adaptivePreflight = await prepareAdaptivePreflight(prompt, options.promptCatalog ?? new Map(), { cwd: options.cwd, runtimeCwd, args: parsed.args, modelOverride: parsed.model, currentModel: options.currentModel, modelRegistry: options.modelRegistry, commands: options.commands });
+		warnings.push(...adaptivePreflight.warnings);
 		const unsupportedRuntime = parsed.override || parsed.fork || parsed.preset || parsed.runtime.loop;
 		if (unsupportedRuntime) return { ...errorResult(prompt, "Adaptive chains reject runtime --subagent, --fork, --preset, and --loop modes because they can expand one router action into multiple top-level model calls; exact call reservation is not implemented.", warnings, runtime), adaptivePreflight };
 		if (adaptivePreflight.status === "blocked") return { ...errorResult(prompt, adaptivePreflight.diagnostics.join("\n"), warnings, runtime), adaptivePreflight };
