@@ -173,6 +173,17 @@ test("gated structured steps retain their skip fallthrough with explicit outcome
 	assert.equal(parsed.steps.length, 3);
 });
 
+test("initial gated steps cannot make outcome-only targets reachable before an observation", () => {
+	const parsed = parseChainDeclaration([
+		{ id: "initial-gate", prompt: "gate", when: "changed", onSuccess: "impossible" },
+		{ id: "bridge", prompt: "bridge", onSuccess: "done", onFailure: "done", onBlocked: "done" },
+		{ id: "impossible", prompt: "impossible" },
+		{ id: "done", prompt: "done" },
+	]);
+	assert.equal(parsed.steps.length, 0);
+	assert.match(parsed.invalidSegments.join("\n"), /unreachable target "impossible"/i);
+});
+
 test("gated skip fallthrough participates in structured-chain cycle detection", () => {
 	const parsed = parseChainDeclaration([
 		{ prompt: "gate", when: "changed", onSuccess: "done", onFailure: "done", onBlocked: "done" },

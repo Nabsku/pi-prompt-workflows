@@ -150,6 +150,24 @@ test("adaptive preflight blocks only reachable target/model render pairs", async
 	assert.equal(result.promptCostBounds.initialFallthrough, 2);
 });
 
+test("adaptive preflight reports sanitized deduplicated warnings from reachable prepared routes", async () => {
+	const wrapper = prompt("flow", { adaptiveChain: { limits: { maxSteps: 2, maxModelCalls: 2 }, steps: [
+		{ id: "switch", kind: "prompt", target: "switch", when: "always" },
+		{ id: "later", kind: "prompt", target: "later", when: "always" },
+	] } });
+	const catalog = new Map([
+		["switch", prompt("switch", { models: ["test/b"], content: "switch" })],
+		["later", prompt("later", { models: ["test/a", "test/b"], content: "body <else extra=\"bad\">" })],
+	]);
+	const a = { provider: "test", id: "a" } as any, b = { provider: "test", id: "b" } as any;
+	const registry = { find: (provider: string, id: string) => [a, b].find((model) => model.provider === provider && model.id === id), getAll: () => [a, b], getAvailable: () => [a, b] } as any;
+	const result = await prepareAdaptivePreflight(wrapper, catalog, { cwd: "/repo", args: [], currentModel: a, modelRegistry: registry });
+	assert.equal(result.status, "ready", result.diagnostics.join("\n"));
+	assert.equal(result.warnings.length, 1);
+	assert.match(result.warnings[0]!, /<else>/i);
+	assert.match(formatAdaptivePreflight(result), /Preflight warnings/);
+});
+
 test("adaptive preflight includes selectable models beyond the first 64 registry entries", async () => {
 	const models = Array.from({ length: 70 }, (_, id) => ({ provider: "test", id: `m${id}` })) as any[];
 	const wrapper = prompt("flow", { adaptiveChain: { limits: { maxSteps: 1, maxModelCalls: 1 }, steps: [{ id: "late", kind: "prompt", target: "late", when: "always" }] } });

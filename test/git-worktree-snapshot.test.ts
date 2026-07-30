@@ -433,6 +433,19 @@ test("clean sparse submodule paths may be absent while materialized changes fail
 	assert.throws(() => captureGitWorktreeSnapshot(cwd), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "UNSUPPORTED_SUBMODULE");
 });
 
+test("submodule semantic index flags affect parent identity while stat refresh does not", () => {
+	for (const [setFlag, clearFlag] of [["--assume-unchanged", "--no-assume-unchanged"], ["--skip-worktree", "--no-skip-worktree"]]) {
+		const { cwd, submodule } = repoWithSubmodule();
+		const before = captureGitWorktreeSnapshot(cwd);
+		execFileSync("git", ["update-index", "--refresh"], { cwd: submodule });
+		assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, false);
+		execFileSync("git", ["update-index", setFlag, "tracked.txt"], { cwd: submodule });
+		assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, true, `${setFlag} was omitted from submodule identity`);
+		execFileSync("git", ["update-index", clearFlag, "tracked.txt"], { cwd: submodule });
+		assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, false);
+	}
+});
+
 test("non-git cwd and caps fail visibly with structured errors", () => {
 	const nonGit = mkdtempSync(join(tmpdir(), "not-git-"));
 	assert.throws(() => captureGitWorktreeSnapshot(nonGit), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "NOT_GIT_REPOSITORY");

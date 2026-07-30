@@ -255,9 +255,14 @@ function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: n
 		// Check HEAD versus the index without consulting worktree filters, then
 		// compare every indexed path to its raw, no-filter object id.
 		runGit(full, ["diff-index", "--cached", "--quiet", "HEAD", "--"], "GIT_ERROR", maxGit, deadline);
-		const records = splitNul(runGit(full, ["ls-files", "--stage", "-z"], "GIT_ERROR", maxGit, deadline), "INVALID_INDEX");
+		const stageOutput = runGit(full, ["ls-files", "--stage", "-z"], "GIT_ERROR", maxGit, deadline);
+		const flagOutput = runGit(full, ["ls-files", "-v", "-z"], "GIT_ERROR", maxGit, deadline);
+		const resolveUndoOutput = runGit(full, ["ls-files", "--resolve-undo", "-z"], "GIT_ERROR", maxGit, deadline);
+		const debugOutput = runGit(full, ["ls-files", "--debug", "-z"], "GIT_ERROR", maxGit, deadline);
+		const indexIdentity = semanticIndexIdentity(stageOutput, flagOutput, resolveUndoOutput, debugOutput);
+		const records = splitNul(stageOutput, "INVALID_INDEX");
 		verifiedFiles = records.length;
-		const skipped = parseSkipWorktreePaths(runGit(full, ["ls-files", "-v", "-z"], "GIT_ERROR", maxGit, deadline));
+		const skipped = parseSkipWorktreePaths(flagOutput);
 		if (records.length > remainingFiles) throw new GitWorktreeSnapshotError("FILE_LIMIT_EXCEEDED", "Working-tree snapshot file limit exceeded while verifying submodules");
 		for (const record of records) {
 			const tab = record.indexOf(9); if (tab < 0) throw new GitWorktreeSnapshotError("INVALID_INDEX", "Malformed submodule index record");
@@ -280,6 +285,14 @@ function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: n
 		}
 		if (runGit(full, ["ls-files", "--others", "--exclude-standard", "-z"], "GIT_ERROR", maxGit, deadline).length) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule has untracked content");
 		if (replacementRefsIdentity(full, maxGit, deadline) !== replacementRefs) throw new GitWorktreeSnapshotError("RACE_DETECTED", "Submodule replacement refs changed during snapshot capture");
+		const verifiedIndexIdentity = semanticIndexIdentity(
+			runGit(full, ["ls-files", "--stage", "-z"], "GIT_ERROR", maxGit, deadline),
+			runGit(full, ["ls-files", "-v", "-z"], "GIT_ERROR", maxGit, deadline),
+			runGit(full, ["ls-files", "--resolve-undo", "-z"], "GIT_ERROR", maxGit, deadline),
+			runGit(full, ["ls-files", "--debug", "-z"], "GIT_ERROR", maxGit, deadline),
+		);
+		if (verifiedIndexIdentity !== indexIdentity) throw new GitWorktreeSnapshotError("RACE_DETECTED", "Submodule index changed during snapshot capture");
+		return { materialized: true, consumed, files: verifiedFiles, replacementRefs: createHash("sha256").update(replacementRefs).update(Buffer.from([0])).update(indexIdentity).digest("hex") };
 	} catch (cause) {
 		if (cause instanceof GitWorktreeSnapshotError && (cause.code === "UNSUPPORTED_SUBMODULE" || cause.code === "BYTE_LIMIT_EXCEEDED" || cause.code === "FILE_LIMIT_EXCEEDED" || cause.code === "RACE_DETECTED")) throw cause;
 		throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule is dirty or unobservable", { cause });
