@@ -120,6 +120,23 @@ function absolutePath(root: Buffer, relative: Buffer): Buffer {
 	if (!relative.length || relative[0] === 0x2f || relative.toString("latin1").split("/").some((p) => !p || p === "." || p === "..")) throw new GitWorktreeSnapshotError("UNSAFE_PATH", "Git reported an unsafe path");
 	return Buffer.concat([root, Buffer.from("/"), relative]);
 }
+function assertNoSymlinkedAncestors(root: Buffer, relative: Buffer): void {
+	let current = root;
+	let start = 0;
+	for (let slash = relative.indexOf(0x2f); slash >= 0; slash = relative.indexOf(0x2f, start)) {
+		current = Buffer.concat([current, Buffer.from("/"), relative.subarray(start, slash)]);
+		start = slash + 1;
+		try {
+			const stat = lstatSync(current);
+			if (stat.isSymbolicLink()) throw new GitWorktreeSnapshotError("UNSAFE_PATH", "Refusing to traverse a symlinked working-tree ancestor");
+			if (!stat.isDirectory()) return;
+		} catch (cause: any) {
+			if (cause instanceof GitWorktreeSnapshotError) throw cause;
+			if (cause?.code === "ENOENT" || cause?.code === "ENOTDIR") return;
+			throw new GitWorktreeSnapshotError("IO_ERROR", "Unable to inspect working-tree path ancestor", { cause });
+		}
+	}
+}
 function hashFile(path: Buffer, pre: Stats, remaining: number): { fingerprint: string; size: number; consumed: number } {
 	let fd: number | undefined;
 	try {
@@ -136,19 +153,21 @@ function hashFile(path: Buffer, pre: Stats, remaining: number): { fingerprint: s
 	finally { if (fd !== undefined) closeSync(fd); }
 }
 function fingerprint(root: Buffer, path: Buffer, remaining: number): { snapshot: GitWorktreeFileSnapshot; consumed: number } {
-	const full = absolutePath(root, path); let stat;
-	try { stat = lstatSync(full); } catch (cause: any) { if (cause?.code === "ENOENT") return { snapshot: { path: path.toString("base64"), kind: "missing" }, consumed: 0 }; throw new GitWorktreeSnapshotError("IO_ERROR", "Unable to inspect working-tree path", { cause }); }
+	const full = absolutePath(root, path); assertNoSymlinkedAncestors(root, path); let stat;
+	try { stat = lstatSync(full); } catch (cause: any) { if (cause?.code === "ENOENT" || cause?.code === "ENOTDIR") return { snapshot: { path: path.toString("base64"), kind: "missing" }, consumed: 0 }; throw new GitWorktreeSnapshotError("IO_ERROR", "Unable to inspect working-tree path", { cause }); }
 	const mode = stat.mode & 0o7777;
 	if (stat.isSymbolicLink()) { try { const target = readlinkSync(full, { encoding: "buffer" }); const after = lstatSync(full); if (!after.isSymbolicLink() || after.dev !== stat.dev || after.ino !== stat.ino || after.mode !== stat.mode) throw new GitWorktreeSnapshotError("RACE_DETECTED", "Symlink changed while being fingerprinted"); if (target.length > remaining) throw new GitWorktreeSnapshotError("BYTE_LIMIT_EXCEEDED", "Working-tree snapshot byte limit exceeded"); return { snapshot: { path: path.toString("base64"), kind: "symlink", mode, size: target.length, fingerprint: createHash("sha256").update(target).digest("hex") }, consumed: target.length }; } catch (cause) { if (cause instanceof GitWorktreeSnapshotError) throw cause; throw new GitWorktreeSnapshotError("RACE_DETECTED", "Symlink changed while reading", { cause }); } }
 	if (stat.isFile()) { const h = hashFile(full, stat, remaining); return { snapshot: { path: path.toString("base64"), kind: "file", mode, size: h.size, fingerprint: h.fingerprint }, consumed: h.consumed }; }
+	if (stat.isDirectory()) return { snapshot: { path: path.toString("base64"), kind: "directory" }, consumed: 0 };
 	throw new GitWorktreeSnapshotError("UNSAFE_PATH", "Refusing to snapshot a special file or directory");
 }
-function semanticIndexIdentity(output: Buffer): string {
-	// ls-files --stage is a normalized, read-only view: mode, object id, conflict
-	// stage, and raw path. Unlike hashing the index file, it excludes stat-cache
-	// refreshes while retaining every staged semantic change.
-	splitNul(output, "INVALID_INDEX");
-	return createHash("sha256").update(output).digest("hex");
+function semanticIndexIdentity(stageOutput: Buffer, flagOutput: Buffer): string {
+	// Read-only ls-files views combine mode, object id, conflict stage, raw path,
+	// and semantic per-entry flags (assume-unchanged / skip-worktree). Unlike
+	// hashing the index file, they exclude stat-cache refreshes.
+	splitNul(stageOutput, "INVALID_INDEX");
+	for (const record of splitNul(flagOutput, "INVALID_INDEX")) if (record.length < 3 || record[1] !== 0x20) throw new GitWorktreeSnapshotError("INVALID_INDEX", "Malformed Git index flag record");
+	return createHash("sha256").update(stageOutput).update(Buffer.from([0])).update(flagOutput).digest("hex");
 }
 function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: number, deadline: CaptureDeadline): void {
 	const relative = path.toString("utf8");
@@ -206,7 +225,8 @@ export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorkt
 	const status = runGit(canonicalRoot, ["-c", "core.quotepath=false", "status", "--no-ahead-behind", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"], "GIT_ERROR", maxGit, deadline);
 	const statusPaths = parseStatusPaths(status);
 	const indexOutput = runGit(canonicalRoot, ["ls-files", "--stage", "-z"], "GIT_ERROR", maxGit, deadline);
-	const indexTree = semanticIndexIdentity(indexOutput);
+	const indexFlagsOutput = runGit(canonicalRoot, ["ls-files", "-v", "-z"], "GIT_ERROR", maxGit, deadline);
+	const indexTree = semanticIndexIdentity(indexOutput, indexFlagsOutput);
 	const trackedPaths = splitNul(indexOutput, "INVALID_INDEX").map((record) => { const tab = record.indexOf(9); if (tab < 0) throw new GitWorktreeSnapshotError("INVALID_INDEX", "Malformed Git index record"); return Buffer.from(record.subarray(tab + 1)); });
 	const uniquePaths = new Map<string, Buffer>(); for (const path of [...statusPaths, ...trackedPaths]) uniquePaths.set(path.toString("base64"), path);
 	const paths = [...uniquePaths].sort(([a], [b]) => a.localeCompare(b)).map(([, path]) => path);
@@ -229,7 +249,8 @@ export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorkt
 	}
 	const verifiedStatus = runGit(canonicalRoot, ["-c", "core.quotepath=false", "status", "--no-ahead-behind", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"], "GIT_ERROR", maxGit, deadline);
 	const verifiedIndexOutput = runGit(canonicalRoot, ["ls-files", "--stage", "-z"], "GIT_ERROR", maxGit, deadline);
-	const verifiedIndexTree = semanticIndexIdentity(verifiedIndexOutput);
+	const verifiedIndexFlagsOutput = runGit(canonicalRoot, ["ls-files", "-v", "-z"], "GIT_ERROR", maxGit, deadline);
+	const verifiedIndexTree = semanticIndexIdentity(verifiedIndexOutput, verifiedIndexFlagsOutput);
 	const verifiedIndex = fingerprintIndex(paths, verifiedIndexOutput, maxFiles * 3);
 	const verifiedFiles: GitWorktreeFileSnapshot[] = []; let verifiedConsumed = 0;
 	for (const path of paths) { const gitlink = gitlinks.get(path.toString("base64")); if (gitlink) { verifySubmodule(canonicalRoot, path, gitlink, maxGit, deadline); verifiedFiles.push({ path: path.toString("base64"), kind: "directory" }); continue; } const result = fingerprint(rootBytes, path, maxBytes - verifiedConsumed); verifiedConsumed += result.consumed; verifiedFiles.push(result.snapshot); }
@@ -279,7 +300,7 @@ function canonicalSnapshot(value: unknown): GitWorktreeSnapshot | undefined {
 		const x = dataRecord(rawIndex[i], ["entries", "fingerprint", "path"]); const entries0 = x && dataArray(x.entries); if (!x || x.path !== path || typeof x.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(x.fingerprint) || !entries0 || entries0.length > 3) return undefined;
 		const entries: string[] = []; let prior = ""; for (const entry of entries0) { const decoded = canonicalBase64(entry); if (!decoded || !/^[0-7]{6} [0-9a-f]{40,64} [0-3]$/.test(decoded.toString("ascii")) || (prior && (entry as string) <= prior)) return undefined; prior = entry as string; entries.push(entry as string); }
 		const isGitlink = entries.length === 1 && Buffer.from(entries[0]!, "base64").toString("ascii").startsWith("160000 ");
-		if ((f.kind === "directory") !== isGitlink) return undefined;
+		if (isGitlink && f.kind !== "directory") return undefined;
 		const hash = createHash("sha256").update(Buffer.from(path, "base64")).update(Buffer.from([0])); if (!entries.length) hash.update("absent"); else entries.forEach((e) => hash.update(Buffer.from(e, "base64")).update(Buffer.from([0]))); if (hash.digest("hex") !== x.fingerprint) return undefined;
 		index.push({ path, entries, fingerprint: x.fingerprint });
 	}
