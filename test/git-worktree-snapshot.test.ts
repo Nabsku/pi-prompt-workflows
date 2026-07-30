@@ -8,6 +8,7 @@ import {
 	GitWorktreeSnapshotError,
 	captureGitWorktreeSnapshot,
 	compareGitWorktreeSnapshots,
+	isPlatformAbsolutePath,
 } from "../git-worktree-snapshot.ts";
 
 function repo(): string {
@@ -134,6 +135,14 @@ test("pure comparison is deterministic and separately testable", () => {
 	assert.throws(() => compareGitWorktreeSnapshots(base, { ...base, repositoryIdentity: { ...base.repositoryIdentity, rootFileId: "0:0" } }), /different repositories/i);
 });
 
+test("platform absolute-path validation accepts Windows drive and UNC roots cross-platform", () => {
+	assert.equal(isPlatformAbsolutePath("C:\\repo\\worktree", "win32"), true);
+	assert.equal(isPlatformAbsolutePath("\\\\server\\share\\repo", "win32"), true);
+	assert.equal(isPlatformAbsolutePath("repo\\worktree", "win32"), false);
+	assert.equal(isPlatformAbsolutePath("/repo/worktree", "linux"), true);
+	assert.equal(isPlatformAbsolutePath("repo/worktree", "linux"), false);
+});
+
 test("literal pathspecs isolate magic, colon, option-like, and spaced dirty paths", () => {
 	const cwd = repo(); const names = [":(glob)*", ":foo", "-leading", "has spaces"];
 	for (const name of names) writeFileSync(join(cwd, name), "base\n");
@@ -160,6 +169,15 @@ test("snapshot validation rejects accessors, toJSON, unknown keys, and malformed
 test("capture revalidates repository identity after all work", () => {
 	const cwd = repo(), bin = mkdtempSync(join(tmpdir(), "git-wrapper-")), count = join(bin, "count"); mkdirSync(bin, { recursive: true });
 	writeFileSync(join(bin, "git"), `#!/bin/sh\ncase " $* " in *" rev-parse --show-toplevel "*)\n  /usr/bin/git "$@"; rc=$?\n  n=0; [ -f '${count}' ] && n=$(cat '${count}'); n=$((n+1)); printf %s "$n" > '${count}'\n  if [ "$n" = 2 ]; then mv .git .git-before-swap && cp -R .git-before-swap .git; fi\n  exit $rc\n  ;;\nesac\nexec /usr/bin/git "$@"\n`); chmodSync(join(bin, "git"), 0o755);
+	const result = snapshotProbe(cwd, bin);
+	assert.equal(result.code, "RACE_DETECTED");
+});
+
+test("capture rejects a relevant content mutation even when porcelain status is unchanged", () => {
+	const cwd = repo(), bin = mkdtempSync(join(tmpdir(), "git-wrapper-")), count = join(bin, "root-count");
+	writeFileSync(join(cwd, "tracked.txt"), "dirty before\n");
+	writeFileSync(join(bin, "git"), `#!/bin/sh\ncase " $* " in *" rev-parse --show-toplevel "*)\n  /usr/bin/git "$@"; rc=$?\n  n=0; [ -f '${count}' ] && n=$(cat '${count}'); n=$((n+1)); printf %s "$n" > '${count}'\n  [ "$n" = 2 ] && printf 'dirty after\\n' > tracked.txt\n  exit $rc\n  ;;\nesac\nexec /usr/bin/git "$@"\n`);
+	chmodSync(join(bin, "git"), 0o755);
 	const result = snapshotProbe(cwd, bin);
 	assert.equal(result.code, "RACE_DETECTED");
 });

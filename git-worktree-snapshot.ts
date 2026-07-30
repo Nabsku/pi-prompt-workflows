@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, readlinkSync, realpathSync, statSync, type Stats } from "node:fs";
+import { isAbsolute, win32 } from "node:path";
 
 export type GitWorktreeSnapshotErrorCode =
 	| "NOT_GIT_REPOSITORY" | "GIT_NOT_FOUND" | "INVALID_CWD" | "PERMISSION_DENIED"
@@ -36,6 +37,10 @@ const DEFAULT_MAX_FILES = 10_000, DEFAULT_MAX_BYTES = 64 * 1024 * 1024, DEFAULT_
 /** One monotonic wall-clock budget shared by every Git subprocess in a capture. */
 export const GIT_WORKTREE_SNAPSHOT_DEADLINE_MS = 10_000;
 const GIT_SAFE_GLOBAL_ARGS = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.external=", "-c", "core.pager=cat"] as const;
+
+export function isPlatformAbsolutePath(value: string, platform: NodeJS.Platform = process.platform): boolean {
+	return platform === "win32" ? win32.isAbsolute(value) : isAbsolute(value);
+}
 
 function positiveLimit(value: number | undefined, fallback: number, name: string): number {
 	const result = value ?? fallback;
@@ -145,7 +150,7 @@ function resolveRepositoryIdentity(cwd: string, maxGit: number, deadline: Captur
 		if (!rootLstat.isDirectory() || !rootStat.isDirectory() || rootLstat.dev !== rootStat.dev || rootLstat.ino !== rootStat.ino) throw new GitWorktreeSnapshotError("RACE_DETECTED", "Git working-tree root changed while resolving repository identity");
 		const gitDir = realpathSync(oneLine(runGit(canonicalRoot, ["rev-parse", "--absolute-git-dir"], "GIT_ERROR", maxGit, deadline), "git dir"));
 		const commonRaw = oneLine(runGit(canonicalRoot, ["rev-parse", "--git-common-dir"], "GIT_ERROR", maxGit, deadline), "git common dir");
-		const commonDir = realpathSync(commonRaw.startsWith("/") ? commonRaw : `${canonicalRoot}/${commonRaw}`);
+		const commonDir = realpathSync(isPlatformAbsolutePath(commonRaw) ? commonRaw : `${canonicalRoot}/${commonRaw}`);
 		const gitStat = statSync(gitDir), commonStat = statSync(commonDir);
 		return { canonicalRoot, repositoryIdentity: { rootFileId: `${rootStat.dev}:${rootStat.ino}`, gitDir, commonDir, gitDirFileId: `${gitStat.dev}:${gitStat.ino}`, commonDirFileId: `${commonStat.dev}:${commonStat.ino}` } };
 	} catch (cause) { if (cause instanceof GitWorktreeSnapshotError) throw cause; throw new GitWorktreeSnapshotError("IO_ERROR", "Unable to resolve Git repository identity", { cause }); }
@@ -185,6 +190,38 @@ export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorkt
 	for (const path of paths) { const result = fingerprint(rootBytes, path, maxBytes - consumed); consumed += result.consumed; files.push(result.snapshot); }
 	const finalIdentity = resolveRepositoryIdentity(canonicalRoot, maxGit, deadline);
 	if (finalIdentity.canonicalRoot !== canonicalRoot || finalIdentity.repositoryIdentity.rootFileId !== repositoryIdentity.rootFileId || finalIdentity.repositoryIdentity.gitDir !== repositoryIdentity.gitDir || finalIdentity.repositoryIdentity.commonDir !== repositoryIdentity.commonDir || finalIdentity.repositoryIdentity.gitDirFileId !== repositoryIdentity.gitDirFileId || finalIdentity.repositoryIdentity.commonDirFileId !== repositoryIdentity.commonDirFileId) throw new GitWorktreeSnapshotError("RACE_DETECTED", "Git repository identity changed during snapshot capture");
+	let verifiedSymbolic = "";
+	try { verifiedSymbolic = oneLine(runGit(canonicalRoot, ["symbolic-ref", "-q", "HEAD"], "GIT_ERROR", maxGit, deadline), "symbolic HEAD"); }
+	catch (error: any) { const exitStatus = error?.cause?.status; if (exitStatus !== 1) throw error; }
+	let verifiedHeadIdentity: string;
+	try {
+		const oid = oneLine(runGit(canonicalRoot, ["rev-parse", "--verify", "HEAD^{commit}"], "GIT_ERROR", maxGit, deadline), "HEAD");
+		verifiedHeadIdentity = verifiedSymbolic ? `symbolic:${verifiedSymbolic}:${oid}` : `detached:${oid}`;
+	} catch (error) {
+		if (!verifiedSymbolic) throw error;
+		verifiedHeadIdentity = `unborn:${verifiedSymbolic}`;
+	}
+	const verifiedIndexTree = oneLine(runGit(canonicalRoot, ["write-tree"], "INVALID_INDEX", maxGit, deadline), "index tree");
+	const verifiedStatus = runGit(canonicalRoot, ["-c", "core.quotepath=false", "status", "--no-ahead-behind", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"], "GIT_ERROR", maxGit, deadline);
+	const verifiedIndexParts: Buffer[] = []; let verifiedIndexBytes = 0;
+	for (const path of paths) {
+		const part = runGit(canonicalRoot, ["--literal-pathspecs", "ls-files", "--stage", "-z", "--", path.toString("utf8")], "GIT_ERROR", maxGit, deadline);
+		verifiedIndexBytes += part.length;
+		if (verifiedIndexBytes > maxGit) throw new GitWorktreeSnapshotError("LIMIT_EXCEEDED", "Git index verification output limit exceeded");
+		verifiedIndexParts.push(part);
+	}
+	const verifiedIndex = fingerprintIndex(paths, Buffer.concat(verifiedIndexParts, verifiedIndexBytes), maxFiles * 3);
+	const verifiedFiles: GitWorktreeFileSnapshot[] = []; let verifiedConsumed = 0;
+	for (const path of paths) { const result = fingerprint(rootBytes, path, maxBytes - verifiedConsumed); verifiedConsumed += result.consumed; verifiedFiles.push(result.snapshot); }
+	const equalFiles = files.length === verifiedFiles.length && files.every((entry, i) => {
+		const verified = verifiedFiles[i]!;
+		return entry.path === verified.path && entry.kind === verified.kind && entry.mode === verified.mode && entry.size === verified.size && entry.fingerprint === verified.fingerprint;
+	});
+	const equalIndex = index.length === verifiedIndex.length && index.every((entry, i) => {
+		const verified = verifiedIndex[i]!;
+		return entry.path === verified.path && entry.fingerprint === verified.fingerprint && entry.entries.length === verified.entries.length && entry.entries.every((value, j) => value === verified.entries[j]);
+	});
+	if (verifiedHeadIdentity !== headIdentity || verifiedIndexTree !== indexTree || !verifiedStatus.equals(status) || !equalFiles || !equalIndex) throw new GitWorktreeSnapshotError("RACE_DETECTED", "Git HEAD, index, status, or relevant content changed during snapshot capture");
 	return { version: 1, repositoryRoot: rootBytes.toString("base64"), repositoryIdentity, headIdentity, indexTree, status: status.toString("base64"), files, index };
 }
 function dataRecord(value: unknown, keys: readonly string[]): Record<string, unknown> | undefined {
@@ -207,9 +244,9 @@ function canonicalBase64(value: unknown, maxBytes = DEFAULT_MAX_GIT_OUTPUT_BYTES
 function safeRelativePath(value: unknown): string | undefined { const bytes = canonicalBase64(value, 1024 * 1024); if (!bytes) return undefined; try { absolutePath(Buffer.from("/root"), bytes); } catch { return undefined; } return value as string; }
 function canonicalSnapshot(value: unknown): GitWorktreeSnapshot | undefined {
 	const top = dataRecord(value, ["files", "headIdentity", "index", "indexTree", "repositoryIdentity", "repositoryRoot", "status", "version"]); if (!top || top.version !== 1) return undefined;
-	const root = canonicalBase64(top.repositoryRoot, 1024 * 1024), status = canonicalBase64(top.status); if (!root || !status || !root.length || root[0] !== 0x2f || root.includes(0) || !Buffer.from(root.toString("utf8")).equals(root)) return undefined;
+	const root = canonicalBase64(top.repositoryRoot, 1024 * 1024), status = canonicalBase64(top.status); if (!root || !status || !root.length || root.includes(0) || !Buffer.from(root.toString("utf8")).equals(root) || !isPlatformAbsolutePath(root.toString("utf8"))) return undefined;
 	const identity = dataRecord(top.repositoryIdentity, ["commonDir", "commonDirFileId", "gitDir", "gitDirFileId", "rootFileId"]); if (!identity) return undefined;
-	if (![identity.gitDir, identity.commonDir].every((x) => typeof x === "string" && x.length <= 1024 * 1024 && x.startsWith("/") && !x.includes("\0")) || ![identity.rootFileId, identity.gitDirFileId, identity.commonDirFileId].every((x) => typeof x === "string" && x.length <= 64 && /^\d+:\d+$/.test(x))) return undefined;
+	if (![identity.gitDir, identity.commonDir].every((x) => typeof x === "string" && x.length <= 1024 * 1024 && isPlatformAbsolutePath(x) && !x.includes("\0")) || ![identity.rootFileId, identity.gitDirFileId, identity.commonDirFileId].every((x) => typeof x === "string" && x.length <= 64 && /^\d+:\d+$/.test(x))) return undefined;
 	if (typeof top.headIdentity !== "string" || top.headIdentity.length > 1024 || !/^(?:(?:symbolic:[^:\0]+|detached):[0-9a-f]{40,64}|unborn:[^:\0]+)$/.test(top.headIdentity) || typeof top.indexTree !== "string" || !/^[0-9a-f]{40,64}$/.test(top.indexTree)) return undefined;
 	const rawFiles = dataArray(top.files), rawIndex = dataArray(top.index); if (!rawFiles || !rawIndex || rawFiles.length > DEFAULT_MAX_FILES || rawIndex.length !== rawFiles.length) return undefined;
 	const files: GitWorktreeFileSnapshot[] = [], index: GitIndexPathSnapshot[] = []; let previous = "", bytes = 0;

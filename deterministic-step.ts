@@ -10,6 +10,7 @@ export const PROMPT_TEMPLATE_DETERMINISTIC_COMPLETION_MESSAGE_TYPE = "prompt-tem
 const DEFAULT_MAX_CAPTURE_STDOUT_CHARS = 16_000;
 const DEFAULT_MAX_CAPTURE_STDERR_CHARS = 16_000;
 const PROCESS_GROUP_POLL_MS = 10;
+const PROCESS_GROUP_TERM_GRACE_MS = 100;
 const PROCESS_GROUP_CLEANUP_DEADLINE_MS = 8_000;
 const PROCESS_GROUP_PROBE_TIMEOUT_MS = 250;
 
@@ -329,14 +330,28 @@ export async function runDeterministicStep(
 	let timedOut = false;
 	let cancelled = false;
 	let terminationRequested = false;
+	let childClosed = false;
+	let escalationHandle: ReturnType<typeof setTimeout> | undefined;
+	let finishEscalation: (() => void) | undefined;
+	let escalationPromise: Promise<void> | undefined;
 	let cleanupScope: "process-group" | "direct-child" = process.platform === "win32" ? "direct-child" : "process-group";
 	const terminate = () => {
 		if (terminationRequested) return;
 		terminationRequested = true;
 		cleanupScope = signalProcessTree(child, "SIGTERM");
-		// Retain authority through the live spawned leader: all destructive group
-		// signaling happens synchronously here, never from a delayed post-close timer.
-		if (cleanupScope === "process-group") signalProcessTree(child, "SIGKILL");
+		if (cleanupScope === "process-group") {
+			escalationPromise = new Promise((resolveEscalation) => {
+				finishEscalation = resolveEscalation;
+				escalationHandle = setTimeout(() => {
+					escalationHandle = undefined;
+					// The spawned leader is the group-authority token. Never signal its
+					// numeric group after Node has observed exit/close: that PID may be reused.
+					if (!childClosed && child.exitCode === null && child.signalCode === null) signalProcessTree(child, "SIGKILL");
+					finishEscalation = undefined;
+					resolveEscalation();
+				}, PROCESS_GROUP_TERM_GRACE_MS);
+			});
+		}
 	};
 	const cancel = () => {
 		cancelled = true;
@@ -359,11 +374,20 @@ export async function runDeterministicStep(
 		}, step.timeoutMs)
 		: undefined;
 
+	const clearEscalation = () => {
+		childClosed = true;
+		if (escalationHandle) clearTimeout(escalationHandle);
+		escalationHandle = undefined;
+		finishEscalation?.();
+		finishEscalation = undefined;
+	};
+
 	return await new Promise((resolveResult) => {
 		let settled = false;
 		child.on("error", (error) => {
 			if (settled) return;
 			settled = true;
+			clearEscalation();
 			signal?.removeEventListener("abort", cancel);
 			if (timeoutHandle) clearTimeout(timeoutHandle);
 			resolveResult({
@@ -388,6 +412,8 @@ export async function runDeterministicStep(
 		child.on("close", async (exitCode, signalName) => {
 			if (settled) return;
 			settled = true;
+			clearEscalation();
+			if (escalationPromise) await escalationPromise;
 			signal?.removeEventListener("abort", cancel);
 			if (timeoutHandle) clearTimeout(timeoutHandle);
 			if (terminationRequested && cleanupScope === "process-group" && typeof child.pid === "number") {
@@ -414,7 +440,7 @@ export async function runDeterministicStep(
 				cwd: resolvedCwd,
 				nonInteractive: step.nonInteractive,
 				resolvedScriptPath,
-				exitCode,
+				exitCode: cancelled || timedOut ? null : exitCode,
 				signal: !cancelled && !timedOut ? signalName ?? undefined : undefined,
 				termination: cancelled ? "cancelled" : undefined,
 				stdout: stdout.text,
