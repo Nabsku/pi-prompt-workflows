@@ -133,6 +133,25 @@ test("adaptive preflight tracks the then-active model across prompt steps", asyn
 	assert.equal(result.promptCostBounds.initialFallthrough, 3, "switch cost 1 + B-rendered preserve cost 2");
 });
 
+test("adaptive preflight restores the chain-start model for model-less targets", async () => {
+	const wrapper = prompt("flow", { adaptiveChain: { limits: { maxSteps: 2, maxModelCalls: 2 }, steps: [
+		{ id: "switch", kind: "prompt", target: "switch", when: "always" },
+		{ id: "inherit-start", kind: "prompt", target: "inherit-start", when: "always" },
+	] } });
+	const catalog = new Map([
+		["switch", prompt("switch", { models: ["test/b"], content: "BBBB" })],
+		["inherit-start", prompt("inherit-start", { models: [], content: "<if-model is=\"test/a\">AAAA</if-model><if-model is=\"test/b\">BBBBBBBBBBBB</if-model>" })],
+	]);
+	const a = { provider: "test", id: "a" } as any, b = { provider: "test", id: "b" } as any;
+	const registry = { find: (provider: string, id: string) => [a, b].find((model) => model.provider === provider && model.id === id), getAll: () => [a, b], getAvailable: () => [a, b] } as any;
+	const result = await prepareAdaptivePreflight(wrapper, catalog, { cwd: "/repo", args: [], currentModel: a, modelRegistry: registry });
+	assert.equal(result.targets[1]!.effectiveModel, "test/a", "summary uses the saved chain-start model");
+	assert.equal(result.targets[1]!.promptCost!.estimatedTokens, 1, "summary renders the A conditional");
+	assert.equal(result.promptCostBounds.initialFallthrough, 2, "exact route uses switch cost 1 + model-less A cost 1");
+	assert.equal(result.promptCostBounds.minimumCompleting, 2);
+	assert.equal(result.promptCostBounds.maximumCompleting, 2);
+});
+
 test("adaptive prompt bounds include the separately injected resolved skill payload without changing body budget", async () => {
 	const root = mkdtempSync(join(tmpdir(), "adaptive-skill-")); const skillPath = join(root, "SKILL.md");
 	writeFileSync(skillPath, "x".repeat(400));

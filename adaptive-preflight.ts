@@ -218,7 +218,10 @@ export async function prepareAdaptivePreflight(wrapper: PromptWithModel, catalog
 		if (step.kind !== "prompt" || !target || base.targets[index]!.issues.length) return routes;
 		for (const [activeKey, activeModel] of activeModels) {
 			const effective = { ...target, ...(options.modelOverride ? { models: [options.modelOverride] } : {}) };
-			const prepared = await preparePromptExecution(effective, options.args, activeModel, options.modelRegistry);
+			// Runtime restores the saved chain-start model for model-less targets;
+			// only an explicit target (or runtime override) inherits then-active state.
+			const preparationModel = effective.models.length ? activeModel : options.currentModel;
+			const prepared = await preparePromptExecution(effective, options.args, preparationModel, options.modelRegistry);
 			if (!prepared || "message" in prepared) continue;
 			const selected = modelKey(prepared.selectedModel.model);
 			const bodyCost = estimatePromptTokens(prepared.content).estimatedTokens;
