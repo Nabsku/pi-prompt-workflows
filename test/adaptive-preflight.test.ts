@@ -122,5 +122,7 @@ test("adaptive renderers sanitize and cap untrusted fields and show outcomes", (
 	assert.ok(text.length < 700);
 	const report = formatAdaptiveRuntimeReport(bad, { state: { status: "completed", currentStep: null, stepsTaken: 1, modelCalls: 1, visited: ["a"], executed: ["a"], trace: [] }, decisions: [], actions: [{ stepId: bad, kind: "prompt", target: bad, outcome: "blocked", changed: false }] });
 	assert.match(report, /blocked; changed=false/);
+	const unobserved = formatAdaptiveRuntimeReport("safe", { state: { status: "completed", currentStep: null, stepsTaken: 1, modelCalls: 1, visited: ["a"], executed: ["a"], trace: [] }, decisions: [], actions: [{ stepId: "a", kind: "prompt", target: "a", outcome: "succeeded" }] });
+	assert.match(unobserved, /succeeded; changed=unobserved/);
 	assert.doesNotMatch(report, /\u001b/);
 });

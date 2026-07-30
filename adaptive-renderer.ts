@@ -13,7 +13,7 @@ export function formatAdaptiveRuntimeReport(name: string, report: AdaptiveRuntim
 	const lines = [`Adaptive chain ${safe(name)} ${status}: ${report.actions.length} action(s), ${report.state.modelCalls} model call(s).`, "Decisions:"];
 	lines.push(...(report.decisions.length ? report.decisions.map((decision) => `- ${formatAdaptiveDecision(decision)}`) : ["- none"]));
 	lines.push("Actions:");
-	lines.push(...(report.actions.length ? report.actions.map((action) => `- ${safe(action.stepId)} [${action.kind}] ${safe(action.target)}: ${action.outcome}; changed=${action.changed}${action.errorReason ? `; reason=${safe(action.errorReason, 500)}` : ""}`) : ["- none"]));
+	lines.push(...(report.actions.length ? report.actions.map((action) => `- ${safe(action.stepId)} [${action.kind}] ${safe(action.target)}: ${action.outcome}; changed=${action.changed === undefined ? "unobserved" : action.changed}${action.errorReason ? `; reason=${safe(action.errorReason, 500)}` : ""}`) : ["- none"]));
 	return capSanitizedText(lines.join("\n"), 16_000, { preserveLineBreaks: true });
 }
 

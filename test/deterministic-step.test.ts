@@ -208,3 +208,30 @@ test("timeout directly kills a live TERM-resistant absolute Node command without
 		assert.ok(result.durationMs < 5_000, "direct leader escalation must remain bounded without ps");
 	});
 });
+
+test("timeout kills a live detached leader and same-PGID descendant when ps is unavailable", { skip: process.platform === "win32", timeout: 15_000, concurrency: false }, async () => {
+	await withTempDir(async (root) => {
+		const pidFile = join(root, "pids.json");
+		const leader = `const {spawn}=require('node:child_process'); const fs=require('node:fs'); const child=spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)\"],{stdio:['ignore','ignore','ignore']}); fs.writeFileSync(${JSON.stringify(pidFile)},JSON.stringify({leader:process.pid,descendant:child.pid})); process.on('SIGTERM',()=>{}); setInterval(()=>{},1000);`;
+		const originalPath = process.env.PATH;
+		process.env.PATH = root;
+		try {
+			const started = performance.now();
+			const result = await runDeterministicStep(
+				{ filePath: join(root, "prompt.md") } as never,
+				{ execution: { kind: "command", command: process.execPath, args: ["-e", leader], shell: false }, handoff: "never", nonInteractive: true, timeoutMs: 100 },
+				root,
+			);
+			assert.equal(result.timedOut, true);
+			assert.equal(result.processGroupExtinct, true);
+			assert.equal(result.cleanupError, undefined);
+			assert.ok(performance.now() - started < 2_000, "group escalation must not reach the 8s cleanup deadline");
+			const pids = JSON.parse((await import("node:fs")).readFileSync(pidFile, "utf8")) as { leader: number; descendant: number };
+			await assertProcessExtinct(pids.leader);
+			await assertProcessExtinct(pids.descendant);
+		} finally {
+			if (originalPath === undefined) delete process.env.PATH;
+			else process.env.PATH = originalPath;
+		}
+	});
+});

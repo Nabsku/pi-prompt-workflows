@@ -196,3 +196,24 @@ test("resolves one action cwd once and snapshots before/after at that exact cwd"
 	assert.equal(resolves, 1);
 	assert.deepEqual(seen, ["/target", "/target"]);
 });
+
+test("reports uncaptured terminal actions as unobserved while changed-gate predecessors remain observed", async () => {
+	for (const predecessorChanged of [false, true]) {
+		let value = 0;
+		const report = await executeAdaptiveChain({ steps: [run("check"), prompt("editor", { when: "changed" })], limits: { maxSteps: 2, maxModelCalls: 1 } }, {
+			resolvePrompt: (target) => target, resolveRun: (target) => target,
+			resolveSnapshotCwd: () => "/repo",
+			shouldCaptureSnapshot: (step) => step.id === "check",
+			executePrompt: async () => { value += 1; return { status: "succeeded", result: undefined }; },
+			executeRun: async () => { if (predecessorChanged) value += 1; return { status: "succeeded", result: undefined }; },
+			captureSnapshot: () => snapshot(value),
+			compareSnapshots: (before, after) => ({ changed: (before as any).value !== (after as any).value }),
+		});
+		assert.equal(report.actions[0]?.changed, predecessorChanged);
+		if (predecessorChanged) {
+			assert.equal(report.actions.length, 2);
+			assert.equal(report.actions[1]?.changed, undefined);
+			assert.equal(Object.hasOwn(report.actions[1]!, "changed"), false);
+		} else assert.equal(report.actions.length, 1);
+	}
+});

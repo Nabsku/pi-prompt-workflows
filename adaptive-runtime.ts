@@ -26,7 +26,8 @@ export interface AdaptiveRuntimeTraceEntry {
 	readonly kind: "prompt" | "run";
 	readonly target: string;
 	readonly outcome: ChainOutcome;
-	readonly changed: boolean;
+	/** Present only when before/after snapshots observed the action's change state. */
+	readonly changed?: boolean;
 	readonly errorReason?: string;
 }
 
@@ -106,11 +107,13 @@ export async function executeAdaptiveChain<TPrompt, TRun>(
 			outcome = { status: "failed", error };
 		}
 		const after = shouldSnapshot ? await dependencies.captureSnapshot(step, snapshotCwd) : undefined;
-		const changed = before && after ? dependencies.compareSnapshots(before, after).changed : false;
+		const changed = before && after ? dependencies.compareSnapshots(before, after).changed : undefined;
 		const status = dependencies.signal?.aborted ? "failed" : outcomeStatus(outcome);
-		observation = { outcome: status, changed };
+		// Routing consumes a boolean for replay-safe chain state. Preflight ensures
+		// snapshots are retained for every action whose change state can affect a gate.
+		observation = { outcome: status, changed: changed ?? false };
 		const errorReason = "error" in outcome ? String(outcome.error instanceof Error ? outcome.error.message : outcome.error) : undefined;
-		actions.push({ stepId: step.id, kind: step.kind, target: step.target, outcome: status, changed, ...(errorReason ? { errorReason } : {}) });
+		actions.push({ stepId: step.id, kind: step.kind, target: step.target, outcome: status, ...(changed === undefined ? {} : { changed }), ...(errorReason ? { errorReason } : {}) });
 		throwIfCancelled();
 	}
 }
