@@ -43,11 +43,13 @@ function positiveLimit(value: number | undefined, fallback: number, name: string
 	return result;
 }
 function classifyExecError(cause: any, fallback: GitWorktreeSnapshotErrorCode): GitWorktreeSnapshotErrorCode {
+	// maxBuffer overflow also terminates the child with SIGTERM; preserve the
+	// more specific output-limit classification before considering its signal.
+	if (cause?.code === "ENOBUFS" || /maxBuffer/i.test(String(cause?.message))) return "LIMIT_EXCEEDED";
 	if (cause?.code === "ETIMEDOUT" || cause?.signal === "SIGTERM" && cause?.status === null) return "GIT_TIMEOUT";
 	if (cause?.code === "ENOENT") return "GIT_NOT_FOUND";
 	if (cause?.code === "ENOTDIR") return "INVALID_CWD";
 	if (cause?.code === "EACCES" || cause?.code === "EPERM") return "PERMISSION_DENIED";
-	if (cause?.code === "ENOBUFS" || /maxBuffer/i.test(String(cause?.message))) return "LIMIT_EXCEEDED";
 	return fallback;
 }
 interface CaptureDeadline { readonly expiresAt: number; }
