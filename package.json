@@ -41,6 +41,7 @@
     "adaptive-preflight.ts",
     "adaptive-renderer.ts",
     "git-worktree-snapshot.ts",
+    "git-environment.ts",
     "compare-defaults.ts",
     "loop-utils.ts",
     "model-selection.ts",
