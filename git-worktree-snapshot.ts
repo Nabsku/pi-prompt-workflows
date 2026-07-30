@@ -98,6 +98,17 @@ function readCoreFileMode(cwd: string, maxGit: number, deadline: CaptureDeadline
 		throw error;
 	}
 }
+function readCoreSymlinks(cwd: string, maxGit: number, deadline: CaptureDeadline): boolean {
+	try {
+		const value = oneLine(runGit(cwd, ["config", "--bool", "core.symlinks"], "GIT_ERROR", maxGit, deadline), "core.symlinks");
+		if (value === "true") return true;
+		if (value === "false") return false;
+		throw new GitWorktreeSnapshotError("GIT_ERROR", "Invalid core.symlinks value");
+	} catch (error: any) {
+		if (error instanceof GitWorktreeSnapshotError && (error as any).cause?.status === 1) return true;
+		throw error;
+	}
+}
 function splitNul(output: Buffer, code: "INVALID_STATUS" | "INVALID_INDEX" = "INVALID_STATUS"): Buffer[] {
 	if (!output.length) return [];
 	if (output.at(-1) !== 0) throw new GitWorktreeSnapshotError(code, "Git output was not NUL terminated");
@@ -175,13 +186,14 @@ function fingerprint(root: Buffer, path: Buffer, remaining: number, fileMode = t
 	if (stat.isDirectory()) return { snapshot: { path: path.toString("base64"), kind: "directory" }, consumed: 0 };
 	throw new GitWorktreeSnapshotError("UNSAFE_PATH", "Refusing to snapshot a special file or directory");
 }
-function semanticIndexIdentity(stageOutput: Buffer, flagOutput: Buffer): string {
+function semanticIndexIdentity(stageOutput: Buffer, flagOutput: Buffer, resolveUndoOutput: Buffer): string {
 	// Read-only ls-files views combine mode, object id, conflict stage, raw path,
-	// and semantic per-entry flags (assume-unchanged / skip-worktree). Unlike
+	// semantic per-entry flags, and resolve-undo conflict metadata. Unlike
 	// hashing the index file, they exclude stat-cache refreshes.
 	splitNul(stageOutput, "INVALID_INDEX");
 	for (const record of splitNul(flagOutput, "INVALID_INDEX")) if (record.length < 3 || record[1] !== 0x20) throw new GitWorktreeSnapshotError("INVALID_INDEX", "Malformed Git index flag record");
-	return createHash("sha256").update(stageOutput).update(Buffer.from([0])).update(flagOutput).digest("hex");
+	splitNul(resolveUndoOutput, "INVALID_INDEX");
+	return createHash("sha256").update(stageOutput).update(Buffer.from([0])).update(flagOutput).update(Buffer.from([0])).update(resolveUndoOutput).digest("hex");
 }
 function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: number, deadline: CaptureDeadline): void {
 	const relative = path.toString("utf8");
@@ -200,6 +212,7 @@ function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: n
 	if (head !== match[1]) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule HEAD does not match its staged gitlink");
 	try {
 		const fileMode = readCoreFileMode(full, maxGit, deadline);
+		const symlinks = readCoreSymlinks(full, maxGit, deadline);
 		// Check HEAD versus the index without consulting worktree filters, then
 		// compare every indexed path to its raw, no-filter object id.
 		runGit(full, ["diff-index", "--cached", "--quiet", "HEAD", "--"], "GIT_ERROR", maxGit, deadline);
@@ -215,8 +228,9 @@ function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: n
 			const relativeSubPath = subPath.toString("utf8");
 			if (!Buffer.from(relativeSubPath).equals(subPath)) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule path is not safely observable");
 			const first = fingerprint(Buffer.from(full), subPath, DEFAULT_MAX_BYTES - consumed, fileMode); consumed += first.consumed;
-			const expectedKind = entry[1] === "120000" ? "symlink" : "file";
-			if (first.snapshot.kind !== expectedKind || expectedKind === "file" && first.snapshot.mode !== Number.parseInt(entry[1].slice(3), 8)) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule path type or mode differs from its index");
+			const expectedKind = entry[1] === "120000" && symlinks ? "symlink" : "file";
+			const expectedMode = entry[1] === "120000" ? undefined : fileMode ? Number.parseInt(entry[1].slice(3), 8) : 0o644;
+			if (first.snapshot.kind !== expectedKind || expectedMode !== undefined && first.snapshot.mode !== expectedMode) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule path type or mode differs from its index");
 			const oid = expectedKind === "symlink"
 				? oneLine(runGit(full, ["hash-object", "--stdin"], "GIT_ERROR", maxGit, deadline, first.symlinkTarget), "submodule object id")
 				: oneLine(runGit(full, ["hash-object", "--no-filters", "--", relativeSubPath], "GIT_ERROR", maxGit, deadline), "submodule object id");
@@ -258,6 +272,12 @@ export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorkt
 		headIdentity = symbolic ? `symbolic:${symbolic}:${oid}` : `detached:${oid}`;
 	} catch (error) {
 		if (!symbolic) throw error;
+		try {
+			runGit(canonicalRoot, ["show-ref", "--verify", "--quiet", symbolic], "GIT_ERROR", maxGit, deadline);
+			throw error;
+		} catch (targetError: any) {
+			if (!(targetError instanceof GitWorktreeSnapshotError) || (targetError as any).cause?.status !== 1) throw targetError;
+		}
 		headIdentity = `unborn:${symbolic}`;
 	}
 	// Avoid `git status`: it can run configured clean/process filters. Tracked
@@ -266,7 +286,8 @@ export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorkt
 	const statusPaths = parseUntrackedPaths(status);
 	const indexOutput = runGit(canonicalRoot, ["ls-files", "--stage", "-z"], "GIT_ERROR", maxGit, deadline);
 	const indexFlagsOutput = runGit(canonicalRoot, ["ls-files", "-v", "-z"], "GIT_ERROR", maxGit, deadline);
-	const indexTree = semanticIndexIdentity(indexOutput, indexFlagsOutput);
+	const resolveUndoOutput = runGit(canonicalRoot, ["ls-files", "--resolve-undo", "-z"], "GIT_ERROR", maxGit, deadline);
+	const indexTree = semanticIndexIdentity(indexOutput, indexFlagsOutput, resolveUndoOutput);
 	const trackedPaths = splitNul(indexOutput, "INVALID_INDEX").map((record) => { const tab = record.indexOf(9); if (tab < 0) throw new GitWorktreeSnapshotError("INVALID_INDEX", "Malformed Git index record"); return Buffer.from(record.subarray(tab + 1)); });
 	const uniquePaths = new Map<string, Buffer>(); for (const path of [...statusPaths, ...trackedPaths]) uniquePaths.set(path.toString("base64"), path);
 	const paths = [...uniquePaths].sort(([a], [b]) => a.localeCompare(b)).map(([, path]) => path);
@@ -286,12 +307,19 @@ export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorkt
 		verifiedHeadIdentity = verifiedSymbolic ? `symbolic:${verifiedSymbolic}:${oid}` : `detached:${oid}`;
 	} catch (error) {
 		if (!verifiedSymbolic) throw error;
+		try {
+			runGit(canonicalRoot, ["show-ref", "--verify", "--quiet", verifiedSymbolic], "GIT_ERROR", maxGit, deadline);
+			throw error;
+		} catch (targetError: any) {
+			if (!(targetError instanceof GitWorktreeSnapshotError) || (targetError as any).cause?.status !== 1) throw targetError;
+		}
 		verifiedHeadIdentity = `unborn:${verifiedSymbolic}`;
 	}
 	const verifiedStatus = runGit(canonicalRoot, ["ls-files", "--others", "--exclude-standard", "-z"], "GIT_ERROR", maxGit, deadline);
 	const verifiedIndexOutput = runGit(canonicalRoot, ["ls-files", "--stage", "-z"], "GIT_ERROR", maxGit, deadline);
 	const verifiedIndexFlagsOutput = runGit(canonicalRoot, ["ls-files", "-v", "-z"], "GIT_ERROR", maxGit, deadline);
-	const verifiedIndexTree = semanticIndexIdentity(verifiedIndexOutput, verifiedIndexFlagsOutput);
+	const verifiedResolveUndoOutput = runGit(canonicalRoot, ["ls-files", "--resolve-undo", "-z"], "GIT_ERROR", maxGit, deadline);
+	const verifiedIndexTree = semanticIndexIdentity(verifiedIndexOutput, verifiedIndexFlagsOutput, verifiedResolveUndoOutput);
 	const verifiedIndex = fingerprintIndex(paths, verifiedIndexOutput, maxFiles * 3);
 	const verifiedFiles: GitWorktreeFileSnapshot[] = []; let verifiedConsumed = 0;
 	for (const path of paths) { const gitlink = gitlinks.get(path.toString("base64")); if (gitlink) { verifySubmodule(canonicalRoot, path, gitlink, maxGit, deadline); verifiedFiles.push({ path: path.toString("base64"), kind: "directory" }); continue; } const result = fingerprint(rootBytes, path, maxBytes - verifiedConsumed, fileMode); verifiedConsumed += result.consumed; verifiedFiles.push(result.snapshot); }

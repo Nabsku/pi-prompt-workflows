@@ -256,18 +256,18 @@ function spawnProcess(command: string, args: string[], options: { cwd: string; s
 	});
 }
 
-function signalProcessTree(child: ReturnType<typeof spawnProcess>, signal: NodeJS.Signals): "process-group" | "direct-child" {
+function signalProcessTree(child: ReturnType<typeof spawnProcess>, signal: NodeJS.Signals): { scope: "process-group" | "direct-child"; groupSignalDelivered: boolean } {
 	const pid = child.pid;
 	if (process.platform !== "win32" && typeof pid === "number" && Number.isSafeInteger(pid) && pid > 1) {
 		try {
 			process.kill(-pid, signal);
-			return "process-group";
+			return { scope: "process-group", groupSignalDelivered: true };
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "ESRCH") return "process-group";
+			if ((error as NodeJS.ErrnoException).code === "ESRCH") return { scope: "process-group", groupSignalDelivered: false };
 		}
 	}
 	try { child.kill(signal); } catch { /* The child already exited. */ }
-	return "direct-child";
+	return { scope: "direct-child", groupSignalDelivered: false };
 }
 
 function processGroupExists(pid: number): { exists: boolean; attributable: boolean; probeError?: string } {
@@ -343,12 +343,15 @@ export async function runDeterministicStep(
 	let finishEscalation: (() => void) | undefined;
 	let escalationPromise: Promise<void> | undefined;
 	let authoritativeSigkillDelivered = false;
+	let authoritativeGroupTermDelivered = false;
 	let escalationError: unknown;
 	let cleanupScope: "process-group" | "direct-child" = process.platform === "win32" ? "direct-child" : "process-group";
 	const terminate = () => {
 		if (terminationRequested) return;
 		terminationRequested = true;
-		cleanupScope = signalProcessTree(child, "SIGTERM");
+		const signalled = signalProcessTree(child, "SIGTERM");
+		cleanupScope = signalled.scope;
+		authoritativeGroupTermDelivered = signalled.groupSignalDelivered;
 		if (cleanupScope === "process-group") {
 			escalationPromise = new Promise((resolveEscalation) => {
 				finishEscalation = resolveEscalation;
@@ -357,12 +360,13 @@ export async function runDeterministicStep(
 					// While the original detached leader is still live, its PID is also the
 					// owned PGID, so the whole group can be escalated without external
 					// inspection and successful delivery remains authoritative after close.
-					if (child.exitCode === null && child.signalCode === null) {
+					if (child.exitCode === null && child.signalCode === null || authoritativeGroupTermDelivered) {
 						try {
 							process.kill(-child.pid!, "SIGKILL");
 							authoritativeSigkillDelivered = true;
 						} catch (error) {
-							if ((error as NodeJS.ErrnoException).code !== "ESRCH") escalationError = error;
+							if ((error as NodeJS.ErrnoException).code === "ESRCH") authoritativeSigkillDelivered = true;
+							else escalationError = error;
 						}
 					} else if (typeof child.pid === "number") {
 						try { killAttributedProcessGroup(child.pid); } catch (error) { escalationError = error; }
