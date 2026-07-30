@@ -8,6 +8,25 @@ import promptModelExtension from "../index.ts";
 
 const MODEL = { provider: "test", id: "model" };
 
+test("adaptive command fails closed before execution when changed-gate analysis exceeds 4096 states", async () => {
+	const root = mkdtempSync(join(tmpdir(), "adaptive-cap-")); const oldHome = process.env.HOME; process.env.HOME = join(root, "home");
+	try {
+		const cwd = join(root, "repo"); const dir = join(cwd, ".pi", "prompts"); mkdirSync(dir, { recursive: true }); mkdirSync(process.env.HOME, { recursive: true }); execFileSync("git", ["init", "-q"], { cwd });
+		writeFileSync(join(dir, "step.md"), "---\nmodel: test/model\n---\nMUST NOT EXECUTE");
+		const chain: string[] = [];
+		for (let i = 0; i < 11; i++) {
+			chain.push(`  - id: a${i}`, "    prompt: step", `    onSuccess: a${i + 1}`, `    onFailure: b${i}`, `  - id: b${i}`, "    prompt: step", `    onSuccess: a${i + 1}`, `    onFailure: a${i + 1}`);
+		}
+		chain.push("  - id: a11", "    prompt: step", "    when: changed");
+		writeFileSync(join(dir, "flow.md"), ["---", "chain:", ...chain, "limits:", "  maxSteps: 23", "  maxModelCalls: 23", "---", "ignored"].join("\n"));
+		const commands = new Map<string, any>(); const messages: string[] = []; const notifications: string[] = [];
+		const pi: any = { registerCommand(name: string, command: any) { commands.set(name, command); }, registerMessageRenderer() {}, registerTool() {}, getCommands() { return []; }, on(event: string, handler: any) { if (event === "session_start") this.start = handler; }, async setModel() { return true; }, getThinkingLevel() { return "medium"; }, setThinkingLevel() {}, sendUserMessage(value: string) { messages.push(value); }, sendMessage() {} };
+		const ctx: any = { cwd, model: MODEL, signal: new AbortController().signal, hasUI: false, modelRegistry: { find: () => MODEL, getAll: () => [MODEL], getAvailable: () => [MODEL] }, ui: { notify(value: string) { notifications.push(value); }, setStatus() {}, setWorkingMessage() {}, onTerminalInput() { return () => {}; }, theme: { fg(_x: string, value: string) { return value; } } }, isIdle: () => false, waitForIdle: async () => { throw new Error("must not wait"); }, sessionManager: { getLeafId: () => "root", getBranch: () => [] }, navigateTree: async () => ({ cancelled: false }) };
+		promptModelExtension(pi); await pi.start({}, ctx); await commands.get("flow").handler("", ctx);
+		assert.deepEqual(messages, []);
+	} finally { process.env.HOME = oldHome; rmSync(root, { recursive: true, force: true }); }
+});
+
 test("structured wrapper registers through adaptive path and executes an ordinary prompt target", async () => {
 	const root = mkdtempSync(join(tmpdir(), "adaptive-command-"));
 	const oldHome = process.env.HOME;
