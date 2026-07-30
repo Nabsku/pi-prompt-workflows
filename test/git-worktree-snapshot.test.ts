@@ -297,6 +297,29 @@ test("tracked submodule symlinks hash link text without dereferencing their targ
 	assert.throws(() => captureGitWorktreeSnapshot(cwd), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "UNSUPPORTED_SUBMODULE");
 });
 
+test("submodule core.filemode=false accepts a non-executable 100755 worktree file", () => {
+	const { cwd, submodule } = repoWithSubmodule();
+	const path = join(submodule, "executable.sh");
+	writeFileSync(path, "#!/bin/sh\necho ok\n"); chmodSync(path, 0o755);
+	execFileSync("git", ["add", "executable.sh"], { cwd: submodule });
+	execFileSync("git", ["commit", "-qm", "executable"], { cwd: submodule });
+	execFileSync("git", ["add", "submodule"], { cwd }); execFileSync("git", ["commit", "-qm", "update"], { cwd });
+	execFileSync("git", ["config", "core.filemode", "false"], { cwd: submodule }); chmodSync(path, 0o644);
+	assert.doesNotThrow(() => captureGitWorktreeSnapshot(cwd));
+});
+
+test("submodule core.symlinks=false accepts link text materialized as a regular file", () => {
+	const { cwd, submodule } = repoWithSubmodule();
+	const path = join(submodule, "portable-link");
+	symlinkSync("tracked.txt", path); execFileSync("git", ["add", "portable-link"], { cwd: submodule });
+	execFileSync("git", ["commit", "-qm", "link"], { cwd: submodule });
+	execFileSync("git", ["add", "submodule"], { cwd }); execFileSync("git", ["commit", "-qm", "update"], { cwd });
+	rmSync(path); writeFileSync(path, "tracked.txt"); execFileSync("git", ["config", "core.symlinks", "false"], { cwd: submodule });
+	assert.doesNotThrow(() => captureGitWorktreeSnapshot(cwd));
+	writeFileSync(path, "other-target");
+	assert.throws(() => captureGitWorktreeSnapshot(cwd), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "UNSUPPORTED_SUBMODULE");
+});
+
 test("dirty and uninitialized submodules fail closed", () => {
 	const dirty = repoWithSubmodule();
 	writeFileSync(join(dirty.submodule, "tracked.txt"), "dirty\n");
@@ -463,5 +486,28 @@ test("index stat-cache refresh is unchanged while semantic staged changes remain
 	assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, false);
 	writeFileSync(join(cwd, "tracked.txt"), "staged semantic change\n");
 	execFileSync("git", ["add", "tracked.txt"], { cwd });
+	assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, true);
+});
+
+test("HEAD verification accepts true unborn refs but rejects existing refs with missing objects", () => {
+	const unborn = mkdtempSync(join(tmpdir(), "git-snapshot-unborn-")); execFileSync("git", ["init", "-q"], { cwd: unborn });
+	assert.match(captureGitWorktreeSnapshot(unborn).headIdentity, /^unborn:/);
+	const broken = repo();
+	writeFileSync(join(broken, ".git", "refs", "heads", "broken"), `${"1".repeat(40)}\n`);
+	execFileSync("git", ["symbolic-ref", "HEAD", "refs/heads/broken"], { cwd: broken });
+	assert.throws(() => captureGitWorktreeSnapshot(broken), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "GIT_ERROR");
+});
+
+test("clearing resolve-undo metadata changes semantic index identity", () => {
+	const cwd = repo();
+	const baseBranch = execFileSync("git", ["symbolic-ref", "--short", "HEAD"], { cwd }).toString().replace(/\s+$/, "");
+	execFileSync("git", ["checkout", "-qb", "side"], { cwd }); writeFileSync(join(cwd, "tracked.txt"), "side\n"); execFileSync("git", ["commit", "-qam", "side"], { cwd });
+	execFileSync("git", ["checkout", "-q", baseBranch], { cwd }); writeFileSync(join(cwd, "tracked.txt"), "main\n"); execFileSync("git", ["commit", "-qam", "main"], { cwd });
+	try { execFileSync("git", ["merge", "side"], { cwd, stdio: "ignore" }); } catch { /* expected conflict */ }
+	writeFileSync(join(cwd, "tracked.txt"), "resolved\n"); execFileSync("git", ["add", "tracked.txt"], { cwd });
+	const before = captureGitWorktreeSnapshot(cwd);
+	execFileSync("git", ["update-index", "--refresh"], { cwd });
+	assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, false);
+	execFileSync("git", ["update-index", "--clear-resolve-undo"], { cwd });
 	assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, true);
 });

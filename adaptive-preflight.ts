@@ -1,7 +1,7 @@
 import type { ChainGate, ChainOutcome, StructuredChainStep } from "./chain-parser.js";
 import type { PromptWithModel } from "./prompt-loader.js";
 import { getRequestedSkills } from "./prompt-skills.js";
-import { resolvePromptSkills, type RuntimeSkillCommand } from "./prompt-skills.js";
+import { buildSkillLoadedMessage, resolvePromptSkills, type LoadedPromptSkill, type RuntimeSkillCommand } from "./prompt-skills.js";
 import { checkPromptExecutionBudget, preparePromptExecution } from "./prompt-execution.js";
 import type { Model } from "@earendil-works/pi-ai";
 import type { RegistryLike } from "./model-selection.js";
@@ -25,6 +25,7 @@ export interface AdaptivePreflightTarget {
 	readonly effectiveModel?: string;
 	readonly budgetVerdict?: string;
 	readonly promptCost?: { readonly bytes: number; readonly estimatedTokens: number; readonly method: typeof PROMPT_TOKEN_ESTIMATE_METHOD };
+	readonly skillPromptCost?: { readonly bytes: number; readonly estimatedTokens: number; readonly method: typeof PROMPT_TOKEN_ESTIMATE_METHOD };
 }
 export interface AdaptiveCallBounds { readonly minimum: number; readonly maximum: number; readonly exact: boolean; readonly explanation: string }
 export interface AdaptivePromptCostBounds { readonly minimumCompleting: number; readonly maximumCompleting: number; readonly maximumReachable: number; readonly initialFallthrough: number; readonly initialPathStatus: "completed" | "exhausted"; readonly exact: boolean; readonly method: typeof PROMPT_TOKEN_ESTIMATE_METHOD; readonly explanation: string }
@@ -48,10 +49,12 @@ export function createInvalidAdaptivePreflight(name: string, diagnostics: readon
 	return { status: "blocked", name, limits: { maxSteps: 0, maxModelCalls: 0 }, steps: [], targets: [], callBounds: { minimum: 0, maximum: 0, exact: true, explanation: "Graph unavailable/invalid; no executable paths were analyzed." }, promptCostBounds: { minimumCompleting: 0, maximumCompleting: 0, maximumReachable: 0, initialFallthrough: 0, initialPathStatus: "exhausted", exact: true, method: PROMPT_TOKEN_ESTIMATE_METHOD, explanation: "Graph unavailable/invalid; prompt costs were not evaluated." }, diagnostics: diagnostics.map((item) => capSanitizedText(item, 500)), pathAnalysis: { hasCompletingPath: false, hasExhaustedPath: false, exhaustedReasons: [], exhaustedPathCount: 0 }, analysis: { complete: false, analyzedStates: 0, enqueuedStates: 0, stateLimit: MAX_ADAPTIVE_PREFLIGHT_STATES }, graphAvailable: false };
 }
 
-function analyzeInitialPath(steps: readonly StructuredChainStep[], limits: { maxSteps: number; maxModelCalls: number }, promptCosts: readonly number[]): { cost: number; status: "completed" | "exhausted" } {
+type ModelRoute = ReadonlyMap<string, { readonly cost: number; readonly selected: string }>;
+function analyzeInitialPath(steps: readonly StructuredChainStep[], limits: { maxSteps: number; maxModelCalls: number }, promptCosts: readonly number[], modelRoutes?: readonly ModelRoute[], initialModel = ""): { cost: number; status: "completed" | "exhausted" } {
 	let state = createAdaptiveChainState();
 	let observation: ChainObservation | undefined;
 	let cost = 0;
+	let activeModel = initialModel;
 	try {
 		for (;;) {
 			const routed = routeAdaptiveChain(steps, limits, state, observation);
@@ -59,7 +62,11 @@ function analyzeInitialPath(steps: readonly StructuredChainStep[], limits: { max
 			observation = undefined;
 			if (!routed.action) return { cost, status: "completed" };
 			const index = steps.findIndex((step) => step.id === routed.action!.step.id);
-			if (routed.action.step.kind === "prompt") cost += promptCosts[index] ?? 0;
+			if (routed.action.step.kind === "prompt") {
+				const route = modelRoutes?.[index]?.get(activeModel);
+				cost += route?.cost ?? promptCosts[index] ?? 0;
+				if (route) activeModel = route.selected;
+			}
 			// Documented deterministic baseline: every selected action succeeds without changing the worktree.
 			observation = { outcome: "succeeded", changed: false };
 		}
@@ -81,15 +88,15 @@ function next(step: StructuredChainStep, outcome: string, steps: readonly Struct
 	const explicit = outcome === "succeeded" ? step.onSuccess : outcome === "failed" ? step.onFailure : step.onBlocked;
 	return explicit ?? steps[(indexes.get(step.id) ?? -1) + 1]?.id;
 }
-function analyzeCalls(steps: readonly StructuredChainStep[], maxSteps: number, maxCalls: number, promptCosts: readonly number[] = []): { bounds: AdaptiveCallBounds; costs: AdaptivePromptCostBounds; pathAnalysis: AdaptivePreflight["pathAnalysis"]; analysis: AdaptivePreflight["analysis"]; diagnostic?: string } {
+function analyzeCalls(steps: readonly StructuredChainStep[], maxSteps: number, maxCalls: number, promptCosts: readonly number[] = [], modelRoutes?: readonly ModelRoute[], initialModel = ""): { bounds: AdaptiveCallBounds; costs: AdaptivePromptCostBounds; pathAnalysis: AdaptivePreflight["pathAnalysis"]; analysis: AdaptivePreflight["analysis"]; diagnostic?: string } {
 	const byId = new Map(steps.map((step) => [step.id, step]));
 	const indexes = new Map(steps.map((step, index) => [step.id, index]));
-	type State = { target?: string; prior?: { outcome: Exclude<ChainOutcome, "skipped">; changed: boolean }; taken: number; calls: number; cost: number };
-	let queue: State[] = [{ target: steps[0]?.id, taken: 0, calls: 0, cost: 0 }];
+	type State = { target?: string; prior?: { outcome: Exclude<ChainOutcome, "skipped">; changed: boolean }; taken: number; calls: number; cost: number; activeModel: string };
+	let queue: State[] = [{ target: steps[0]?.id, taken: 0, calls: 0, cost: 0, activeModel: initialModel }];
 	let cursor = 0; let analyzedStates = 0; let enqueuedStates = 1;
 	const seen = new Set<string>(); const terminal: number[] = []; const terminalCosts: number[] = []; const reachableCosts: number[] = [0]; const exhausted: string[] = [];
 	const inconclusive = () => {
-		const initial = analyzeInitialPath(steps, { maxSteps, maxModelCalls: maxCalls }, promptCosts);
+		const initial = analyzeInitialPath(steps, { maxSteps, maxModelCalls: maxCalls }, promptCosts, modelRoutes, initialModel);
 		const conservativeCost = maxCalls * Math.max(0, ...promptCosts);
 		return { bounds: { minimum: 0, maximum: maxCalls, exact: false, explanation: `Unavailable: graph analysis exceeded the deterministic ${MAX_ADAPTIVE_PREFLIGHT_STATES}-state limit; 0..maxModelCalls is conservative, not an exact completing-path bound.` }, costs: { minimumCompleting: 0, maximumCompleting: conservativeCost, maximumReachable: conservativeCost, initialFallthrough: initial.cost, initialPathStatus: initial.status, exact: false, method: PROMPT_TOKEN_ESTIMATE_METHOD, explanation: `Unavailable: graph analysis exceeded the deterministic ${MAX_ADAPTIVE_PREFLIGHT_STATES}-state limit; cost bounds are conservative and must not be treated as exact.` }, pathAnalysis: { hasCompletingPath: false, hasExhaustedPath: false, exhaustedReasons: [], exhaustedPathCount: 0 }, analysis: { complete: false, analyzedStates, enqueuedStates, stateLimit: MAX_ADAPTIVE_PREFLIGHT_STATES }, diagnostic: `analysis inconclusive: state limit ${MAX_ADAPTIVE_PREFLIGHT_STATES} exceeded` };
 	};
@@ -99,7 +106,7 @@ function analyzeCalls(steps: readonly StructuredChainStep[], maxSteps: number, m
 	};
 	while (cursor < queue.length) {
 		const state = queue[cursor++]!; analyzedStates += 1;
-		const key = `${state.target ?? "$"}|${state.prior?.outcome ?? ""}|${state.prior?.changed ?? ""}|${state.taken}|${state.calls}|${state.cost}`;
+		const key = `${state.target ?? "$"}|${state.prior?.outcome ?? ""}|${state.prior?.changed ?? ""}|${state.taken}|${state.calls}|${state.cost}|${state.activeModel}`;
 		if (seen.has(key)) continue; seen.add(key);
 		if (!state.target) { terminal.push(state.calls); terminalCosts.push(state.cost); reachableCosts.push(state.cost); continue; }
 		const step = byId.get(state.target);
@@ -109,13 +116,16 @@ function analyzeCalls(steps: readonly StructuredChainStep[], maxSteps: number, m
 		}
 		if (state.taken >= maxSteps) { exhausted.push(`maxSteps=${maxSteps} before ${step.id}`); continue; }
 		if (step.kind === "prompt" && state.calls >= maxCalls) { exhausted.push(`maxModelCalls=${maxCalls} before ${step.id}`); continue; }
-		const addedCost = step.kind === "prompt" ? (promptCosts[indexes.get(step.id) ?? -1] ?? 0) : 0;
+		const stepIndex = indexes.get(step.id) ?? -1;
+		const modelRoute = step.kind === "prompt" ? modelRoutes?.[stepIndex]?.get(state.activeModel) : undefined;
+		const addedCost = step.kind === "prompt" ? (modelRoute?.cost ?? promptCosts[stepIndex] ?? 0) : 0;
+		const nextActiveModel = modelRoute?.selected ?? state.activeModel;
 		reachableCosts.push(state.cost + addedCost);
-		for (const observation of OUTCOMES) if (!enqueue(() => ({ target: next(step, observation.outcome, steps, indexes), prior: observation, taken: state.taken + 1, calls: state.calls + (step.kind === "prompt" ? 1 : 0), cost: state.cost + addedCost }))) return inconclusive();
+		for (const observation of OUTCOMES) if (!enqueue(() => ({ target: next(step, observation.outcome, steps, indexes), prior: observation, taken: state.taken + 1, calls: state.calls + (step.kind === "prompt" ? 1 : 0), cost: state.cost + addedCost, activeModel: nextActiveModel }))) return inconclusive();
 	}
 	const minimum = terminal.length ? Math.min(...terminal) : 0;
 	const maximum = terminal.length ? Math.max(...terminal) : 0;
-	const initial = analyzeInitialPath(steps, { maxSteps, maxModelCalls: maxCalls }, promptCosts);
+	const initial = analyzeInitialPath(steps, { maxSteps, maxModelCalls: maxCalls }, promptCosts, modelRoutes, initialModel);
 	const minimumCompleting = terminalCosts.length ? Math.min(...terminalCosts) : 0;
 	const maximumCompleting = terminalCosts.length ? Math.max(...terminalCosts) : 0;
 	return { bounds: { minimum, maximum, exact: minimum === maximum, explanation: "Bounds cover successfully completing paths only; every succeeded/failed/blocked and changed/unchanged observation is considered. Run and gate-skipped steps consume no model calls or executed steps." }, costs: { minimumCompleting, maximumCompleting, maximumReachable: Math.max(...reachableCosts), initialFallthrough: initial.cost, initialPathStatus: initial.status, exact: minimumCompleting === maximumCompleting, method: PROMPT_TOKEN_ESTIMATE_METHOD, explanation: "Deterministic estimates use the same budget estimator after args, model conditionals, includes, and skills. The initial baseline runs the pure runtime router from pristine state assuming each selected action is succeeded + changed=false; run and gate-skipped steps cost zero." }, pathAnalysis: { hasCompletingPath: terminal.length > 0, hasExhaustedPath: exhausted.length > 0, exhaustedReasons: [...new Set(exhausted)], exhaustedPathCount: exhausted.length }, analysis: { complete: true, analyzedStates, enqueuedStates, stateLimit: MAX_ADAPTIVE_PREFLIGHT_STATES } };
@@ -185,15 +195,40 @@ export async function prepareAdaptivePreflight(wrapper: PromptWithModel, catalog
 			diagnostics.push(`Step ${step.id} (${summary.name}): ${issue}`);
 			return { ...summary, status: "blocked" as const, issues: [...summary.issues, issue] };
 		}
-		const loaded = skills.kind === "ready" ? skills.skills : [];
+		const loaded: LoadedPromptSkill[] = skills.kind === "ready" ? skills.skills : [];
 		// Nondelegated runtime sends resolved skills through before_agent_start; only
 		// the user prompt body is subject to the prompt's configured budget.
 		const content = prepared.content;
 		const budget = checkPromptExecutionBudget(target, content);
 		if (budget.message) diagnostics.push(`Step ${step.id} (${summary.name}): ${capSanitizedText(budget.message, 500)}`);
-		return { ...summary, status: budget.message ? "blocked" as const : "ready" as const, effectiveModel: `${prepared.selectedModel.model.provider}/${prepared.selectedModel.model.id}`, budgetVerdict: budget.message ? "exceeded" : budget.warning ? "warning" : "ok", promptCost: estimatePromptTokens(content), skills: loaded.map((skill) => skill.skillName), issues: budget.message ? [...summary.issues, budget.message] : summary.issues };
+		const bodyCost = estimatePromptTokens(content);
+		const skillPromptCost = loaded.length ? estimatePromptTokens(buildSkillLoadedMessage(loaded).content) : undefined;
+		return { ...summary, status: budget.message ? "blocked" as const : "ready" as const, effectiveModel: `${prepared.selectedModel.model.provider}/${prepared.selectedModel.model.id}`, budgetVerdict: budget.message ? "exceeded" : budget.warning ? "warning" : "ok", promptCost: bodyCost, skillPromptCost, skills: loaded.map((skill) => skill.skillName), issues: budget.message ? [...summary.issues, budget.message] : summary.issues };
 	}));
-	const analysis = analyzeCalls(base.steps, base.limits.maxSteps, base.limits.maxModelCalls, targets.map((target) => target.promptCost?.estimatedTokens ?? 0));
+	const modelKey = (model: Model<any> | undefined) => model ? `${model.provider}/${model.id}` : "";
+	const activeModels = new Map<string, Model<any> | undefined>();
+	activeModels.set(modelKey(options.currentModel), options.currentModel);
+	for (const model of options.modelRegistry.getAvailable()) {
+		if (activeModels.size >= 64) break;
+		activeModels.set(modelKey(model), model);
+	}
+	const modelRoutes: ModelRoute[] = await Promise.all(base.steps.map(async (step, index) => {
+		const routes = new Map<string, { cost: number; selected: string }>();
+		const target = catalog.get(step.target);
+		if (step.kind !== "prompt" || !target || base.targets[index]!.issues.length) return routes;
+		for (const [activeKey, activeModel] of activeModels) {
+			const effective = { ...target, ...(options.modelOverride ? { models: [options.modelOverride] } : {}) };
+			const prepared = await preparePromptExecution(effective, options.args, activeModel, options.modelRegistry);
+			if (!prepared || "message" in prepared) continue;
+			const selected = modelKey(prepared.selectedModel.model);
+			const bodyCost = estimatePromptTokens(prepared.content).estimatedTokens;
+			const skillCost = targets[index]!.skillPromptCost?.estimatedTokens ?? 0;
+			routes.set(activeKey, { cost: bodyCost + skillCost, selected });
+		}
+		return routes;
+	}));
+	const promptCosts = targets.map((target) => (target.promptCost?.estimatedTokens ?? 0) + (target.skillPromptCost?.estimatedTokens ?? 0));
+	const analysis = analyzeCalls(base.steps, base.limits.maxSteps, base.limits.maxModelCalls, promptCosts, modelRoutes, modelKey(options.currentModel));
 	if (analysis.diagnostic && !diagnostics.includes(analysis.diagnostic)) diagnostics.push(analysis.diagnostic);
 	return { ...base, targets, callBounds: analysis.bounds, promptCostBounds: analysis.costs, pathAnalysis: analysis.pathAnalysis, analysis: analysis.analysis, diagnostics, status: diagnostics.length ? "blocked" : "ready" };
 }
@@ -215,6 +250,7 @@ export function formatAdaptivePreflight(value: AdaptivePreflight, maxChars = 32_
 		lines.push(`   preflight=${target.status}; cwd=${safe(target.cwd)}; model=${safe(target.effectiveModel ?? (target.models.length ? target.models.join(", ") : "runtime/default"))}${target.thinking ? `; thinking=${safe(target.thinking)}` : ""}`);
 		if (target.budgetVerdict) lines.push(`   effective-budget=${safe(target.budgetVerdict)}`);
 		if (target.promptCost) lines.push(`   prompt-cost=~${target.promptCost.estimatedTokens} tokens; ${target.promptCost.bytes} UTF-8 bytes; method=${target.promptCost.method}`);
+		if (target.skillPromptCost) lines.push(`   injected-skill-cost=~${target.skillPromptCost.estimatedTokens} tokens; ${target.skillPromptCost.bytes} UTF-8 bytes; method=${target.skillPromptCost.method}`);
 		if (target.budget) lines.push(`   budget=${safe(JSON.stringify(target.budget))}`);
 		if (target.skills.length) lines.push(`   skills=${target.skills.map((x) => safe(x)).join(", ")}`);
 		if (target.includes.length) lines.push(`   includes=${target.includes.map((x) => safe(x)).join(", ")}`);

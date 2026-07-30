@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import { createAdaptivePreflight, formatAdaptivePreflight, MAX_ADAPTIVE_PREFLIGHT_STATES, prepareAdaptivePreflight } from "../adaptive-preflight.ts";
 import { formatAdaptiveDecision, formatAdaptiveRuntimeReport } from "../adaptive-renderer.ts";
 import type { PromptWithModel } from "../prompt-loader.ts";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 function prompt(name: string, extra: Partial<PromptWithModel> = {}): PromptWithModel {
 	return { name, description: `${name} description`, content: "body", models: ["test/model"], restore: false, source: "user", rootKind: "prompt", filePath: `/tmp/${name}.md`, ...extra } as PromptWithModel;
@@ -113,6 +116,34 @@ test("adaptive preflight bounds adversarial branching by deterministic state cou
 	assert.match(rendered, /inconclusive/);
 	assert.match(rendered, /runtime revalidates them before execution/);
 	assert.doesNotMatch(rendered, /\u001b|\r/);
+});
+
+test("adaptive preflight tracks the then-active model across prompt steps", async () => {
+	const wrapper = prompt("flow", { adaptiveChain: { limits: { maxSteps: 2, maxModelCalls: 2 }, steps: [
+		{ id: "switch", kind: "prompt", target: "switch", when: "always" },
+		{ id: "preserve", kind: "prompt", target: "preserve", when: "always" },
+	] } });
+	const catalog = new Map([
+		["switch", prompt("switch", { models: ["test/b"], content: "BBBB" })],
+		["preserve", prompt("preserve", { models: ["test/a", "test/b"], content: "<if-model is=\"test/a\">A</if-model><if-model is=\"test/b\">BBBBBBBB</if-model>" })],
+	]);
+	const a = { provider: "test", id: "a" } as any, b = { provider: "test", id: "b" } as any;
+	const registry = { find: (provider: string, id: string) => [a, b].find((model) => model.provider === provider && model.id === id), getAll: () => [a, b], getAvailable: () => [a, b] } as any;
+	const result = await prepareAdaptivePreflight(wrapper, catalog, { cwd: "/repo", args: [], currentModel: a, modelRegistry: registry });
+	assert.equal(result.promptCostBounds.initialFallthrough, 3, "switch cost 1 + B-rendered preserve cost 2");
+});
+
+test("adaptive prompt bounds include the separately injected resolved skill payload without changing body budget", async () => {
+	const root = mkdtempSync(join(tmpdir(), "adaptive-skill-")); const skillPath = join(root, "SKILL.md");
+	writeFileSync(skillPath, "x".repeat(400));
+	const wrapper = prompt("flow", { adaptiveChain: { limits: { maxSteps: 1, maxModelCalls: 1 }, steps: [{ id: "skilled", kind: "prompt", target: "skilled", when: "always" }] } });
+	const catalog = new Map([["skilled", prompt("skilled", { content: "body", skills: ["large"], budget: { maxTokens: 2 } })]]);
+	const model = { provider: "test", id: "model" } as any;
+	const result = await prepareAdaptivePreflight(wrapper, catalog, { cwd: root, args: [], currentModel: model, modelRegistry: { find: () => model, getAll: () => [model], getAvailable: () => [model] } as any, commands: [{ name: "large", source: "skill", sourceInfo: { path: skillPath } }] });
+	assert.equal(result.status, "ready");
+	assert.equal(result.targets[0]!.promptCost!.estimatedTokens, 1);
+	assert.ok(result.targets[0]!.skillPromptCost!.estimatedTokens > 100);
+	assert.equal(result.promptCostBounds.initialFallthrough, result.targets[0]!.promptCost!.estimatedTokens + result.targets[0]!.skillPromptCost!.estimatedTokens);
 });
 
 test("adaptive renderers sanitize and cap untrusted fields and show outcomes", () => {

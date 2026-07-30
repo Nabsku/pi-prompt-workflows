@@ -180,9 +180,9 @@ test("abort escalates a TERM-resistant same-group descendant after the leader ex
 	await withTempDir(async (root) => {
 		const pidFile = join(root, "descendant.pid");
 		const leader = `const {spawn}=require('node:child_process'); const fs=require('node:fs'); const child=spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)\"],{stdio:['ignore','ignore','ignore']}); fs.writeFileSync(${JSON.stringify(pidFile)},String(child.pid)); process.on('SIGTERM',()=>process.exit(0)); setInterval(()=>{},1000);`;
-		const command = `node -e ${JSON.stringify(leader)}`;
+		const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(leader)}`;
 		const controller = new AbortController();
-		const running = runDeterministicStep({ filePath: join(root, "prompt.md") } as never, { execution: { kind: "run", command }, handoff: "never", nonInteractive: true, timeoutMs: 8_000 }, root, controller.signal);
+		const running = runDeterministicStep({ filePath: join(root, "prompt.md") } as never, { execution: { kind: "run", command }, handoff: "never", nonInteractive: true, env: { PATH: root }, timeoutMs: 8_000 }, root, controller.signal);
 		await waitForFile(pidFile, t.signal);
 		const started = performance.now();
 		controller.abort();
