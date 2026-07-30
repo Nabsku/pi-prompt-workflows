@@ -331,6 +331,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		blockedAdaptivePrompts = new Map();
 		for (const record of selectEffectivePromptSourceRecords(inventory).values()) {
 			if (chainResult.prompts.has(record.promptName)) continue;
+			if (!record.isStructuredChainDeclaration) continue;
 			const related = chainResult.diagnostics.filter((diagnostic) => diagnostic.filePath === record.filePath && diagnostic.code.includes("chain"));
 			if (!related.length) continue;
 			blockedAdaptivePrompts.set(record.promptName, { name: record.promptName, source: record.source, rootKind: record.rootKind, filePath: record.filePath, hidden: record.hidden === true, diagnostics: related.map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`) });
@@ -410,7 +411,10 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		promptTurnRestore?: PromptTurnRestore,
 		adaptiveAbortStatus?: (status: "failed" | "blocked") => void,
 		): Promise<PromptStepResult | "aborted"> {
-		if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return "aborted";
+		if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) {
+			adaptiveAbortStatus?.("blocked");
+			return "aborted";
+		}
 
 		const requestedSkills = getRequestedSkills(prompt);
 		const skillResolution = resolvePromptSkills(requestedSkills, ctx.cwd, pi.getCommands() as RuntimeSkillCommand[]);
@@ -571,6 +575,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		currentModel: Model<any> | undefined,
 		override?: SubagentOverride,
 		adaptiveAbortStatus?: (status: "failed" | "blocked") => void,
+		inheritedModel?: Model<any>,
 	): Promise<PromptStepResult | "aborted"> {
 		const savedThinking = pi.getThinkingLevel();
 		const isDelegatedPrompt = shouldDelegatePrompt(prompt, override);
@@ -578,7 +583,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			? { originalModel: currentModel, originalThinking: savedThinking }
 			: undefined;
 		const boomerangTargetId = prompt.boomerang ? ctx.sessionManager.getLeafId() : null;
-		const result = await executePromptStep(prompt, args, ctx, currentModel, override, undefined, undefined, undefined, promptTurnRestore, adaptiveAbortStatus);
+		const result = await executePromptStep(prompt, args, ctx, currentModel, override, inheritedModel, undefined, undefined, promptTurnRestore, adaptiveAbortStatus);
 		if (result === "aborted" || result.aborted) return result;
 		if (isDelegatedPrompt && result.text) {
 			const parentStartId = ctx.sessionManager.getLeafId();
@@ -2858,7 +2863,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				async executePrompt(prompt) {
 					const effective = { ...prompt, ...(runtimeCwd ? { cwd: runtimeCwd } : {}), ...(runtime.model ? { models: [runtime.model] } : {}) };
 					let abortStatus: "failed" | "blocked" = "failed";
-					const result = await executeOrdinaryPrompt(prompt.name, effective, stepArgs, ctx, savedModel, undefined, (status) => { abortStatus = status; });
+					const result = await executeOrdinaryPrompt(prompt.name, effective, stepArgs, ctx, getCurrentModel(ctx), undefined, (status) => { abortStatus = status; }, savedModel);
 					if (result === "aborted" || result.aborted) return { status: abortStatus, error: new Error(`Adaptive prompt step ${prompt.name} did not complete`) };
 					if (!result.terminalAssistantMessage) {
 						const error = new Error(`Adaptive prompt step ${prompt.name} produced no terminal assistant message`);

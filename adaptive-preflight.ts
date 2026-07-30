@@ -194,8 +194,9 @@ export async function prepareAdaptivePreflight(wrapper: PromptWithModel, catalog
 	return { ...base, targets, callBounds: analysis.bounds, promptCostBounds: analysis.costs, pathAnalysis: analysis.pathAnalysis, analysis: analysis.analysis, diagnostics, status: diagnostics.length ? "blocked" : "ready" };
 }
 function safe(value: unknown, max = 240): string { return capSanitizedText(value, max); }
-function edge(value: string | undefined): string { return value === undefined ? "fallthrough" : value === "end" ? "terminal" : safe(value); }
+function edge(value: string | undefined, stepIds: ReadonlySet<string>): string { return value === undefined ? "fallthrough" : value === "end" && !stepIds.has("end") ? "terminal" : safe(value); }
 export function formatAdaptivePreflight(value: AdaptivePreflight, maxChars = 32_000): string {
+	const stepIds = new Set(value.steps.map((step) => step.id));
 	const lines = ["## Adaptive Chain", `- Status: ${value.status}`, `- Limits: maxSteps=${value.limits.maxSteps}, maxModelCalls=${value.limits.maxModelCalls}`, `- Prompt-call bounds: min=${value.callBounds.minimum}, max=${value.callBounds.maximum}${value.callBounds.exact ? " (exact)" : " (path-dependent)"}`, `- Uncertainty: ${value.callBounds.explanation}`, "", "### Bounded graph"];
 	lines.splice(3, 0, `- Analysis states: ${value.analysis.analyzedStates} analyzed, ${value.analysis.enqueuedStates} enqueued (limit ${value.analysis.stateLimit}; ${value.analysis.complete ? "complete" : "inconclusive"})`);
 	lines.splice(4, 0, "- Snapshot note: skills, files, model availability, and prompt costs are a read-only preflight snapshot; runtime revalidates them before execution.");
@@ -204,9 +205,9 @@ export function formatAdaptivePreflight(value: AdaptivePreflight, maxChars = 32_
 	lines.splice(4, 0, `- Paths: completing=${value.pathAnalysis.hasCompletingPath}; exhausted=${value.pathAnalysis.hasExhaustedPath} (${value.pathAnalysis.exhaustedPathCount})`);
 	value.steps.forEach((step, index) => {
 		const target = value.targets[index]!;
-		const natural = value.steps[index + 1]?.id ?? "terminal";
+		const natural = value.steps[index + 1] ? safe(value.steps[index + 1]!.id) : "terminal";
 		lines.push(`${index + 1}. ${safe(step.id)} [${step.kind}] target=${safe(step.target)} gate=${step.when}`);
-		lines.push(`   fallthrough=${natural}; onSuccess=${edge(step.onSuccess)}; onFailure=${edge(step.onFailure)}; onBlocked=${edge(step.onBlocked)}`);
+		lines.push(`   fallthrough=${natural}; onSuccess=${edge(step.onSuccess, stepIds)}; onFailure=${edge(step.onFailure, stepIds)}; onBlocked=${edge(step.onBlocked, stepIds)}`);
 		lines.push(`   preflight=${target.status}; cwd=${safe(target.cwd)}; model=${safe(target.effectiveModel ?? (target.models.length ? target.models.join(", ") : "runtime/default"))}${target.thinking ? `; thinking=${safe(target.thinking)}` : ""}`);
 		if (target.budgetVerdict) lines.push(`   effective-budget=${safe(target.budgetVerdict)}`);
 		if (target.promptCost) lines.push(`   prompt-cost=~${target.promptCost.estimatedTokens} tokens; ${target.promptCost.bytes} UTF-8 bytes; method=${target.promptCost.method}`);

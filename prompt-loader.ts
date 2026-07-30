@@ -151,6 +151,8 @@ export interface PromptSourceRecord {
 	hasInlineIncludes: boolean;
 	hasIncludesPlaceholder: boolean;
 	isChainWrapper: boolean;
+	/** True only when the original declaration used the structured chain array shape. */
+	isStructuredChainDeclaration?: boolean;
 	hidden?: boolean;
 	includeMetadataInvalid?: boolean;
 	skippedReason?: string;
@@ -2583,6 +2585,7 @@ function collectPromptSourceRecordsFromDir(
 					hasInlineIncludes,
 					hasIncludesPlaceholder,
 					isChainWrapper,
+					isStructuredChainDeclaration: Array.isArray(frontmatter.chain),
 					hidden: hidden || undefined,
 					...(includeMetadataInvalid ? { includeMetadataInvalid: true, skippedReason } : {}),
 				});

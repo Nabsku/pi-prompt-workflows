@@ -83,3 +83,35 @@ for (const [stopReason, expectedTarget] of [["stop", "success"], ["error", "fail
 		}
 	});
 }
+
+test("adaptive model-less targets switch back to the chain-start model after a prior step switches models", async () => {
+	const root = mkdtempSync(join(tmpdir(), "adaptive-model-inherit-"));
+	const oldHome = process.env.HOME; process.env.HOME = join(root, "home");
+	try {
+		const cwd = join(root, "repo"); mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true }); mkdirSync(process.env.HOME, { recursive: true }); execFileSync("git", ["init", "-q"], { cwd });
+		const start = { provider: "test", id: "start" }; const other = { provider: "test", id: "other" };
+		writeFileSync(join(cwd, ".pi", "prompts", "switch.md"), "---\nmodel: test/other\n---\nSWITCH");
+		writeFileSync(join(cwd, ".pi", "prompts", "inherit.md"), "---\n---\nINHERIT");
+		writeFileSync(join(cwd, ".pi", "prompts", "flow.md"), "---\nchain:\n  - prompt: switch\n  - prompt: inherit\nlimits:\n  maxSteps: 2\n  maxModelCalls: 2\n---\nignored");
+		const commands = new Map<string, any>(); const setModels: string[] = []; const branch: any[] = [{ id: "root", type: "message", message: { role: "user", content: "root" } }];
+		const pi: any = { registerCommand(name: string, command: any) { commands.set(name, command); }, registerMessageRenderer() {}, registerTool() {}, getCommands() { return []; }, on(event: string, handler: any) { if (event === "session_start") this.start = handler; }, async setModel(model: any) { setModels.push(`${model.provider}/${model.id}`); return true; }, getThinkingLevel() { return "medium"; }, setThinkingLevel() {}, sendUserMessage() {}, sendMessage() {} };
+		const ctx: any = { cwd, model: start, signal: new AbortController().signal, hasUI: false, modelRegistry: { find: (p: string, id: string) => [start, other].find((m) => m.provider === p && m.id === id), getAll: () => [start, other], getAvailable: () => [start, other] }, ui: { notify() {}, setStatus() {}, setWorkingMessage() {}, onTerminalInput() { return () => {}; }, theme: { fg(_x: string, value: string) { return value; } } }, isIdle: () => false, async waitForIdle() { branch.push({ id: `a${branch.length}`, type: "message", message: { role: "assistant", content: [{ type: "text", text: "ok" }], stopReason: "stop" } }); }, sessionManager: { getLeafId: () => branch.at(-1)?.id ?? "root", getBranch: () => branch }, navigateTree: async () => ({ cancelled: false }) };
+		promptModelExtension(pi); await pi.start({}, ctx); await commands.get("flow").handler("", ctx);
+		assert.deepEqual(setModels, ["test/other", "test/start"]);
+	} finally { process.env.HOME = oldHome; rmSync(root, { recursive: true, force: true }); }
+});
+
+test("adaptive approval refusal routes through onBlocked", async () => {
+	const root = mkdtempSync(join(tmpdir(), "adaptive-approval-")); const oldHome = process.env.HOME; process.env.HOME = join(root, "home");
+	try {
+		const cwd = join(root, "repo"); mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true }); mkdirSync(join(cwd, ".pi", "prompt-library"), { recursive: true }); mkdirSync(process.env.HOME, { recursive: true }); execFileSync("git", ["init", "-q"], { cwd });
+		writeFileSync(join(cwd, ".pi", "prompt-library", "guarded.md"), "---\nmodel: test/model\nhidden: true\n---\nGUARDED");
+		writeFileSync(join(cwd, ".pi", "prompts", "blocked.md"), "---\nmodel: test/model\n---\nBLOCKED ROUTE");
+		writeFileSync(join(cwd, ".pi", "prompts", "flow.md"), "---\nchain:\n  - id: guarded\n    prompt: guarded\n    onBlocked: blocked\n  - id: blocked\n    prompt: blocked\nlimits:\n  maxSteps: 2\n  maxModelCalls: 2\n---\nignored");
+		const commands = new Map<string, any>(); const messages: string[] = []; const branch: any[] = [{ id: "root", type: "message", message: { role: "user", content: "root" } }];
+		const pi: any = { registerCommand(name: string, command: any) { commands.set(name, command); }, registerMessageRenderer() {}, registerTool() {}, getCommands() { return []; }, on(event: string, handler: any) { if (event === "session_start") this.start = handler; }, async setModel() { return true; }, getThinkingLevel() { return "medium"; }, setThinkingLevel() {}, sendUserMessage(value: string) { messages.push(value); }, sendMessage() {} };
+		const ctx: any = { cwd, model: MODEL, signal: new AbortController().signal, hasUI: true, modelRegistry: { find: () => MODEL, getAll: () => [MODEL], getAvailable: () => [MODEL] }, ui: { async confirm() { return false; }, notify() {}, setStatus() {}, setWorkingMessage() {}, onTerminalInput() { return () => {}; }, theme: { fg(_x: string, value: string) { return value; } } }, isIdle: () => false, async waitForIdle() { branch.push({ id: `a${branch.length}`, type: "message", message: { role: "assistant", content: [{ type: "text", text: "ok" }], stopReason: "stop" } }); }, sessionManager: { getLeafId: () => branch.at(-1)?.id ?? "root", getBranch: () => branch }, navigateTree: async () => ({ cancelled: false }) };
+		promptModelExtension(pi); await pi.start({}, ctx); await commands.get("flow").handler("", ctx);
+		assert.deepEqual(messages, ["BLOCKED ROUTE"]);
+	} finally { process.env.HOME = oldHome; rmSync(root, { recursive: true, force: true }); }
+});
