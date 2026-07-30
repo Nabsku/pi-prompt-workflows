@@ -2703,7 +2703,6 @@ export function loadPromptsWithModel(
 	const diagnostics: PromptLoaderDiagnostic[] = [];
 
 	function addPrompt(prompt: PromptWithModel) {
-		if (prompt.adaptiveChain && options.includeAdaptiveChains !== true) return;
 		const existing = promptMap.get(prompt.name);
 		if (!existing) {
 			promptMap.set(prompt.name, prompt);
@@ -2733,7 +2732,10 @@ export function loadPromptsWithModel(
 		}
 	}
 
-	return { prompts: promptMap, diagnostics };
+	const visiblePrompts = options.includeAdaptiveChains === true
+		? promptMap
+		: new Map([...promptMap].filter(([, prompt]) => prompt.adaptiveChain === undefined));
+	return { prompts: visiblePrompts, diagnostics };
 }
 
 function effectiveLineupCount(slots: DelegationLineupSlot[] | undefined): number {

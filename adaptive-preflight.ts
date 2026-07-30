@@ -1,7 +1,7 @@
 import type { ChainGate, ChainOutcome, StructuredChainStep } from "./chain-parser.js";
 import type { PromptWithModel } from "./prompt-loader.js";
 import { getRequestedSkills } from "./prompt-skills.js";
-import { buildSkillLoadedMessage, resolvePromptSkills, type RuntimeSkillCommand } from "./prompt-skills.js";
+import { resolvePromptSkills, type RuntimeSkillCommand } from "./prompt-skills.js";
 import { checkPromptExecutionBudget, preparePromptExecution } from "./prompt-execution.js";
 import type { Model } from "@earendil-works/pi-ai";
 import type { RegistryLike } from "./model-selection.js";
@@ -120,16 +120,29 @@ function analyzeCalls(steps: readonly StructuredChainStep[], maxSteps: number, m
 	const maximumCompleting = terminalCosts.length ? Math.max(...terminalCosts) : 0;
 	return { bounds: { minimum, maximum, exact: minimum === maximum, explanation: "Bounds cover successfully completing paths only; every succeeded/failed/blocked and changed/unchanged observation is considered. Run and gate-skipped steps consume no model calls or executed steps." }, costs: { minimumCompleting, maximumCompleting, maximumReachable: Math.max(...reachableCosts), initialFallthrough: initial.cost, initialPathStatus: initial.status, exact: minimumCompleting === maximumCompleting, method: PROMPT_TOKEN_ESTIMATE_METHOD, explanation: "Deterministic estimates use the same budget estimator after args, model conditionals, includes, and skills. The initial baseline runs the pure runtime router from pristine state assuming each selected action is succeeded + changed=false; run and gate-skipped steps cost zero." }, pathAnalysis: { hasCompletingPath: terminal.length > 0, hasExhaustedPath: exhausted.length > 0, exhaustedReasons: [...new Set(exhausted)], exhaustedPathCount: exhausted.length }, analysis: { complete: true, analyzedStates, enqueuedStates, stateLimit: MAX_ADAPTIVE_PREFLIGHT_STATES } };
 }
+export function isAdaptivePromptTarget(target: PromptWithModel | undefined): boolean {
+	return !!target && !target.chain && !target.adaptiveChain && !target.deterministic
+		&& !target.subagent && !target.inheritContext && !target.parallel
+		&& target.loop === undefined && !target.boomerang && !target.workers
+		&& !target.reviewers && !target.finalApplier && !target.preset;
+}
+
+export function isAdaptiveRunTarget(target: PromptWithModel | undefined): target is PromptWithModel & { deterministic: NonNullable<PromptWithModel["deterministic"]> } {
+	return !!target && !target.chain && !target.adaptiveChain
+		&& !!target.deterministic && target.deterministic.handoff === "never";
+}
+
 function targetIssues(step: StructuredChainStep, target: PromptWithModel | undefined): string[] {
 	if (!target) return [`Missing ${step.kind} target.`];
 	if (target.chain || target.adaptiveChain) return ["Nested/adaptive/parallel chain targets are unsupported."];
 	if (step.kind === "run") {
 		if (!target.deterministic) return ["Kind mismatch: run target is not deterministic."];
-		return target.deterministic.handoff === "never" ? [] : ["Deterministic handoff can add a model call and is unsupported."];
+		return isAdaptiveRunTarget(target) ? [] : ["Deterministic handoff can add a model call and is unsupported."];
 	}
-	if (target.deterministic) return ["Kind mismatch: prompt target is deterministic."];
-	const expands = target.subagent || target.inheritContext || target.parallel || target.loop !== undefined || target.boomerang || target.workers || target.reviewers || target.finalApplier || target.preset;
-	return expands ? ["Delegated, loop, boomerang, compare/final-applier, deterministic, or parallel target mode can expand one router action into multiple top-level model calls and is runtime-rejected."] : [];
+	if (isAdaptivePromptTarget(target)) return [];
+	return target.deterministic
+		? ["Kind mismatch: prompt target is deterministic."]
+		: ["Delegated, loop, boomerang, compare/final-applier, deterministic, or parallel target mode can expand one router action into multiple top-level model calls and is runtime-rejected."];
 }
 export function createAdaptivePreflight(wrapper: PromptWithModel, catalog: ReadonlyMap<string, PromptWithModel>, cwd: string, runtimeCwd?: string): AdaptivePreflight {
 	if (!wrapper.adaptiveChain) throw new Error("Adaptive preflight requires a structured chain");
@@ -137,7 +150,10 @@ export function createAdaptivePreflight(wrapper: PromptWithModel, catalog: Reado
 	const targets = steps.map((step): AdaptivePreflightTarget => {
 		const target = catalog.get(step.target); const issues = targetIssues(step, target);
 		const execution = target?.deterministic?.execution;
-		return { status: issues.length ? "blocked" : "ready", name: step.target, kind: step.kind, description: target?.description, cwd: runtimeCwd ?? (step.kind === "run" ? target?.deterministic?.cwd : target?.cwd) ?? wrapper.cwd ?? cwd, models: target?.models ?? [], thinking: target?.thinking, budget: target?.budget, skills: target ? getRequestedSkills(target) : [], includes: target?.includes ?? [], execution: execution ? (execution.kind === "script" ? execution.path : execution.command) : undefined, issues };
+		const effectiveCwd = step.kind === "run"
+			? runtimeCwd ?? target?.deterministic?.cwd ?? wrapper.cwd ?? cwd
+			: cwd;
+		return { status: issues.length ? "blocked" : "ready", name: step.target, kind: step.kind, description: target?.description, cwd: effectiveCwd, models: target?.models ?? [], thinking: target?.thinking, budget: target?.budget, skills: target ? getRequestedSkills(target) : [], includes: target?.includes ?? [], execution: execution ? (execution.kind === "script" ? execution.path : execution.command) : undefined, issues };
 	});
 	const analysis = analyzeCalls(steps, limits.maxSteps, limits.maxModelCalls);
 	const diagnostics = targets.flatMap((target, index) => target.issues.map((issue) => `Step ${steps[index]!.id} (${target.name}): ${issue}`));
@@ -166,8 +182,9 @@ export async function prepareAdaptivePreflight(wrapper: PromptWithModel, catalog
 			return { ...summary, status: "blocked" as const, issues: [...summary.issues, issue] };
 		}
 		const loaded = skills.kind === "ready" ? skills.skills : [];
-		const preamble = loaded.length ? buildSkillLoadedMessage(loaded).content : "";
-		const content = preamble ? `${preamble}\n\n---\n\n${prepared.content}` : prepared.content;
+		// Nondelegated runtime sends resolved skills through before_agent_start; only
+		// the user prompt body is subject to the prompt's configured budget.
+		const content = prepared.content;
 		const budget = checkPromptExecutionBudget(target, content);
 		if (budget.message) diagnostics.push(`Step ${step.id} (${summary.name}): ${capSanitizedText(budget.message, 500)}`);
 		return { ...summary, status: budget.message ? "blocked" as const : "ready" as const, effectiveModel: `${prepared.selectedModel.model.provider}/${prepared.selectedModel.model.id}`, budgetVerdict: budget.message ? "exceeded" : budget.warning ? "warning" : "ok", promptCost: estimatePromptTokens(content), skills: loaded.map((skill) => skill.skillName), issues: budget.message ? [...summary.issues, budget.message] : summary.issues };
