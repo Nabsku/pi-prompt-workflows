@@ -163,3 +163,19 @@ test("formatDeterministicExecution formats command and script executions for dis
 	assert.match(formatDeterministicExecution({ kind: "command", command: "git", args: ["status"], shell: false }), /'git' 'status'/);
 	assert.match(formatDeterministicExecution({ kind: "script", path: "./demo.sh", args: ["--x"] }, "/tmp/demo.sh"), /\/tmp\/demo\.sh/);
 });
+
+test("timeout escalates a TERM-resistant same-group descendant after the leader exits", { skip: process.platform === "win32" }, async () => {
+	await withTempDir(async (root) => {
+		const pidFile = join(root, "descendant.pid");
+		const leader = `const {spawn}=require('node:child_process'); const fs=require('node:fs'); const child=spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)\"],{stdio:['ignore','ignore','ignore']}); fs.writeFileSync(${JSON.stringify(pidFile)},String(child.pid)); process.on('SIGTERM',()=>process.exit(0)); setInterval(()=>{},1000);`;
+		const command = `node -e ${JSON.stringify(leader)}`;
+		const started = performance.now();
+		const result = await runDeterministicStep({ filePath: join(root, "prompt.md") } as never, { execution: { kind: "run", command }, handoff: "never", nonInteractive: true, timeoutMs: 1_000 }, root);
+		assert.equal(result.timedOut, true);
+		assert.equal(result.processGroupExtinct, true);
+		assert.ok(performance.now() - started < 2_000, "cleanup must not leak to the 8s deadline");
+		const pid = Number((await import("node:fs")).readFileSync(pidFile, "utf8"));
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		assert.throws(() => process.kill(pid, 0));
+	});
+});
