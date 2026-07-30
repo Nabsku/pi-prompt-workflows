@@ -334,6 +334,7 @@ function parseStructuredChainDeclaration(chain: unknown[], limitsValue?: unknown
 		if (when !== "always" && when !== "changed" && when !== "succeeded" && when !== "failed") return fail(`step ${index + 1} has unknown gate ${JSON.stringify(when)}`);
 		const rawId = Object.hasOwn(record, "id") ? record.id : target;
 		if (typeof rawId !== "string" || rawId.trim() === "") return fail(`step ${index + 1} id must be a non-empty string`);
+		if (Object.hasOwn(record, "id") && rawId.includes("\0")) return fail(`step ${index + 1} id must not contain NUL`);
 		const step: StructuredChainStep = { id: rawId.trim(), kind, target, when };
 		for (const key of ["onSuccess", "onFailure", "onBlocked"] as const) {
 			if (record[key] === undefined) continue;

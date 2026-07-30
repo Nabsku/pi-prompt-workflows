@@ -27,6 +27,17 @@ function changed(cwd: string, action: () => void): boolean {
 	action();
 	return compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed;
 }
+function repoWithSubmodule(): { cwd: string; submodule: string; commits: [string, string] } {
+	const source = repo();
+	const first = execFileSync("git", ["rev-parse", "HEAD"], { cwd: source, encoding: "utf8" }).trim();
+	writeFileSync(join(source, "tracked.txt"), "second\n");
+	execFileSync("git", ["commit", "-qam", "second"], { cwd: source });
+	const second = execFileSync("git", ["rev-parse", "HEAD"], { cwd: source, encoding: "utf8" }).trim();
+	const cwd = repo();
+	execFileSync("git", ["-c", "protocol.file.allow=always", "submodule", "add", "-q", source, "submodule"], { cwd });
+	execFileSync("git", ["commit", "-qam", "add submodule"], { cwd });
+	return { cwd, submodule: join(cwd, "submodule"), commits: [first, second] };
+}
 function snapshotProbe(cwd: string, bin: string, deadlineMs?: number): { ok: boolean; code?: string; message?: string; cleanupStatus?: string } {
 	const moduleUrl = new URL("../git-worktree-snapshot.ts", import.meta.url).href;
 	const source = `import { captureGitWorktreeSnapshot } from ${JSON.stringify(moduleUrl)};\ntry { captureGitWorktreeSnapshot(${JSON.stringify(cwd)}, ${JSON.stringify(deadlineMs === undefined ? {} : { deadlineMs })}); console.log(JSON.stringify({ ok: true })); } catch (error) { console.log(JSON.stringify({ ok: false, code: error?.code, message: error?.message, cleanupStatus: error?.cause?.cleanupStatus })); }`;
@@ -225,11 +236,29 @@ test("clean HEAD changes and bounded Git output are detected", () => {
 	assert.throws(() => captureGitWorktreeSnapshot(cwd, { maxGitOutputBytes: 1 }), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "LIMIT_EXCEEDED");
 });
 
-test("relevant gitlinks fail closed as unsupported submodules", () => {
-	const cwd = repo();
-	const oid = execFileSync("git", ["rev-parse", "HEAD"], { cwd }).toString().trim();
-	execFileSync("git", ["update-index", "--add", "--cacheinfo", `160000,${oid},submodule`], { cwd });
-	assert.throws(() => captureGitWorktreeSnapshot(cwd), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "UNSUPPORTED_SUBMODULE");
+test("clean committed submodules capture and compare unchanged", () => {
+	const { cwd } = repoWithSubmodule();
+	const before = captureGitWorktreeSnapshot(cwd);
+	const after = captureGitWorktreeSnapshot(cwd);
+	assert.equal(compareGitWorktreeSnapshots(before, after).changed, false);
+	assert.equal(after.files.find((entry) => Buffer.from(entry.path, "base64").toString() === "submodule")?.kind, "directory");
+});
+
+test("dirty and uninitialized submodules fail closed", () => {
+	const dirty = repoWithSubmodule();
+	writeFileSync(join(dirty.submodule, "tracked.txt"), "dirty\n");
+	assert.throws(() => captureGitWorktreeSnapshot(dirty.cwd), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "UNSUPPORTED_SUBMODULE");
+	const uninitialized = repoWithSubmodule();
+	rmSync(uninitialized.submodule, { recursive: true, force: true });
+	assert.throws(() => captureGitWorktreeSnapshot(uninitialized.cwd), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "UNSUPPORTED_SUBMODULE");
+});
+
+test("detects a staged gitlink change while allowing the matching clean submodule", () => {
+	const { cwd, submodule, commits } = repoWithSubmodule();
+	const before = captureGitWorktreeSnapshot(cwd);
+	execFileSync("git", ["checkout", "-q", commits[0]], { cwd: submodule });
+	execFileSync("git", ["add", "submodule"], { cwd });
+	assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, true);
 });
 
 test("non-git cwd and caps fail visibly with structured errors", () => {
@@ -280,4 +309,22 @@ test("capture maxBytes public cap self-validates at the boundary", () => {
 	const snapshot = captureGitWorktreeSnapshot(cwd, { maxBytes: boundary });
 	assert.deepEqual(compareGitWorktreeSnapshots(snapshot, snapshot), { changed: false });
 	assert.throws(() => captureGitWorktreeSnapshot(cwd, { maxBytes: boundary + 1 }), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "INVALID_SNAPSHOT" && /cannot exceed/.test(error.message));
+});
+
+test("capture maxFiles public cap self-validates at the boundary", () => {
+	const cwd = repo();
+	const boundary = 10_000;
+	const snapshot = captureGitWorktreeSnapshot(cwd, { maxFiles: boundary });
+	assert.deepEqual(compareGitWorktreeSnapshots(snapshot, snapshot), { changed: false });
+	assert.throws(() => captureGitWorktreeSnapshot(cwd, { maxFiles: boundary + 1 }), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "INVALID_SNAPSHOT" && /cannot exceed/.test(error.message));
+});
+
+test("index stat-cache refresh is unchanged while semantic staged changes remain visible", () => {
+	const cwd = repo();
+	const before = captureGitWorktreeSnapshot(cwd);
+	execFileSync("git", ["update-index", "--refresh"], { cwd });
+	assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, false);
+	writeFileSync(join(cwd, "tracked.txt"), "staged semantic change\n");
+	execFileSync("git", ["add", "tracked.txt"], { cwd });
+	assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, true);
 });

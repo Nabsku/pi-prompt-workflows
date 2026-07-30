@@ -134,6 +134,9 @@ test("structured chain IDs reject the strict invalid and duplicate matrix", () =
 	assert.match(parseChainDeclaration([{ id: "one", prompt: "same" }, { id: "one", prompt: "same" }]).invalidSegments.join("\n"), /duplicate structured chain step ID/i);
 	assert.match(parseChainDeclaration([{ id: "one", prompt: "same", onSuccess: "same" }]).invalidSegments.join("\n"), /unknown target "same"/i);
 	assert.match(parseChainDeclaration([{ prompt: "same" }, { prompt: "same" }]).invalidSegments.join("\n"), /duplicate structured chain step ID/i);
+	const nul = parseChainDeclaration([{ id: "before\0after", prompt: "same" }]);
+	assert.equal(nul.steps.length, 0);
+	assert.deepEqual(nul.invalidSegments, ["step 1 id must not contain NUL"]);
 });
 
 test("parseChainDeclaration rejects invalid structured declarations visibly", () => {

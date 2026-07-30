@@ -2895,9 +2895,14 @@ test("loadPromptsWithModel skips invalid structured chains visibly", () => {
 		const cwd = join(root, "project");
 		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 		writeFileSync(join(cwd, ".pi", "prompts", "bad-adaptive.md"), "---\nchain:\n  - prompt: implement\n    when: maybe\nlimits:\n  maxSteps: 5\n---\nignored");
+		writeFileSync(join(cwd, ".pi", "prompts", "nul-id.md"), "---\nchain:\n  - id: \"before\\0after\"\n    prompt: implement\n---\nignored");
 		const result = loadPromptsWithModel(cwd);
 		assert.equal(result.prompts.has("bad-adaptive"), false);
+		assert.equal(result.prompts.has("nul-id"), false);
 		assert.equal(result.diagnostics.some((item) => item.code === "invalid-chain-declaration" && /unknown gate/i.test(item.message)), true);
+		const nulDiagnostic = result.diagnostics.find((item) => item.filePath.endsWith("nul-id.md"));
+		assert.match(nulDiagnostic?.message ?? "", /step 1 id must not contain NUL/);
+		assert.equal(nulDiagnostic?.message.includes("\0"), false);
 	});
 });
 
