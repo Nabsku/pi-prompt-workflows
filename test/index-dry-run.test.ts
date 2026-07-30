@@ -186,6 +186,18 @@ test("parser-invalid adaptive graphs stay unregistered but exact plain dry-run s
 	});
 });
 
+test("malformed scalar chains retain the legacy chain dry-run error", async () => {
+	await setup(async (_root, cwd, pi, ctx) => {
+		writePrompt(cwd, "legacy-broken", "---\nchain: review ->\n---\nignored");
+		await pi.emit("session_start", {}, ctx);
+		const output = await captureStdout(() => pi.commands.get("dry-run-prompt")!.handler!("legacy-broken --plain", ctx));
+		assert.equal(output, "");
+		const diagnostic = pi.notifications.map((item) => item.message).join("\n");
+		assert.match(diagnostic, /chain/i);
+		assert.doesNotMatch(diagnostic, /Graph unavailable\/invalid/i);
+	});
+});
+
 test("--plain prints complete dry-run error reports to stdout", async () => {
 	await setup(async (_root, cwd, pi, ctx) => {
 		writePrompt(cwd, "chainy", "---\nmodel: anthropic/claude-sonnet-4-20250514\nchain: review -> fix\n---\nignored");
