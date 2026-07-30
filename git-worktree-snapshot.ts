@@ -24,6 +24,8 @@ export interface GitWorktreeFileSnapshot {
 export interface GitIndexPathSnapshot { readonly path: string; readonly entries: readonly string[]; readonly fingerprint: string; }
 export interface GitWorktreeSnapshot {
 	readonly version: 1;
+	/** Effective executable-bit handling for regular-file index entries. */
+	readonly coreFileMode: boolean;
 	/** Effective checkout representation for 120000 index entries. */
 	readonly coreSymlinks: boolean;
 	readonly repositoryRoot: string;
@@ -406,7 +408,7 @@ export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorkt
 		return entry.path === verified.path && entry.fingerprint === verified.fingerprint && entry.entries.length === verified.entries.length && entry.entries.every((value, j) => value === verified.entries[j]);
 	});
 	if (verifiedFileMode !== fileMode || verifiedCoreSymlinks !== coreSymlinks || verifiedHeadIdentity !== headIdentity || verifiedIndexTree !== indexTree || !verifiedStatus.equals(status) || !equalFiles || !equalIndex) throw new GitWorktreeSnapshotError("RACE_DETECTED", "Git configuration, HEAD, index, status, or relevant content changed during snapshot capture");
-	return { version: 1, coreSymlinks, repositoryRoot: rootBytes.toString("base64"), repositoryIdentity, headIdentity, indexTree, status: status.toString("base64"), files, index };
+	return { version: 1, coreFileMode: fileMode, coreSymlinks, repositoryRoot: rootBytes.toString("base64"), repositoryIdentity, headIdentity, indexTree, status: status.toString("base64"), files, index };
 }
 function dataRecord(value: unknown, keys: readonly string[]): Record<string, unknown> | undefined {
 	if (!value || typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) return undefined;
@@ -427,7 +429,7 @@ function dataArray(value: unknown): readonly unknown[] | undefined {
 function canonicalBase64(value: unknown, maxBytes = DEFAULT_MAX_GIT_OUTPUT_BYTES): Buffer | undefined { if (typeof value !== "string" || value.length > Math.ceil(maxBytes / 3) * 4) return undefined; const decoded = Buffer.from(value, "base64"); return decoded.length <= maxBytes && decoded.toString("base64") === value ? decoded : undefined; }
 function safeRelativePath(value: unknown): string | undefined { const bytes = canonicalBase64(value, 1024 * 1024); if (!bytes) return undefined; try { absolutePath(Buffer.from("/root"), bytes); } catch { return undefined; } return value as string; }
 function canonicalSnapshot(value: unknown): GitWorktreeSnapshot | undefined {
-	const top = dataRecord(value, ["coreSymlinks", "files", "headIdentity", "index", "indexTree", "repositoryIdentity", "repositoryRoot", "status", "version"]); if (!top || top.version !== 1 || typeof top.coreSymlinks !== "boolean") return undefined;
+	const top = dataRecord(value, ["coreFileMode", "coreSymlinks", "files", "headIdentity", "index", "indexTree", "repositoryIdentity", "repositoryRoot", "status", "version"]); if (!top || top.version !== 1 || typeof top.coreFileMode !== "boolean" || typeof top.coreSymlinks !== "boolean") return undefined;
 	const root = canonicalBase64(top.repositoryRoot, 1024 * 1024), status = canonicalBase64(top.status); if (!root || !status || !root.length || root.includes(0) || !Buffer.from(root.toString("utf8")).equals(root) || !isPlatformAbsolutePath(root.toString("utf8"))) return undefined;
 	const identity = dataRecord(top.repositoryIdentity, ["commonDir", "commonDirFileId", "gitDir", "gitDirFileId", "rootFileId"]); if (!identity) return undefined;
 	if (![identity.gitDir, identity.commonDir].every((x) => typeof x === "string" && x.length <= 1024 * 1024 && isPlatformAbsolutePath(x) && !x.includes("\0")) || ![identity.rootFileId, identity.gitDirFileId, identity.commonDirFileId].every((x) => typeof x === "string" && x.length <= 64 && /^\d+:\d+$/.test(x))) return undefined;
@@ -450,12 +452,12 @@ function canonicalSnapshot(value: unknown): GitWorktreeSnapshot | undefined {
 		index.push({ path, entries, fingerprint: x.fingerprint });
 	}
 	let statusPaths: Buffer[]; try { statusPaths = parseUntrackedPaths(status); } catch { return undefined; } const filePaths = new Set(files.map((file) => file.path)); if (statusPaths.some((p) => !filePaths.has(p.toString("base64")))) return undefined;
-	return { version: 1, coreSymlinks: top.coreSymlinks, repositoryRoot: root.toString("base64"), repositoryIdentity: { rootFileId: identity.rootFileId as string, gitDir: identity.gitDir as string, commonDir: identity.commonDir as string, gitDirFileId: identity.gitDirFileId as string, commonDirFileId: identity.commonDirFileId as string }, headIdentity: top.headIdentity, indexTree: top.indexTree, status: status.toString("base64"), files, index };
+	return { version: 1, coreFileMode: top.coreFileMode, coreSymlinks: top.coreSymlinks, repositoryRoot: root.toString("base64"), repositoryIdentity: { rootFileId: identity.rootFileId as string, gitDir: identity.gitDir as string, commonDir: identity.commonDir as string, gitDirFileId: identity.gitDirFileId as string, commonDirFileId: identity.commonDirFileId as string }, headIdentity: top.headIdentity, indexTree: top.indexTree, status: status.toString("base64"), files, index };
 }
 export function compareGitWorktreeSnapshots(before: GitWorktreeSnapshot, after: GitWorktreeSnapshot): { changed: boolean } {
 	const a = canonicalSnapshot(before), b = canonicalSnapshot(after); if (!a || !b) throw new GitWorktreeSnapshotError("INVALID_SNAPSHOT", "Invalid Git working-tree snapshot");
 	if (a.repositoryRoot !== b.repositoryRoot || a.repositoryIdentity.rootFileId !== b.repositoryIdentity.rootFileId || a.repositoryIdentity.gitDir !== b.repositoryIdentity.gitDir || a.repositoryIdentity.commonDir !== b.repositoryIdentity.commonDir || a.repositoryIdentity.gitDirFileId !== b.repositoryIdentity.gitDirFileId || a.repositoryIdentity.commonDirFileId !== b.repositoryIdentity.commonDirFileId) throw new GitWorktreeSnapshotError("INVALID_SNAPSHOT", "Cannot compare snapshots from different repositories");
 	const equalFiles = a.files.length === b.files.length && a.files.every((x, i) => { const y = b.files[i]!; return x.path === y.path && x.kind === y.kind && x.mode === y.mode && x.size === y.size && x.fingerprint === y.fingerprint; });
 	const equalIndex = a.index.length === b.index.length && a.index.every((x, i) => { const y = b.index[i]!; return x.path === y.path && x.fingerprint === y.fingerprint && x.entries.length === y.entries.length && x.entries.every((e, j) => e === y.entries[j]); });
-	return { changed: a.coreSymlinks !== b.coreSymlinks || a.headIdentity !== b.headIdentity || a.indexTree !== b.indexTree || a.status !== b.status || !equalFiles || !equalIndex };
+	return { changed: a.coreFileMode !== b.coreFileMode || a.coreSymlinks !== b.coreSymlinks || a.headIdentity !== b.headIdentity || a.indexTree !== b.indexTree || a.status !== b.status || !equalFiles || !equalIndex };
 }

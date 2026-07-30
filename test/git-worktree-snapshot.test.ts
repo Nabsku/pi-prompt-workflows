@@ -163,6 +163,23 @@ test("core.filemode controls whether regular-file executable changes are observa
 	}
 });
 
+test("root core.filemode is validated snapshot identity even when the worktree mode is normalized", () => {
+	const cwd = repo();
+	const path = join(cwd, "executable.sh");
+	writeFileSync(path, "#!/bin/sh\necho ok\n"); chmodSync(path, 0o755);
+	execFileSync("git", ["add", "executable.sh"], { cwd });
+	execFileSync("git", ["commit", "-qm", "executable"], { cwd });
+	chmodSync(path, 0o644);
+	execFileSync("git", ["config", "core.filemode", "false"], { cwd });
+	const before = captureGitWorktreeSnapshot(cwd);
+	assert.equal(before.coreFileMode, false);
+	assert.deepEqual(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)), { changed: false });
+	execFileSync("git", ["config", "core.filemode", "true"], { cwd });
+	const after = captureGitWorktreeSnapshot(cwd);
+	assert.equal(after.coreFileMode, true);
+	assert.equal(compareGitWorktreeSnapshots(before, after).changed, true);
+});
+
 test("root core.symlinks is validated snapshot identity", () => {
 	const cwd = repo();
 	const path = join(cwd, "portable-link");
