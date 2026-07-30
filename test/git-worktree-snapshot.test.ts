@@ -57,6 +57,17 @@ test("clean to unchanged, tracked edit, and untracked creation", () => {
 	assert.equal(changed(clean, () => writeFileSync(join(clean, "new file.txt"), "new\n")), true);
 });
 
+test("replacement refs are part of snapshot identity", () => {
+	const cwd = repo();
+	writeFileSync(join(cwd, "tracked.txt"), "second\n");
+	execFileSync("git", ["commit", "-qam", "second"], { cwd });
+	const before = captureGitWorktreeSnapshot(cwd);
+	execFileSync("git", ["replace", "HEAD", "HEAD^"], { cwd });
+	assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, true);
+	execFileSync("git", ["replace", "-d", "HEAD"], { cwd });
+	assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, false);
+});
+
 test("pre-existing dirty state counts only when its content changes", () => {
 	const cwd = repo();
 	writeFileSync(join(cwd, "tracked.txt"), "dirty\n");
@@ -544,4 +555,26 @@ test("submodules consume the caller's shared maxBytes budget cumulatively", () =
 	assert.throws(() => captureGitWorktreeSnapshot(one, { maxBytes: 500 }), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "BYTE_LIMIT_EXCEEDED");
 	const two = repo(); addLargeSubmodule(two, "one"); addLargeSubmodule(two, "two"); execFileSync("git", ["commit", "-qam", "two submodules"], { cwd: two });
 	assert.throws(() => captureGitWorktreeSnapshot(two, { maxBytes: 1_500 }), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "BYTE_LIMIT_EXCEEDED");
+});
+
+test("submodules consume the caller's shared maxFiles budget cumulatively", () => {
+	const emptyRepo = () => {
+		const cwd = mkdtempSync(join(tmpdir(), "git-snapshot-parent-"));
+		execFileSync("git", ["init", "-q"], { cwd });
+		execFileSync("git", ["config", "user.email", "test@example.com"], { cwd });
+		execFileSync("git", ["config", "user.name", "Test User"], { cwd });
+		return cwd;
+	};
+	const add = (cwd: string, name: string, fileCount: number) => {
+		const source = emptyRepo();
+		for (let i = 0; i < fileCount; i++) writeFileSync(join(source, `f${i}`), `${i}\n`);
+		execFileSync("git", ["add", "."], { cwd: source }); execFileSync("git", ["commit", "-qm", "files"], { cwd: source });
+		execFileSync("git", ["-c", "protocol.file.allow=always", "submodule", "add", "-q", source, name], { cwd });
+	};
+	const one = emptyRepo(); add(one, "sub", 3); execFileSync("git", ["commit", "-qam", "sub"], { cwd: one });
+	assert.throws(() => captureGitWorktreeSnapshot(one, { maxFiles: 2 }), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "FILE_LIMIT_EXCEEDED");
+	assert.doesNotThrow(() => captureGitWorktreeSnapshot(one, { maxFiles: 5 }));
+	const two = emptyRepo(); add(two, "a", 2); add(two, "b", 2); execFileSync("git", ["commit", "-qam", "subs"], { cwd: two });
+	assert.throws(() => captureGitWorktreeSnapshot(two, { maxFiles: 6 }), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "FILE_LIMIT_EXCEEDED");
+	assert.doesNotThrow(() => captureGitWorktreeSnapshot(two, { maxFiles: 7 }));
 });

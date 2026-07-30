@@ -97,7 +97,12 @@ function analyzeCalls(steps: readonly StructuredChainStep[], maxSteps: number, m
 	const seen = new Set<string>(); const terminal: number[] = []; const terminalCosts: number[] = []; const reachableCosts: number[] = [0]; const exhausted: string[] = []; const routeDiagnostics = new Set<string>();
 	const inconclusive = () => {
 		const initial = analyzeInitialPath(steps, { maxSteps, maxModelCalls: maxCalls }, promptCosts, modelRoutes, initialModel);
-		const conservativeCost = maxCalls * Math.max(0, ...promptCosts);
+		const routeCosts = modelRoutes?.flatMap((routes) => [...routes.values()].map((route) => route.cost)) ?? [];
+		const maximumPreparedCallCost = Math.max(0, ...promptCosts, ...routeCosts);
+		const multiplied = maxCalls > 0 && maximumPreparedCallCost > Math.floor(Number.MAX_SAFE_INTEGER / maxCalls)
+			? Number.MAX_SAFE_INTEGER
+			: maxCalls * maximumPreparedCallCost;
+		const conservativeCost = Math.max(multiplied, initial.cost, ...reachableCosts);
 		return { bounds: { minimum: 0, maximum: maxCalls, exact: false, explanation: `Unavailable: graph analysis exceeded the deterministic ${MAX_ADAPTIVE_PREFLIGHT_STATES}-state limit; 0..maxModelCalls is conservative, not an exact completing-path bound.` }, costs: { minimumCompleting: 0, maximumCompleting: conservativeCost, maximumReachable: conservativeCost, initialFallthrough: initial.cost, initialPathStatus: initial.status, exact: false, method: PROMPT_TOKEN_ESTIMATE_METHOD, explanation: `Unavailable: graph analysis exceeded the deterministic ${MAX_ADAPTIVE_PREFLIGHT_STATES}-state limit; cost bounds are conservative and must not be treated as exact.` }, pathAnalysis: { hasCompletingPath: false, hasExhaustedPath: false, exhaustedReasons: [], exhaustedPathCount: 0 }, analysis: { complete: false, analyzedStates, enqueuedStates, stateLimit: MAX_ADAPTIVE_PREFLIGHT_STATES }, diagnostic: `analysis inconclusive: state limit ${MAX_ADAPTIVE_PREFLIGHT_STATES} exceeded` };
 	};
 	const enqueue = (createState: () => State): boolean => {
@@ -180,6 +185,20 @@ export function createAdaptivePreflight(wrapper: PromptWithModel, catalog: Reado
 export async function prepareAdaptivePreflight(wrapper: PromptWithModel, catalog: ReadonlyMap<string, PromptWithModel>, options: { cwd: string; runtimeCwd?: string; args: string[]; modelOverride?: string; currentModel?: Model<any>; modelRegistry: RegistryLike; commands?: RuntimeSkillCommand[] }): Promise<AdaptivePreflight> {
 	const base = createAdaptivePreflight(wrapper, catalog, options.cwd, options.runtimeCwd);
 	const diagnostics = [...base.diagnostics];
+	const modelKey = (model: Model<any> | undefined) => model ? `${model.provider}/${model.id}` : "";
+	const activeModels = new Map<string, Model<any> | undefined>();
+	activeModels.set(modelKey(options.currentModel), options.currentModel);
+	const selectableSpecs = new Set(base.steps.flatMap((step) => {
+		const target = catalog.get(step.target);
+		return target ? (options.modelOverride ? [options.modelOverride] : target.models) : [];
+	}));
+	for (const spec of selectableSpecs) for (const model of getModelCandidates(spec, options.modelRegistry)) activeModels.set(modelKey(model), model);
+	const promptStepCount = base.steps.filter((step, index) => step.kind === "prompt" && !!catalog.get(step.target) && base.targets[index]!.issues.length === 0).length;
+	const preparationProduct = promptStepCount * activeModels.size;
+	if (!Number.isSafeInteger(preparationProduct) || preparationProduct > MAX_ADAPTIVE_PREFLIGHT_STATES) {
+		const diagnostic = `analysis inconclusive: route preparation product ${promptStepCount}×${activeModels.size}=${preparationProduct} exceeds configured cap ${MAX_ADAPTIVE_PREFLIGHT_STATES}`;
+		return { ...base, diagnostics: [...diagnostics, diagnostic], status: "blocked", analysis: { complete: false, analyzedStates: 0, enqueuedStates: 0, stateLimit: MAX_ADAPTIVE_PREFLIGHT_STATES }, callBounds: { ...base.callBounds, exact: false, explanation: diagnostic }, promptCostBounds: { ...base.promptCostBounds, exact: false, explanation: diagnostic } };
+	}
 	const targetIndependentIssues: Array<string | undefined> = new Array(base.targets.length);
 	const targets = await Promise.all(base.targets.map(async (summary, index) => {
 		const step = base.steps[index]!; const target = catalog.get(step.target);
@@ -205,13 +224,6 @@ export async function prepareAdaptivePreflight(wrapper: PromptWithModel, catalog
 		const bodyCost = estimatePromptTokens(content);
 		const skillPromptCost = loaded.length ? estimatePromptTokens(buildSkillLoadedMessage(loaded).content) : undefined;
 		return { ...summary, status: budget.message ? "blocked" as const : "ready" as const, effectiveModel: `${prepared.selectedModel.model.provider}/${prepared.selectedModel.model.id}`, budgetVerdict: budget.message ? "exceeded" : budget.warning ? "warning" : "ok", promptCost: bodyCost, skillPromptCost, skills: loaded.map((skill) => skill.skillName), issues: budget.message ? [...summary.issues, budget.message] : summary.issues };
-	}));
-	const modelKey = (model: Model<any> | undefined) => model ? `${model.provider}/${model.id}` : "";
-	const activeModels = new Map<string, Model<any> | undefined>();
-	activeModels.set(modelKey(options.currentModel), options.currentModel);
-	const selectableSpecs = new Set(base.steps.flatMap((step) => {
-		const target = catalog.get(step.target);
-		return target ? (options.modelOverride ? [options.modelOverride] : target.models) : [];
 	}));
 	// Expand specs exactly as runtime selection does. In particular, a bare `b`
 	// resolves to a concrete `provider/b` route state rather than being compared

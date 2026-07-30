@@ -219,3 +219,34 @@ test("adaptive preflight expands bare model specs into concrete later-route stat
 	assert.equal(result.status, "blocked");
 	assert.deepEqual(result.diagnostics, ["Step later (later) for active model test/b: Prompt `later` estimated 3 tokens exceeds configured maximum of 2."]);
 });
+
+test("adaptive preflight bounds route preparation before the step-model product", async () => {
+	const models = Array.from({ length: 4096 }, (_, id) => ({ provider: "test", id: `m${id}` })) as any[];
+	const steps = Array.from({ length: 100 }, (_, index) => ({ id: `s${index}`, kind: "prompt" as const, target: "target", when: "always" as const }));
+	const wrapper = prompt("wide", { adaptiveChain: { limits: { maxSteps: 100, maxModelCalls: 100 }, steps } });
+	const catalog = new Map([["target", prompt("target", { models: models.map((model) => `test/${model.id}`) })]]);
+	let probes = 0;
+	const registry = { find: (provider: string, id: string) => { probes++; return models.find((model) => model.provider === provider && model.id === id); }, getAll: () => models, getAvailable: () => models } as any;
+	const started = performance.now();
+	const result = await prepareAdaptivePreflight(wrapper, catalog, { cwd: "/repo", args: [], currentModel: models[0], modelRegistry: registry });
+	assert.equal(result.status, "blocked");
+	assert.match(result.diagnostics.join("\n"), /route preparation product 100×4096=409600 exceeds configured cap 4096/);
+	assert.equal(result.analysis.complete, false);
+	assert.ok(probes <= MAX_ADAPTIVE_PREFLIGHT_STATES);
+	assert.ok(performance.now() - started < 2_000);
+});
+
+test("inconclusive adaptive cost bound includes every prepared switched-model route", async () => {
+	const steps = Array.from({ length: 128 }, (_, index) => ({ id: `step-${index}`, kind: "prompt" as const, target: index === 0 ? "switch" : "costly", when: "always" as const, onFailure: index + 2 < 128 ? `step-${index + 2}` : undefined }));
+	const wrapper = prompt("branching-cost", { adaptiveChain: { limits: { maxSteps: 128, maxModelCalls: 128 }, steps } });
+	const catalog = new Map([
+		["switch", prompt("switch", { models: ["test/b"], content: "x" })],
+		["costly", prompt("costly", { models: ["test/a", "test/b"], content: `<if-model is="test/a">x</if-model><if-model is="test/b">${"z".repeat(4000)}</if-model>` })],
+	]);
+	const a = { provider: "test", id: "a" } as any, b = { provider: "test", id: "b" } as any;
+	const registry = { find: (provider: string, id: string) => [a, b].find((model) => model.provider === provider && model.id === id), getAll: () => [a, b], getAvailable: () => [a, b] } as any;
+	const result = await prepareAdaptivePreflight(wrapper, catalog, { cwd: "/repo", args: [], currentModel: a, modelRegistry: registry });
+	assert.equal(result.analysis.complete, false);
+	assert.ok(result.promptCostBounds.maximumReachable >= result.promptCostBounds.initialFallthrough);
+	assert.ok(result.promptCostBounds.maximumReachable >= 128 * 1000);
+});
