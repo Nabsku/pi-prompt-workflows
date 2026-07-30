@@ -489,6 +489,17 @@ test("index stat-cache refresh is unchanged while semantic staged changes remain
 	assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, true);
 });
 
+test("intent-to-add becoming fully staged changes semantic index identity", () => {
+	for (const [name, content] of [["empty.txt", ""], ["nonempty.txt", "content\n"]] as const) {
+		const cwd = repo();
+		writeFileSync(join(cwd, name), content);
+		execFileSync("git", ["add", "-N", "--", name], { cwd });
+		const intent = captureGitWorktreeSnapshot(cwd);
+		execFileSync("git", ["add", "--", name], { cwd });
+		assert.equal(compareGitWorktreeSnapshots(intent, captureGitWorktreeSnapshot(cwd)).changed, true, `${name}: clearing intent-to-add is semantic`);
+	}
+});
+
 test("HEAD verification accepts true unborn refs but rejects existing refs with missing objects", () => {
 	const unborn = mkdtempSync(join(tmpdir(), "git-snapshot-unborn-")); execFileSync("git", ["init", "-q"], { cwd: unborn });
 	assert.match(captureGitWorktreeSnapshot(unborn).headIdentity, /^unborn:/);
