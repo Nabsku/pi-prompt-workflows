@@ -2873,6 +2873,22 @@ test("loadPromptsWithModel excludes structured chains by default and includes th
 	});
 });
 
+test("structured adaptive wrappers reject legacy loop controls", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const dir = join(cwd, ".pi", "prompts");
+		mkdirSync(dir, { recursive: true });
+		for (const [name, controls] of [["loop", "loop: 2"], ["combined", "loop: 2\nfresh: true\nconverge: false"]]) {
+			writeFileSync(join(dir, `${name}.md`), `---\nchain:\n  - prompt: step\nlimits:\n  maxSteps: 1\n  maxModelCalls: 1\n${controls}\n---\nignored`);
+		}
+		const result = loadPromptsWithModel(cwd, false, { includeAdaptiveChains: true });
+		assert.equal(result.prompts.has("loop"), false);
+		assert.equal(result.prompts.has("combined"), false);
+		assert.equal(result.diagnostics.filter((item) => item.code === "invalid-adaptive-loop-controls").length, 2);
+		assert.match(result.diagnostics.find((item) => item.filePath.endsWith("combined.md"))?.message ?? "", /loop, fresh, converge/);
+	});
+});
+
 test("loadPromptsWithModel skips invalid structured chains visibly", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
