@@ -68,6 +68,22 @@ test("detects clean to staged edit and an index-only replacement in pre-dirty MM
 	assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, true);
 });
 
+test("snapshots a staged new tree with read-only object storage without creating objects", () => {
+	const cwd = repo();
+	writeFileSync(join(cwd, "new.txt"), "new staged content\n");
+	execFileSync("git", ["add", "new.txt"], { cwd });
+	const objects = join(cwd, ".git", "objects");
+	const before = execFileSync("git", ["count-objects", "-v"], { cwd, encoding: "utf8" });
+	execFileSync("chmod", ["-R", "a-w", objects]);
+	try {
+		const snapshot = captureGitWorktreeSnapshot(cwd);
+		assert.match(snapshot.indexTree, /^[0-9a-f]{64}$/);
+		assert.equal(execFileSync("git", ["count-objects", "-v"], { cwd, encoding: "utf8" }), before);
+	} finally {
+		execFileSync("chmod", ["-R", "u+w", objects]);
+	}
+});
+
 test("fingerprints staged add, delete, and rename index states", () => {
 	for (const action of [
 		(cwd: string) => { writeFileSync(join(cwd, "new.txt"), "new\n"); execFileSync("git", ["add", "new.txt"], { cwd }); },
