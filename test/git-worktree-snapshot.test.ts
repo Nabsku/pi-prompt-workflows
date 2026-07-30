@@ -532,3 +532,16 @@ test("clearing resolve-undo metadata changes semantic index identity", () => {
 	execFileSync("git", ["update-index", "--clear-resolve-undo"], { cwd });
 	assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, true);
 });
+
+test("submodules consume the caller's shared maxBytes budget cumulatively", () => {
+	const addLargeSubmodule = (cwd: string, name: string) => {
+		const source = repo();
+		writeFileSync(join(source, "tracked.txt"), "x".repeat(1_000));
+		execFileSync("git", ["commit", "-qam", "large content"], { cwd: source });
+		execFileSync("git", ["-c", "protocol.file.allow=always", "submodule", "add", "-q", source, name], { cwd });
+	};
+	const one = repo(); addLargeSubmodule(one, "large"); execFileSync("git", ["commit", "-qam", "one submodule"], { cwd: one });
+	assert.throws(() => captureGitWorktreeSnapshot(one, { maxBytes: 500 }), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "BYTE_LIMIT_EXCEEDED");
+	const two = repo(); addLargeSubmodule(two, "one"); addLargeSubmodule(two, "two"); execFileSync("git", ["commit", "-qam", "two submodules"], { cwd: two });
+	assert.throws(() => captureGitWorktreeSnapshot(two, { maxBytes: 1_500 }), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "BYTE_LIMIT_EXCEEDED");
+});

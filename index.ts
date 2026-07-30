@@ -2892,7 +2892,16 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				async executeRun(prompt) {
 					if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return { status: "blocked", error: new Error(`Adaptive run step ${prompt.name} was not approved`) };
 					const deterministic = { ...prompt.deterministic!, cwd: runtimeCwd ?? prompt.deterministic!.cwd ?? fallbackCwd };
-					return normalizeDeterministicExecutionOutcome(await runDeterministicStep(prompt, deterministic, ctx.cwd, ctx.signal));
+					const result = await runDeterministicStep(prompt, deterministic, ctx.cwd, ctx.signal);
+					// Publish the same bounded result card as ordinary deterministic execution
+					// before the router can dispatch an onSuccess/onFailure prompt.
+					pi.sendMessage({
+						customType: PROMPT_TEMPLATE_DETERMINISTIC_MESSAGE_TYPE,
+						content: buildDeterministicPreamble(result),
+						display: true,
+						details: result,
+					});
+					return normalizeDeterministicExecutionOutcome(result);
 				},
 				captureSnapshot(_step, cwd) { return captureGitWorktreeSnapshot(cwd); },
 				compareSnapshots: compareGitWorktreeSnapshots,

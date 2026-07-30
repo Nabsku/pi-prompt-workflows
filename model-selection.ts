@@ -62,7 +62,7 @@ function orderMatchesByProviderPreference(models: Model<any>[]): Model<any>[] {
 	return prioritized;
 }
 
-function getModelCandidates(modelSpec: string, registry: Pick<RegistryLike, "find" | "getAll">): Model<any>[] {
+export function getModelCandidates(modelSpec: string, registry: Pick<RegistryLike, "find" | "getAll">): Model<any>[] {
 	const slashIndex = modelSpec.indexOf("/");
 
 	if (slashIndex !== -1) {
