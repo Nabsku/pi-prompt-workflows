@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import promptModelExtension from "../index.ts";
+import { PROMPT_TEMPLATE_DETERMINISTIC_MESSAGE_TYPE } from "../deterministic-step.ts";
 
 const MODEL = { provider: "test", id: "model" };
 
@@ -148,5 +149,23 @@ test("adaptive send failure does not leak its pending skill payload into a later
 		const ctx: any = { cwd, model: MODEL, signal: new AbortController().signal, hasUI: false, modelRegistry: { find: () => MODEL, getAll: () => [MODEL], getAvailable: () => [MODEL] }, ui: { notify() {}, setStatus() {}, setWorkingMessage() {}, onTerminalInput() { return () => {}; }, theme: { fg(_x: string, value: string) { return value; } } }, isIdle: () => false, waitForIdle: async () => {}, sessionManager: { getLeafId: () => "root", getBranch: () => [] }, navigateTree: async () => ({ cancelled: false }) };
 		promptModelExtension(pi); await handlers.get("session_start")({}, ctx); await commands.get("flow").handler("", ctx);
 		assert.equal(await handlers.get("before_agent_start")({ systemPrompt: "BASE" }, ctx), undefined);
+	} finally { process.env.HOME = oldHome; rmSync(root, { recursive: true, force: true }); }
+});
+
+test("adaptive run publishes bounded output before routing to its success prompt", async () => {
+	const root = mkdtempSync(join(tmpdir(), "adaptive-run-output-")); const oldHome = process.env.HOME; process.env.HOME = join(root, "home");
+	try {
+		const cwd = join(root, "repo"); const dir = join(cwd, ".pi", "prompts"); mkdirSync(dir, { recursive: true }); mkdirSync(process.env.HOME, { recursive: true }); execFileSync("git", ["init", "-q"], { cwd });
+		writeFileSync(join(dir, "check.md"), "---\nrun: printf 'visible output'\nhandoff: never\n---\nignored");
+		writeFileSync(join(dir, "after.md"), "---\nmodel: test/model\n---\nAFTER");
+		writeFileSync(join(dir, "flow.md"), "---\nchain:\n  - id: check\n    run: check\n    onSuccess: after\n  - id: after\n    prompt: after\nlimits:\n  maxSteps: 2\n  maxModelCalls: 1\n---\nignored");
+		const commands = new Map<string, any>(); const events: any[] = []; const branch: any[] = [{ id: "root", type: "message", message: { role: "user", content: "root" } }];
+		const pi: any = { registerCommand(name: string, command: any) { commands.set(name, command); }, registerMessageRenderer() {}, registerTool() {}, getCommands() { return []; }, on(event: string, handler: any) { if (event === "session_start") this.start = handler; }, async setModel() { return true; }, getThinkingLevel() { return "medium"; }, setThinkingLevel() {}, sendUserMessage(value: string) { events.push({ kind: "prompt", value }); }, sendMessage(value: any) { events.push({ kind: "result", value }); } };
+		const ctx: any = { cwd, model: MODEL, signal: new AbortController().signal, hasUI: false, modelRegistry: { find: () => MODEL, getAll: () => [MODEL], getAvailable: () => [MODEL] }, ui: { notify() {}, setStatus() {}, setWorkingMessage() {}, onTerminalInput() { return () => {}; }, theme: { fg(_x: string, value: string) { return value; } } }, isIdle: () => false, async waitForIdle() { branch.push({ id: "answer", type: "message", message: { role: "assistant", content: [{ type: "text", text: "ok" }], stopReason: "stop" } }); }, sessionManager: { getLeafId: () => branch.at(-1)?.id ?? "root", getBranch: () => branch }, navigateTree: async () => ({ cancelled: false }) };
+		promptModelExtension(pi); await pi.start({}, ctx); await commands.get("flow").handler("", ctx);
+		assert.equal(events[0].kind, "result");
+		assert.equal(events[0].value.customType, PROMPT_TEMPLATE_DETERMINISTIC_MESSAGE_TYPE);
+		assert.match(events[0].value.details.stdout, /visible output/);
+		assert.deepEqual(events.slice(1).map((event) => event.value), ["AFTER"]);
 	} finally { process.env.HOME = oldHome; rmSync(root, { recursive: true, force: true }); }
 });

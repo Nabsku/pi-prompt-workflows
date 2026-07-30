@@ -203,3 +203,19 @@ test("adaptive renderers sanitize and cap untrusted fields and show outcomes", (
 	assert.match(unobserved, /succeeded; changed=unobserved/);
 	assert.doesNotMatch(report, /\u001b/);
 });
+
+test("adaptive preflight expands bare model specs into concrete later-route states", async () => {
+	const wrapper = prompt("flow", { adaptiveChain: { limits: { maxSteps: 2, maxModelCalls: 2 }, steps: [
+		{ id: "switch", kind: "prompt", target: "switch", when: "always" },
+		{ id: "later", kind: "prompt", target: "later", when: "always" },
+	] } });
+	const catalog = new Map([
+		["switch", prompt("switch", { models: ["b"], content: "BBBB" })],
+		["later", prompt("later", { models: ["test/a", "test/b"], budget: { maxTokens: 2 }, content: "<if-model is=\"test/a\"></if-model><if-model is=\"test/b\">BBBBBBBBBBBB</if-model>" })],
+	]);
+	const a = { provider: "test", id: "a" } as any, b = { provider: "test", id: "b" } as any;
+	const registry = { find: (provider: string, id: string) => [a, b].find((model) => model.provider === provider && model.id === id), getAll: () => [a, b], getAvailable: () => [a, b] } as any;
+	const result = await prepareAdaptivePreflight(wrapper, catalog, { cwd: "/repo", args: [], currentModel: a, modelRegistry: registry });
+	assert.equal(result.status, "blocked");
+	assert.deepEqual(result.diagnostics, ["Step later (later) for active model test/b: Prompt `later` estimated 3 tokens exceeds configured maximum of 2."]);
+});
