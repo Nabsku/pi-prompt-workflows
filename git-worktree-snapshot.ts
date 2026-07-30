@@ -229,6 +229,22 @@ function parseSkipWorktreePaths(output: Buffer): Set<string> {
 	}
 	return paths;
 }
+function submoduleSemanticMetadata(cwd: string, maxGit: number, deadline: CaptureDeadline): { oid: string; fileMode: boolean; symlinks: boolean; digest: string } {
+	let symbolic = "";
+	try { symbolic = oneLine(runGit(cwd, ["symbolic-ref", "-q", "HEAD"], "GIT_ERROR", maxGit, deadline), "submodule symbolic HEAD"); }
+	catch (error: any) { if (error?.cause?.status !== 1) throw error; }
+	const oid = oneLine(runGit(cwd, ["rev-parse", "--verify", "HEAD^{commit}"], "GIT_ERROR", maxGit, deadline), "submodule HEAD");
+	const replacementRefs = replacementRefsIdentity(cwd, maxGit, deadline);
+	const fileMode = readCoreFileMode(cwd, maxGit, deadline);
+	const symlinks = readCoreSymlinks(cwd, maxGit, deadline);
+	const headIdentity = resolvedHeadIdentity(symbolic, oid, replacementRefs);
+	const digest = createHash("sha256").update("submodule-semantic-metadata-v1\0")
+		.update(headIdentity).update(Buffer.from([0])).update(oid).update(Buffer.from([0]))
+		.update(replacementRefs).update(Buffer.from([0]))
+		.update(fileMode ? "core.filemode=true" : "core.filemode=false").update(Buffer.from([0]))
+		.update(symlinks ? "core.symlinks=true" : "core.symlinks=false").digest("hex");
+	return { oid, fileMode, symlinks, digest };
+}
 function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: number, deadline: CaptureDeadline, remainingBytes: number, remainingFiles: number, skipWorktree = false): { materialized: boolean; consumed: number; files: number; replacementRefs: string } {
 	const relative = path.toString("utf8");
 	if (!Buffer.from(relative).equals(path)) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule path is not safely observable");
@@ -243,15 +259,13 @@ function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: n
 	if (!stat.isDirectory() || stat.isSymbolicLink()) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule is uninitialized or unobservable");
 	const match = /^160000 ([0-9a-f]+) 0$/.exec(metadata.toString("ascii"));
 	if (!match) throw new GitWorktreeSnapshotError("INVALID_INDEX", "Malformed Git submodule index entry");
-	let head: string;
-	try { head = oneLine(runGit(full, ["rev-parse", "--verify", "HEAD^{commit}"], "GIT_ERROR", maxGit, deadline), "submodule HEAD"); }
+	let semanticMetadata: ReturnType<typeof submoduleSemanticMetadata>;
+	try { semanticMetadata = submoduleSemanticMetadata(full, maxGit, deadline); }
 	catch (cause) { throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule is uninitialized or unobservable", { cause }); }
-	if (head !== match[1]) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule HEAD does not match its staged gitlink");
+	if (semanticMetadata.oid !== match[1]) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule HEAD does not match its staged gitlink");
 	let consumed = 0, verifiedFiles = 0;
-	const replacementRefs = replacementRefsIdentity(full, maxGit, deadline);
 	try {
-		const fileMode = readCoreFileMode(full, maxGit, deadline);
-		const symlinks = readCoreSymlinks(full, maxGit, deadline);
+		const { fileMode, symlinks } = semanticMetadata;
 		// Check HEAD versus the index without consulting worktree filters, then
 		// compare every indexed path to its raw, no-filter object id.
 		runGit(full, ["diff-index", "--cached", "--quiet", "HEAD", "--"], "GIT_ERROR", maxGit, deadline);
@@ -284,7 +298,6 @@ function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: n
 			if (oid !== entry[2] || JSON.stringify(first.snapshot) !== JSON.stringify(second.snapshot)) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule worktree differs from its index");
 		}
 		if (runGit(full, ["ls-files", "--others", "--exclude-standard", "-z"], "GIT_ERROR", maxGit, deadline).length) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule has untracked content");
-		if (replacementRefsIdentity(full, maxGit, deadline) !== replacementRefs) throw new GitWorktreeSnapshotError("RACE_DETECTED", "Submodule replacement refs changed during snapshot capture");
 		const verifiedIndexIdentity = semanticIndexIdentity(
 			runGit(full, ["ls-files", "--stage", "-z"], "GIT_ERROR", maxGit, deadline),
 			runGit(full, ["ls-files", "-v", "-z"], "GIT_ERROR", maxGit, deadline),
@@ -292,12 +305,13 @@ function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: n
 			runGit(full, ["ls-files", "--debug", "-z"], "GIT_ERROR", maxGit, deadline),
 		);
 		if (verifiedIndexIdentity !== indexIdentity) throw new GitWorktreeSnapshotError("RACE_DETECTED", "Submodule index changed during snapshot capture");
-		return { materialized: true, consumed, files: verifiedFiles, replacementRefs: createHash("sha256").update(replacementRefs).update(Buffer.from([0])).update(indexIdentity).digest("hex") };
+		if (submoduleSemanticMetadata(full, maxGit, deadline).digest !== semanticMetadata.digest) throw new GitWorktreeSnapshotError("RACE_DETECTED", "Submodule semantic metadata changed during snapshot capture");
+		return { materialized: true, consumed, files: verifiedFiles, replacementRefs: createHash("sha256").update(semanticMetadata.digest).update(Buffer.from([0])).update(indexIdentity).digest("hex") };
 	} catch (cause) {
 		if (cause instanceof GitWorktreeSnapshotError && (cause.code === "UNSUPPORTED_SUBMODULE" || cause.code === "BYTE_LIMIT_EXCEEDED" || cause.code === "FILE_LIMIT_EXCEEDED" || cause.code === "RACE_DETECTED")) throw cause;
 		throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule is dirty or unobservable", { cause });
 	}
-	return { materialized: true, consumed, files: verifiedFiles, replacementRefs };
+	return { materialized: true, consumed, files: verifiedFiles, replacementRefs: semanticMetadata.digest };
 }
 
 function replacementRefsIdentity(cwd: string, maxGit: number, deadline: CaptureDeadline): string {
