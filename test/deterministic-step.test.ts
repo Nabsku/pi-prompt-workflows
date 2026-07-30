@@ -16,6 +16,17 @@ async function withTempDir(run: (root: string) => Promise<void>) {
 	}
 }
 
+async function waitForFile(path: string, signal: AbortSignal): Promise<void> {
+	while (!existsSync(path)) {
+		if (signal.aborted) throw signal.reason ?? new Error(`Timed out waiting for ${path}`);
+		await new Promise<void>((resolve, reject) => {
+			const abort = () => { clearTimeout(timer); reject(signal.reason); };
+			const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, 10);
+			signal.addEventListener("abort", abort, { once: true });
+		});
+	}
+}
+
 test("runDeterministicStep resolves relative script paths from the prompt file first", async () => {
 	await withTempDir(async (root) => {
 		const promptDir = join(root, "prompts");
@@ -165,16 +176,14 @@ test("formatDeterministicExecution formats command and script executions for dis
 	assert.match(formatDeterministicExecution({ kind: "script", path: "./demo.sh", args: ["--x"] }, "/tmp/demo.sh"), /\/tmp\/demo\.sh/);
 });
 
-test("abort escalates a TERM-resistant same-group descendant after the leader exits", { skip: process.platform === "win32" }, async () => {
+test("abort escalates a TERM-resistant same-group descendant after the leader exits", { skip: process.platform === "win32", timeout: 15_000 }, async (t) => {
 	await withTempDir(async (root) => {
 		const pidFile = join(root, "descendant.pid");
 		const leader = `const {spawn}=require('node:child_process'); const fs=require('node:fs'); const child=spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)\"],{stdio:['ignore','ignore','ignore']}); fs.writeFileSync(${JSON.stringify(pidFile)},String(child.pid)); process.on('SIGTERM',()=>process.exit(0)); setInterval(()=>{},1000);`;
 		const command = `node -e ${JSON.stringify(leader)}`;
 		const controller = new AbortController();
 		const running = runDeterministicStep({ filePath: join(root, "prompt.md") } as never, { execution: { kind: "run", command }, handoff: "never", nonInteractive: true, timeoutMs: 8_000 }, root, controller.signal);
-		const readyDeadline = performance.now() + 2_000;
-		while (!existsSync(pidFile) && performance.now() < readyDeadline) await new Promise((resolve) => setTimeout(resolve, 10));
-		assert.equal(existsSync(pidFile), true, "descendant PID must be published within the bounded readiness wait");
+		await waitForFile(pidFile, t.signal);
 		const started = performance.now();
 		controller.abort();
 		const result = await running;
@@ -184,5 +193,18 @@ test("abort escalates a TERM-resistant same-group descendant after the leader ex
 		assert.ok(performance.now() - started < 2_000, "cleanup must not leak to the 8s deadline");
 		const pid = Number((await import("node:fs")).readFileSync(pidFile, "utf8"));
 		await assertProcessExtinct(pid);
+	});
+});
+
+test("timeout directly kills a live TERM-resistant absolute Node command without ps in PATH", { skip: process.platform === "win32", timeout: 15_000 }, async () => {
+	await withTempDir(async (root) => {
+		const result = await runDeterministicStep(
+			{ filePath: join(root, "prompt.md") } as never,
+			{ execution: { kind: "command", command: process.execPath, args: ["-e", "process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)"], shell: false }, handoff: "never", nonInteractive: true, timeoutMs: 100, env: { PATH: root } },
+			root,
+		);
+		assert.equal(result.timedOut, true);
+		assert.equal(result.exitCode, null);
+		assert.ok(result.durationMs < 5_000, "direct leader escalation must remain bounded without ps");
 	});
 });

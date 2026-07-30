@@ -129,7 +129,9 @@ export function isAdaptivePromptTarget(target: PromptWithModel | undefined): boo
 
 export function isAdaptiveRunTarget(target: PromptWithModel | undefined): target is PromptWithModel & { deterministic: NonNullable<PromptWithModel["deterministic"]> } {
 	return !!target && !target.chain && !target.adaptiveChain
-		&& !!target.deterministic && target.deterministic.handoff === "never";
+		&& !!target.deterministic && target.deterministic.handoff === "never"
+		&& getRequestedSkills(target).length === 0
+		&& !target.workers && !target.reviewers && !target.finalApplier && !target.preset;
 }
 
 function targetIssues(step: StructuredChainStep, target: PromptWithModel | undefined): string[] {
@@ -137,6 +139,8 @@ function targetIssues(step: StructuredChainStep, target: PromptWithModel | undef
 	if (target.chain || target.adaptiveChain) return ["Nested/adaptive/parallel chain targets are unsupported."];
 	if (step.kind === "run") {
 		if (!target.deterministic) return ["Kind mismatch: run target is not deterministic."];
+		if (getRequestedSkills(target).length) return ["Adaptive run targets cannot declare skills because deterministic execution does not consume skill context."];
+		if (target.workers || target.reviewers || target.finalApplier || target.preset) return ["Adaptive run targets cannot declare compare/best-of-N fields."];
 		return isAdaptiveRunTarget(target) ? [] : ["Deterministic handoff can add a model call and is unsupported."];
 	}
 	if (isAdaptivePromptTarget(target)) return [];

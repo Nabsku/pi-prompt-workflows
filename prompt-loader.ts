@@ -2640,7 +2640,7 @@ export function collectPromptSourceRecords(cwd: string, includePlainPrompts = tr
 	const recordMap = new Map<string, PromptSourceRecord[]>();
 	const inventoryRecords: PromptSourceRecord[] = [];
 	const diagnostics: PromptLoaderDiagnostic[] = [];
-	const loaderResult = loadPromptsWithModel(cwd, includePlainPrompts);
+	const loaderResult = loadPromptsWithModel(cwd, includePlainPrompts, { includeAdaptiveChains: true });
 	const effectivePromptPaths = new Set([...loaderResult.prompts.values()].map((prompt) => prompt.filePath));
 
 	function replaceRecord(bucket: PromptSourceRecord[], existing: PromptSourceRecord, record: PromptSourceRecord): PromptSourceRecord[] {

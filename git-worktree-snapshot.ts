@@ -92,16 +92,10 @@ function splitNul(output: Buffer, code: "INVALID_STATUS" | "INVALID_INDEX" = "IN
 	for (let i = 0; i < output.length; i++) if (output[i] === 0) { records.push(output.subarray(start, i)); start = i + 1; }
 	return records;
 }
-function parseStatusPaths(output: Buffer): Buffer[] {
-	const records = splitNul(output); const paths: Buffer[] = [];
-	for (let i = 0; i < records.length; i++) {
-		const record = records[i]!;
-		if (record.length < 4 || record[2] !== 0x20) throw new GitWorktreeSnapshotError("INVALID_STATUS", "Malformed Git porcelain status record");
-		paths.push(Buffer.from(record.subarray(3)));
-		if ([record[0], record[1]].some((v) => v === 0x52 || v === 0x43)) { const source = records[++i]; if (!source) throw new GitWorktreeSnapshotError("INVALID_STATUS", "Rename/copy omitted source"); paths.push(Buffer.from(source)); }
-	}
-	const unique = new Map<string, Buffer>(); for (const path of paths) unique.set(path.toString("base64"), path);
-	return [...unique].sort(([a], [b]) => a.localeCompare(b)).map(([, p]) => p);
+function parseUntrackedPaths(output: Buffer): Buffer[] {
+	const unique = new Map<string, Buffer>();
+	for (const path of splitNul(output)) unique.set(path.toString("base64"), Buffer.from(path));
+	return [...unique].sort(([a], [b]) => a.localeCompare(b)).map(([, path]) => path);
 }
 function fingerprintIndex(paths: readonly Buffer[], output: Buffer, maxRecords: number): GitIndexPathSnapshot[] {
 	const wanted = new Map(paths.map((p) => [p.toString("base64"), [] as Buffer[]])); let count = 0;
@@ -155,7 +149,8 @@ function hashFile(path: Buffer, pre: Stats, remaining: number): { fingerprint: s
 function fingerprint(root: Buffer, path: Buffer, remaining: number): { snapshot: GitWorktreeFileSnapshot; consumed: number } {
 	const full = absolutePath(root, path); assertNoSymlinkedAncestors(root, path); let stat;
 	try { stat = lstatSync(full); } catch (cause: any) { if (cause?.code === "ENOENT" || cause?.code === "ENOTDIR") return { snapshot: { path: path.toString("base64"), kind: "missing" }, consumed: 0 }; throw new GitWorktreeSnapshotError("IO_ERROR", "Unable to inspect working-tree path", { cause }); }
-	const mode = stat.mode & 0o7777;
+	// Git tracks only the executable bit for regular files.
+	const mode = stat.isFile() ? ((stat.mode & 0o111) ? 0o755 : 0o644) : stat.mode & 0o7777;
 	if (stat.isSymbolicLink()) { try { const target = readlinkSync(full, { encoding: "buffer" }); const after = lstatSync(full); if (!after.isSymbolicLink() || after.dev !== stat.dev || after.ino !== stat.ino || after.mode !== stat.mode) throw new GitWorktreeSnapshotError("RACE_DETECTED", "Symlink changed while being fingerprinted"); if (target.length > remaining) throw new GitWorktreeSnapshotError("BYTE_LIMIT_EXCEEDED", "Working-tree snapshot byte limit exceeded"); return { snapshot: { path: path.toString("base64"), kind: "symlink", mode, size: target.length, fingerprint: createHash("sha256").update(target).digest("hex") }, consumed: target.length }; } catch (cause) { if (cause instanceof GitWorktreeSnapshotError) throw cause; throw new GitWorktreeSnapshotError("RACE_DETECTED", "Symlink changed while reading", { cause }); } }
 	if (stat.isFile()) { const h = hashFile(full, stat, remaining); return { snapshot: { path: path.toString("base64"), kind: "file", mode, size: h.size, fingerprint: h.fingerprint }, consumed: h.consumed }; }
 	if (stat.isDirectory()) return { snapshot: { path: path.toString("base64"), kind: "directory" }, consumed: 0 };
@@ -222,8 +217,10 @@ export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorkt
 		if (!symbolic) throw error;
 		headIdentity = `unborn:${symbolic}`;
 	}
-	const status = runGit(canonicalRoot, ["-c", "core.quotepath=false", "status", "--no-ahead-behind", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"], "GIT_ERROR", maxGit, deadline);
-	const statusPaths = parseStatusPaths(status);
+	// Avoid `git status`: it can run configured clean/process filters. Tracked
+	// paths are covered by the index and raw worktree fingerprints already.
+	const status = runGit(canonicalRoot, ["ls-files", "--others", "--exclude-standard", "-z"], "GIT_ERROR", maxGit, deadline);
+	const statusPaths = parseUntrackedPaths(status);
 	const indexOutput = runGit(canonicalRoot, ["ls-files", "--stage", "-z"], "GIT_ERROR", maxGit, deadline);
 	const indexFlagsOutput = runGit(canonicalRoot, ["ls-files", "-v", "-z"], "GIT_ERROR", maxGit, deadline);
 	const indexTree = semanticIndexIdentity(indexOutput, indexFlagsOutput);
@@ -247,7 +244,7 @@ export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorkt
 		if (!verifiedSymbolic) throw error;
 		verifiedHeadIdentity = `unborn:${verifiedSymbolic}`;
 	}
-	const verifiedStatus = runGit(canonicalRoot, ["-c", "core.quotepath=false", "status", "--no-ahead-behind", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"], "GIT_ERROR", maxGit, deadline);
+	const verifiedStatus = runGit(canonicalRoot, ["ls-files", "--others", "--exclude-standard", "-z"], "GIT_ERROR", maxGit, deadline);
 	const verifiedIndexOutput = runGit(canonicalRoot, ["ls-files", "--stage", "-z"], "GIT_ERROR", maxGit, deadline);
 	const verifiedIndexFlagsOutput = runGit(canonicalRoot, ["ls-files", "-v", "-z"], "GIT_ERROR", maxGit, deadline);
 	const verifiedIndexTree = semanticIndexIdentity(verifiedIndexOutput, verifiedIndexFlagsOutput);
@@ -304,7 +301,7 @@ function canonicalSnapshot(value: unknown): GitWorktreeSnapshot | undefined {
 		const hash = createHash("sha256").update(Buffer.from(path, "base64")).update(Buffer.from([0])); if (!entries.length) hash.update("absent"); else entries.forEach((e) => hash.update(Buffer.from(e, "base64")).update(Buffer.from([0]))); if (hash.digest("hex") !== x.fingerprint) return undefined;
 		index.push({ path, entries, fingerprint: x.fingerprint });
 	}
-	let statusPaths: Buffer[]; try { statusPaths = parseStatusPaths(status); } catch { return undefined; } const filePaths = new Set(files.map((file) => file.path)); if (statusPaths.some((p) => !filePaths.has(p.toString("base64")))) return undefined;
+	let statusPaths: Buffer[]; try { statusPaths = parseUntrackedPaths(status); } catch { return undefined; } const filePaths = new Set(files.map((file) => file.path)); if (statusPaths.some((p) => !filePaths.has(p.toString("base64")))) return undefined;
 	return { version: 1, repositoryRoot: root.toString("base64"), repositoryIdentity: { rootFileId: identity.rootFileId as string, gitDir: identity.gitDir as string, commonDir: identity.commonDir as string, gitDirFileId: identity.gitDirFileId as string, commonDirFileId: identity.commonDirFileId as string }, headIdentity: top.headIdentity, indexTree: top.indexTree, status: status.toString("base64"), files, index };
 }
 export function compareGitWorktreeSnapshots(before: GitWorktreeSnapshot, after: GitWorktreeSnapshot): { changed: boolean } {

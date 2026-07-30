@@ -351,9 +351,14 @@ export async function runDeterministicStep(
 				finishEscalation = resolveEscalation;
 				escalationHandle = setTimeout(() => {
 					escalationHandle = undefined;
-					// The leader may exit while a TERM-resistant descendant remains. Retain
-					// authority only after exact live PGID membership is revalidated.
-					if (typeof child.pid === "number") killAttributedProcessGroup(child.pid);
+					// While the original child is still live, its ChildProcess handle remains
+					// sufficient authority to escalate directly even when `ps` is unavailable.
+					// Once it exits, only an exactly re-attributed process group may be killed.
+					if (child.exitCode === null && child.signalCode === null) {
+						try { child.kill("SIGKILL"); } catch { /* The child raced with escalation. */ }
+					} else if (typeof child.pid === "number") {
+						killAttributedProcessGroup(child.pid);
+					}
 					finishEscalation = undefined;
 					resolveEscalation();
 				}, PROCESS_GROUP_TERM_GRACE_MS);
