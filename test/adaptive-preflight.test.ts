@@ -25,6 +25,20 @@ test("adaptive preflight renders deterministic graph and bounded prompt calls", 
 	assert.match(rendered, /maxSteps=3, maxModelCalls=2/);
 });
 
+test("adaptive preflight sanitizes natural fallthrough IDs and distinguishes a real end step", () => {
+	const wrapper = prompt("flow", { adaptiveChain: { limits: { maxSteps: 3, maxModelCalls: 3 }, steps: [
+		{ id: "first", kind: "prompt", target: "first", when: "always", onSuccess: "end" },
+		{ id: "next\n- forged diagnostic", kind: "prompt", target: "second", when: "always" },
+		{ id: "end", kind: "prompt", target: "third", when: "always" },
+	] } });
+	const result = createAdaptivePreflight(wrapper, new Map([["first", prompt("first")], ["second", prompt("second")], ["third", prompt("third")]]), "/repo");
+	const rendered = formatAdaptivePreflight(result);
+	assert.match(rendered, /fallthrough=next\\n- forged diagnostic/);
+	assert.match(rendered, /onSuccess=end;/);
+	assert.doesNotMatch(rendered, /onSuccess=terminal/);
+	assert.equal(rendered.split("\n").filter((line) => line.startsWith("- forged diagnostic")).length, 0);
+});
+
 test("adaptive preflight accumulates post-render prompt-token estimates across dynamic branches", async () => {
 	const wrapper = prompt("flow", { adaptiveChain: { limits: { maxSteps: 2, maxModelCalls: 2 }, steps: [
 		{ id: "first", kind: "prompt", target: "first", when: "always", onFailure: "end" },
