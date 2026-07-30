@@ -186,14 +186,36 @@ function fingerprint(root: Buffer, path: Buffer, remaining: number, fileMode = t
 	if (stat.isDirectory()) return { snapshot: { path: path.toString("base64"), kind: "directory" }, consumed: 0 };
 	throw new GitWorktreeSnapshotError("UNSAFE_PATH", "Refusing to snapshot a special file or directory");
 }
-function semanticIndexIdentity(stageOutput: Buffer, flagOutput: Buffer, resolveUndoOutput: Buffer): string {
+function normalizeIntentToAdd(stageOutput: Buffer, debugOutput: Buffer): Buffer {
+	const records = splitNul(stageOutput, "INVALID_INDEX");
+	const normalized: number[] = [];
+	let cursor = 0;
+	for (const record of records) {
+		const tab = record.indexOf(9);
+		if (tab < 0) throw new GitWorktreeSnapshotError("INVALID_INDEX", "Malformed Git index record");
+		const path = record.subarray(tab + 1);
+		if (!debugOutput.subarray(cursor, cursor + path.length).equals(path) || debugOutput[cursor + path.length] !== 0) throw new GitWorktreeSnapshotError("INVALID_INDEX", "Git index debug paths do not match staged entries");
+		cursor += path.length + 1;
+		// `ls-files --debug` documents these cache-entry fields. Consume the full
+		// stat block, but retain only CE_INTENT_TO_ADD (0x20000000), so refreshes
+		// cannot alter semantic identity.
+		const block = /^  ctime: \d+:\d+\n  mtime: \d+:\d+\n  dev: \d+	ino: \d+\n  uid: \d+	gid: \d+\n  size: \d+	flags: ([0-9a-fA-F]+)\n/.exec(debugOutput.subarray(cursor).toString("latin1"));
+		if (!block) throw new GitWorktreeSnapshotError("INVALID_INDEX", "Malformed Git index debug metadata");
+		cursor += Buffer.byteLength(block[0], "latin1");
+		normalized.push((Number.parseInt(block[1]!, 16) & 0x20000000) !== 0 ? 1 : 0);
+	}
+	if (cursor !== debugOutput.length) throw new GitWorktreeSnapshotError("INVALID_INDEX", "Unexpected trailing Git index debug metadata");
+	return Buffer.from(normalized);
+}
+function semanticIndexIdentity(stageOutput: Buffer, flagOutput: Buffer, resolveUndoOutput: Buffer, debugOutput: Buffer): string {
 	// Read-only ls-files views combine mode, object id, conflict stage, raw path,
 	// semantic per-entry flags, and resolve-undo conflict metadata. Unlike
 	// hashing the index file, they exclude stat-cache refreshes.
 	splitNul(stageOutput, "INVALID_INDEX");
 	for (const record of splitNul(flagOutput, "INVALID_INDEX")) if (record.length < 3 || record[1] !== 0x20) throw new GitWorktreeSnapshotError("INVALID_INDEX", "Malformed Git index flag record");
 	splitNul(resolveUndoOutput, "INVALID_INDEX");
-	return createHash("sha256").update(stageOutput).update(Buffer.from([0])).update(flagOutput).update(Buffer.from([0])).update(resolveUndoOutput).digest("hex");
+	const intentToAdd = normalizeIntentToAdd(stageOutput, debugOutput);
+	return createHash("sha256").update(stageOutput).update(Buffer.from([0])).update(flagOutput).update(Buffer.from([0])).update(resolveUndoOutput).update(Buffer.from([0])).update(intentToAdd).digest("hex");
 }
 function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: number, deadline: CaptureDeadline): void {
 	const relative = path.toString("utf8");
@@ -287,7 +309,8 @@ export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorkt
 	const indexOutput = runGit(canonicalRoot, ["ls-files", "--stage", "-z"], "GIT_ERROR", maxGit, deadline);
 	const indexFlagsOutput = runGit(canonicalRoot, ["ls-files", "-v", "-z"], "GIT_ERROR", maxGit, deadline);
 	const resolveUndoOutput = runGit(canonicalRoot, ["ls-files", "--resolve-undo", "-z"], "GIT_ERROR", maxGit, deadline);
-	const indexTree = semanticIndexIdentity(indexOutput, indexFlagsOutput, resolveUndoOutput);
+	const indexDebugOutput = runGit(canonicalRoot, ["ls-files", "--debug", "-z"], "GIT_ERROR", maxGit, deadline);
+	const indexTree = semanticIndexIdentity(indexOutput, indexFlagsOutput, resolveUndoOutput, indexDebugOutput);
 	const trackedPaths = splitNul(indexOutput, "INVALID_INDEX").map((record) => { const tab = record.indexOf(9); if (tab < 0) throw new GitWorktreeSnapshotError("INVALID_INDEX", "Malformed Git index record"); return Buffer.from(record.subarray(tab + 1)); });
 	const uniquePaths = new Map<string, Buffer>(); for (const path of [...statusPaths, ...trackedPaths]) uniquePaths.set(path.toString("base64"), path);
 	const paths = [...uniquePaths].sort(([a], [b]) => a.localeCompare(b)).map(([, path]) => path);
@@ -319,7 +342,8 @@ export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorkt
 	const verifiedIndexOutput = runGit(canonicalRoot, ["ls-files", "--stage", "-z"], "GIT_ERROR", maxGit, deadline);
 	const verifiedIndexFlagsOutput = runGit(canonicalRoot, ["ls-files", "-v", "-z"], "GIT_ERROR", maxGit, deadline);
 	const verifiedResolveUndoOutput = runGit(canonicalRoot, ["ls-files", "--resolve-undo", "-z"], "GIT_ERROR", maxGit, deadline);
-	const verifiedIndexTree = semanticIndexIdentity(verifiedIndexOutput, verifiedIndexFlagsOutput, verifiedResolveUndoOutput);
+	const verifiedIndexDebugOutput = runGit(canonicalRoot, ["ls-files", "--debug", "-z"], "GIT_ERROR", maxGit, deadline);
+	const verifiedIndexTree = semanticIndexIdentity(verifiedIndexOutput, verifiedIndexFlagsOutput, verifiedResolveUndoOutput, verifiedIndexDebugOutput);
 	const verifiedIndex = fingerprintIndex(paths, verifiedIndexOutput, maxFiles * 3);
 	const verifiedFiles: GitWorktreeFileSnapshot[] = []; let verifiedConsumed = 0;
 	for (const path of paths) { const gitlink = gitlinks.get(path.toString("base64")); if (gitlink) { verifySubmodule(canonicalRoot, path, gitlink, maxGit, deadline); verifiedFiles.push({ path: path.toString("base64"), kind: "directory" }); continue; } const result = fingerprint(rootBytes, path, maxBytes - verifiedConsumed, fileMode); verifiedConsumed += result.consumed; verifiedFiles.push(result.snapshot); }
