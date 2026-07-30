@@ -253,6 +253,41 @@ test("dirty and uninitialized submodules fail closed", () => {
 	assert.throws(() => captureGitWorktreeSnapshot(uninitialized.cwd), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "UNSUPPORTED_SUBMODULE");
 });
 
+test("submodule inspection never executes clean or process filters", () => {
+	for (const kind of ["clean", "process"] as const) {
+		const { cwd, submodule } = repoWithSubmodule();
+		const marker = join(cwd, `${kind}-filter-marker`), helper = join(cwd, `${kind}-filter.sh`);
+		writeFileSync(helper, `#!/bin/sh\nprintf invoked >> '${marker}'\ncat\n`); chmodSync(helper, 0o755);
+		writeFileSync(join(submodule, ".gitattributes"), "tracked.txt filter=hostile\n");
+		execFileSync("git", ["add", ".gitattributes"], { cwd: submodule });
+		execFileSync("git", ["commit", "-qm", "hostile attributes"], { cwd: submodule });
+		execFileSync("git", ["add", "submodule"], { cwd });
+		execFileSync("git", ["config", `filter.hostile.${kind}`, helper], { cwd: submodule });
+		rmSync(marker, { force: true });
+		captureGitWorktreeSnapshot(cwd);
+		assert.equal(existsSync(marker), false, `${kind} filter executed during capture`);
+		writeFileSync(join(submodule, "tracked.txt"), "dirty without filters\n");
+		assert.throws(() => captureGitWorktreeSnapshot(cwd), (error: unknown) => error instanceof GitWorktreeSnapshotError && error.code === "UNSUPPORTED_SUBMODULE");
+		assert.equal(existsSync(marker), false, `${kind} filter executed while detecting dirtiness`);
+	}
+});
+
+test("inherited repository-shaping Git environment cannot redirect capture", () => {
+	const cwd = repo(), decoy = repo();
+	const names = ["GIT_INDEX_FILE", "GIT_DIR", "GIT_WORK_TREE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"] as const;
+	const old = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+	try {
+		process.env.GIT_INDEX_FILE = join(decoy, ".git", "index"); process.env.GIT_DIR = join(decoy, ".git"); process.env.GIT_WORK_TREE = decoy;
+		process.env.GIT_OBJECT_DIRECTORY = join(decoy, ".git", "objects"); process.env.GIT_ALTERNATE_OBJECT_DIRECTORIES = join(decoy, ".git", "objects");
+		const before = captureGitWorktreeSnapshot(cwd);
+		assert.equal(Buffer.from(before.repositoryRoot, "base64").toString(), execFileSync("realpath", [cwd], { encoding: "utf8" }).trim());
+		writeFileSync(join(cwd, "tracked.txt"), "actual staged change\n");
+		const cleanEnv = { ...process.env }; for (const name of names) delete cleanEnv[name];
+		execFileSync("git", ["add", "tracked.txt"], { cwd, env: cleanEnv });
+		assert.equal(compareGitWorktreeSnapshots(before, captureGitWorktreeSnapshot(cwd)).changed, true);
+	} finally { for (const name of names) { const value = old[name]; if (value === undefined) delete process.env[name]; else process.env[name] = value; } }
+});
+
 test("detects a staged gitlink change while allowing the matching clean submodule", () => {
 	const { cwd, submodule, commits } = repoWithSubmodule();
 	const before = captureGitWorktreeSnapshot(cwd);

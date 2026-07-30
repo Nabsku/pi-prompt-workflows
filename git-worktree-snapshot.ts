@@ -65,8 +65,15 @@ function remainingTimeout(deadline: CaptureDeadline): number {
 }
 function runGit(cwd: string, args: string[], fallback: GitWorktreeSnapshotErrorCode, maxBuffer: number, deadline: CaptureDeadline, input?: Buffer): Buffer {
 	const safeArgs = [...GIT_SAFE_GLOBAL_ARGS, ...args];
+	const env: NodeJS.ProcessEnv = {};
+	for (const [key, value] of Object.entries(process.env)) if (!key.startsWith("GIT_")) env[key] = value;
+	Object.assign(env, {
+		GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", GIT_PAGER: "cat",
+		GIT_CONFIG_NOSYSTEM: "1", GIT_ATTR_NOSYSTEM: "1",
+		GCM_INTERACTIVE: "Never", PAGER: "cat",
+	});
 	try {
-		return execFileSync("git", safeArgs, { cwd, input, encoding: "buffer", maxBuffer, timeout: remainingTimeout(deadline), killSignal: "SIGTERM", env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "Never", GIT_PAGER: "cat", PAGER: "cat" } }) as Buffer;
+		return execFileSync("git", safeArgs, { cwd, input, encoding: "buffer", maxBuffer, timeout: remainingTimeout(deadline), killSignal: "SIGTERM", env }) as Buffer;
 	}
 	catch (cause: any) {
 		if (cause instanceof GitWorktreeSnapshotError) throw cause;
@@ -179,8 +186,27 @@ function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: n
 	catch (cause) { throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule is uninitialized or unobservable", { cause }); }
 	if (head !== match[1]) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule HEAD does not match its staged gitlink");
 	try {
-		runGit(full, ["diff-index", "--quiet", "HEAD", "--"], "GIT_ERROR", maxGit, deadline);
-		runGit(full, ["diff-files", "--quiet", "--"], "GIT_ERROR", maxGit, deadline);
+		// Check HEAD versus the index without consulting worktree filters, then
+		// compare every indexed path to its raw, no-filter object id.
+		runGit(full, ["diff-index", "--cached", "--quiet", "HEAD", "--"], "GIT_ERROR", maxGit, deadline);
+		const records = splitNul(runGit(full, ["ls-files", "--stage", "-z"], "GIT_ERROR", maxGit, deadline), "INVALID_INDEX");
+		if (records.length > DEFAULT_MAX_FILES) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule file limit exceeded");
+		let consumed = 0;
+		for (const record of records) {
+			const tab = record.indexOf(9); if (tab < 0) throw new GitWorktreeSnapshotError("INVALID_INDEX", "Malformed submodule index record");
+			const entry = /^(100644|100755|120000|160000) ([0-9a-f]+) 0$/.exec(record.subarray(0, tab).toString("ascii"));
+			if (!entry) throw new GitWorktreeSnapshotError("INVALID_INDEX", "Malformed submodule index metadata");
+			if (entry[1] === "160000") throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Nested submodules are not safely observable");
+			const subPath = Buffer.from(record.subarray(tab + 1));
+			const relativeSubPath = subPath.toString("utf8");
+			if (!Buffer.from(relativeSubPath).equals(subPath)) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule path is not safely observable");
+			const first = fingerprint(Buffer.from(full), subPath, DEFAULT_MAX_BYTES - consumed); consumed += first.consumed;
+			const expectedKind = entry[1] === "120000" ? "symlink" : "file";
+			if (first.snapshot.kind !== expectedKind || expectedKind === "file" && first.snapshot.mode !== Number.parseInt(entry[1].slice(3), 8)) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule path type or mode differs from its index");
+			const oid = oneLine(runGit(full, ["hash-object", "--no-filters", "--", relativeSubPath], "GIT_ERROR", maxGit, deadline), "submodule object id");
+			const second = fingerprint(Buffer.from(full), subPath, DEFAULT_MAX_BYTES - (consumed - first.consumed));
+			if (oid !== entry[2] || JSON.stringify(first.snapshot) !== JSON.stringify(second.snapshot)) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule worktree differs from its index");
+		}
 		if (runGit(full, ["ls-files", "--others", "--exclude-standard", "-z"], "GIT_ERROR", maxGit, deadline).length) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule has untracked content");
 	} catch (cause) {
 		if (cause instanceof GitWorktreeSnapshotError && cause.code === "UNSUPPORTED_SUBMODULE") throw cause;
