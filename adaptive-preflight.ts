@@ -4,7 +4,7 @@ import { getRequestedSkills } from "./prompt-skills.js";
 import { buildSkillLoadedMessage, resolvePromptSkills, type LoadedPromptSkill, type RuntimeSkillCommand } from "./prompt-skills.js";
 import { checkPromptExecutionBudget, preparePromptExecution } from "./prompt-execution.js";
 import type { Model } from "@earendil-works/pi-ai";
-import type { RegistryLike } from "./model-selection.js";
+import { getModelCandidates, type RegistryLike } from "./model-selection.js";
 import { capSanitizedText } from "./render-safe.js";
 import { estimatePromptTokens, PROMPT_TOKEN_ESTIMATE_METHOD } from "./prompt-budget.js";
 import { createAdaptiveChainState, routeAdaptiveChain, type ChainObservation } from "./adaptive-chain.js";
@@ -209,11 +209,16 @@ export async function prepareAdaptivePreflight(wrapper: PromptWithModel, catalog
 	const modelKey = (model: Model<any> | undefined) => model ? `${model.provider}/${model.id}` : "";
 	const activeModels = new Map<string, Model<any> | undefined>();
 	activeModels.set(modelKey(options.currentModel), options.currentModel);
-	const selectable = new Set(base.steps.flatMap((step) => {
+	const selectableSpecs = new Set(base.steps.flatMap((step) => {
 		const target = catalog.get(step.target);
 		return target ? (options.modelOverride ? [options.modelOverride] : target.models) : [];
 	}));
-	for (const model of options.modelRegistry.getAvailable()) if (selectable.has(modelKey(model))) activeModels.set(modelKey(model), model);
+	// Expand specs exactly as runtime selection does. In particular, a bare `b`
+	// resolves to a concrete `provider/b` route state rather than being compared
+	// literally with the qualified registry key and silently omitted.
+	for (const spec of selectableSpecs) {
+		for (const model of getModelCandidates(spec, options.modelRegistry)) activeModels.set(modelKey(model), model);
+	}
 	if (activeModels.size > MAX_ADAPTIVE_PREFLIGHT_STATES) {
 		const diagnostic = `analysis inconclusive: ${activeModels.size} selectable model states exceed state limit ${MAX_ADAPTIVE_PREFLIGHT_STATES}`;
 		return { ...base, targets, diagnostics: [...diagnostics, diagnostic], status: "blocked", analysis: { complete: false, analyzedStates: 0, enqueuedStates: activeModels.size, stateLimit: MAX_ADAPTIVE_PREFLIGHT_STATES }, callBounds: { ...base.callBounds, exact: false, explanation: diagnostic }, promptCostBounds: { ...base.promptCostBounds, exact: false, explanation: diagnostic } };

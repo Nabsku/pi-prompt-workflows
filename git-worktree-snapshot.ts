@@ -225,7 +225,7 @@ function parseSkipWorktreePaths(output: Buffer): Set<string> {
 	}
 	return paths;
 }
-function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: number, deadline: CaptureDeadline, skipWorktree = false): boolean {
+function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: number, deadline: CaptureDeadline, remainingBytes: number, skipWorktree = false): { materialized: boolean; consumed: number } {
 	const relative = path.toString("utf8");
 	if (!Buffer.from(relative).equals(path)) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule path is not safely observable");
 	assertNoSymlinkedAncestors(Buffer.from(root), path);
@@ -233,7 +233,7 @@ function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: n
 	let stat: Stats;
 	try { stat = lstatSync(full); }
 	catch (cause: any) {
-		if (skipWorktree && (cause?.code === "ENOENT" || cause?.code === "ENOTDIR")) return false;
+		if (skipWorktree && (cause?.code === "ENOENT" || cause?.code === "ENOTDIR")) return { materialized: false, consumed: 0 };
 		throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule is uninitialized or unobservable", { cause });
 	}
 	if (!stat.isDirectory() || stat.isSymbolicLink()) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule is uninitialized or unobservable");
@@ -243,6 +243,7 @@ function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: n
 	try { head = oneLine(runGit(full, ["rev-parse", "--verify", "HEAD^{commit}"], "GIT_ERROR", maxGit, deadline), "submodule HEAD"); }
 	catch (cause) { throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule is uninitialized or unobservable", { cause }); }
 	if (head !== match[1]) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule HEAD does not match its staged gitlink");
+	let consumed = 0;
 	try {
 		const fileMode = readCoreFileMode(full, maxGit, deadline);
 		const symlinks = readCoreSymlinks(full, maxGit, deadline);
@@ -252,7 +253,6 @@ function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: n
 		const records = splitNul(runGit(full, ["ls-files", "--stage", "-z"], "GIT_ERROR", maxGit, deadline), "INVALID_INDEX");
 		const skipped = parseSkipWorktreePaths(runGit(full, ["ls-files", "-v", "-z"], "GIT_ERROR", maxGit, deadline));
 		if (records.length > DEFAULT_MAX_FILES) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule file limit exceeded");
-		let consumed = 0;
 		for (const record of records) {
 			const tab = record.indexOf(9); if (tab < 0) throw new GitWorktreeSnapshotError("INVALID_INDEX", "Malformed submodule index record");
 			const entry = /^(100644|100755|120000|160000) ([0-9a-f]+) 0$/.exec(record.subarray(0, tab).toString("ascii"));
@@ -261,7 +261,7 @@ function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: n
 			const subPath = Buffer.from(record.subarray(tab + 1));
 			const relativeSubPath = subPath.toString("utf8");
 			if (!Buffer.from(relativeSubPath).equals(subPath)) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule path is not safely observable");
-			const first = fingerprint(Buffer.from(full), subPath, DEFAULT_MAX_BYTES - consumed, fileMode); consumed += first.consumed;
+			const first = fingerprint(Buffer.from(full), subPath, remainingBytes - consumed, fileMode); consumed += first.consumed;
 			if (first.snapshot.kind === "missing" && skipped.has(subPath.toString("base64"))) continue;
 			const expectedKind = entry[1] === "120000" && symlinks ? "symlink" : "file";
 			const expectedMode = entry[1] === "120000" ? undefined : fileMode ? Number.parseInt(entry[1].slice(3), 8) : 0o644;
@@ -269,15 +269,15 @@ function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: n
 			const oid = expectedKind === "symlink"
 				? oneLine(runGit(full, ["hash-object", "--stdin"], "GIT_ERROR", maxGit, deadline, first.symlinkTarget), "submodule object id")
 				: oneLine(runGit(full, ["hash-object", "--no-filters", "--", relativeSubPath], "GIT_ERROR", maxGit, deadline), "submodule object id");
-			const second = fingerprint(Buffer.from(full), subPath, DEFAULT_MAX_BYTES - (consumed - first.consumed), fileMode);
+			const second = fingerprint(Buffer.from(full), subPath, remainingBytes - (consumed - first.consumed), fileMode);
 			if (oid !== entry[2] || JSON.stringify(first.snapshot) !== JSON.stringify(second.snapshot)) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule worktree differs from its index");
 		}
 		if (runGit(full, ["ls-files", "--others", "--exclude-standard", "-z"], "GIT_ERROR", maxGit, deadline).length) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule has untracked content");
 	} catch (cause) {
-		if (cause instanceof GitWorktreeSnapshotError && cause.code === "UNSUPPORTED_SUBMODULE") throw cause;
+		if (cause instanceof GitWorktreeSnapshotError && (cause.code === "UNSUPPORTED_SUBMODULE" || cause.code === "BYTE_LIMIT_EXCEEDED")) throw cause;
 		throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule is dirty or unobservable", { cause });
 	}
-	return true;
+	return { materialized: true, consumed };
 }
 function resolveRepositoryIdentity(cwd: string, maxGit: number, deadline: CaptureDeadline): { canonicalRoot: string; repositoryIdentity: GitWorktreeSnapshot["repositoryIdentity"] } {
 	try {
@@ -332,7 +332,7 @@ export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorkt
 	if (paths.length > maxFiles) throw new GitWorktreeSnapshotError("FILE_LIMIT_EXCEEDED", `Working-tree snapshot file limit exceeded (${paths.length} > ${maxFiles})`);
 	const index = fingerprintIndex(paths, indexOutput, maxFiles * 3); const files: GitWorktreeFileSnapshot[] = []; let consumed = 0; const rootBytes = Buffer.from(canonicalRoot);
 	const gitlinks = new Map(index.flatMap((entry) => entry.entries.filter((encoded) => Buffer.from(encoded, "base64").toString("ascii").startsWith("160000 ")).map((encoded) => [entry.path, Buffer.from(encoded, "base64")] as const)));
-	for (const path of paths) { const key = path.toString("base64"); const gitlink = gitlinks.get(key); if (gitlink) { const materialized = verifySubmodule(canonicalRoot, path, gitlink, maxGit, deadline, skipWorktreePaths.has(key)); files.push({ path: key, kind: materialized ? "directory" : "missing" }); continue; } const result = fingerprint(rootBytes, path, maxBytes - consumed, fileMode); consumed += result.consumed; files.push(result.snapshot); }
+	for (const path of paths) { const key = path.toString("base64"); const gitlink = gitlinks.get(key); if (gitlink) { const result = verifySubmodule(canonicalRoot, path, gitlink, maxGit, deadline, maxBytes - consumed, skipWorktreePaths.has(key)); consumed += result.consumed; files.push({ path: key, kind: result.materialized ? "directory" : "missing" }); continue; } const result = fingerprint(rootBytes, path, maxBytes - consumed, fileMode); consumed += result.consumed; files.push(result.snapshot); }
 	const finalIdentity = resolveRepositoryIdentity(canonicalRoot, maxGit, deadline);
 	const verifiedFileMode = readCoreFileMode(canonicalRoot, maxGit, deadline);
 	if (finalIdentity.canonicalRoot !== canonicalRoot || finalIdentity.repositoryIdentity.rootFileId !== repositoryIdentity.rootFileId || finalIdentity.repositoryIdentity.gitDir !== repositoryIdentity.gitDir || finalIdentity.repositoryIdentity.commonDir !== repositoryIdentity.commonDir || finalIdentity.repositoryIdentity.gitDirFileId !== repositoryIdentity.gitDirFileId || finalIdentity.repositoryIdentity.commonDirFileId !== repositoryIdentity.commonDirFileId) throw new GitWorktreeSnapshotError("RACE_DETECTED", "Git repository identity changed during snapshot capture");
@@ -361,7 +361,7 @@ export function captureGitWorktreeSnapshot(cwd: string, options: CaptureGitWorkt
 	const verifiedIndexTree = semanticIndexIdentity(verifiedIndexOutput, verifiedIndexFlagsOutput, verifiedResolveUndoOutput, verifiedIndexDebugOutput);
 	const verifiedIndex = fingerprintIndex(paths, verifiedIndexOutput, maxFiles * 3);
 	const verifiedFiles: GitWorktreeFileSnapshot[] = []; let verifiedConsumed = 0;
-	for (const path of paths) { const key = path.toString("base64"); const gitlink = gitlinks.get(key); if (gitlink) { const materialized = verifySubmodule(canonicalRoot, path, gitlink, maxGit, deadline, skipWorktreePaths.has(key)); verifiedFiles.push({ path: key, kind: materialized ? "directory" : "missing" }); continue; } const result = fingerprint(rootBytes, path, maxBytes - verifiedConsumed, fileMode); verifiedConsumed += result.consumed; verifiedFiles.push(result.snapshot); }
+	for (const path of paths) { const key = path.toString("base64"); const gitlink = gitlinks.get(key); if (gitlink) { const result = verifySubmodule(canonicalRoot, path, gitlink, maxGit, deadline, maxBytes - verifiedConsumed, skipWorktreePaths.has(key)); verifiedConsumed += result.consumed; verifiedFiles.push({ path: key, kind: result.materialized ? "directory" : "missing" }); continue; } const result = fingerprint(rootBytes, path, maxBytes - verifiedConsumed, fileMode); verifiedConsumed += result.consumed; verifiedFiles.push(result.snapshot); }
 	const equalFiles = files.length === verifiedFiles.length && files.every((entry, i) => {
 		const verified = verifiedFiles[i]!;
 		return entry.path === verified.path && entry.kind === verified.kind && entry.mode === verified.mode && entry.size === verified.size && entry.fingerprint === verified.fingerprint;
