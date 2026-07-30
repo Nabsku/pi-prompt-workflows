@@ -342,6 +342,8 @@ export async function runDeterministicStep(
 	let escalationHandle: ReturnType<typeof setTimeout> | undefined;
 	let finishEscalation: (() => void) | undefined;
 	let escalationPromise: Promise<void> | undefined;
+	let authoritativeSigkillDelivered = false;
+	let escalationError: unknown;
 	let cleanupScope: "process-group" | "direct-child" = process.platform === "win32" ? "direct-child" : "process-group";
 	const terminate = () => {
 		if (terminationRequested) return;
@@ -354,13 +356,16 @@ export async function runDeterministicStep(
 					escalationHandle = undefined;
 					// While the original detached leader is still live, its PID is also the
 					// owned PGID, so the whole group can be escalated without external
-					// inspection. Once it exits, require exact group re-attribution.
+					// inspection and successful delivery remains authoritative after close.
 					if (child.exitCode === null && child.signalCode === null) {
-						try { process.kill(-child.pid!, "SIGKILL"); } catch (error) {
-							if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+						try {
+							process.kill(-child.pid!, "SIGKILL");
+							authoritativeSigkillDelivered = true;
+						} catch (error) {
+							if ((error as NodeJS.ErrnoException).code !== "ESRCH") escalationError = error;
 						}
 					} else if (typeof child.pid === "number") {
-						killAttributedProcessGroup(child.pid);
+						try { killAttributedProcessGroup(child.pid); } catch (error) { escalationError = error; }
 					}
 					finishEscalation = undefined;
 					resolveEscalation();
@@ -436,7 +441,11 @@ export async function runDeterministicStep(
 			if (timeoutHandle) clearTimeout(timeoutHandle);
 			if (terminationRequested && cleanupScope === "process-group" && typeof child.pid === "number") {
 				try {
-					await waitForProcessGroupExtinction(child.pid);
+					if (escalationError) throw escalationError;
+					// A group-wide SIGKILL delivered while the owned leader/PGID was live
+					// is authoritative. Once the leader closes, no member can execute or
+					// resist it; avoid ambiguous negative-PID reuse and zombie probes.
+					if (!authoritativeSigkillDelivered) await waitForProcessGroupExtinction(child.pid);
 				} catch (error) {
 					const cleanupError = error instanceof Error ? error.message : String(error);
 					appendCapturedOutput(stderr, `${stderr.totalChars > 0 ? "\n" : ""}[cleanup] ${cleanupError}`);

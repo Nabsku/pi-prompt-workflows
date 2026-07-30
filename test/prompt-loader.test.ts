@@ -2869,6 +2869,7 @@ test("loadPromptsWithModel excludes structured chains by default and includes th
 			limits: { maxSteps: 5, maxModelCalls: 3 },
 			steps: [{ id: "implement", kind: "prompt", target: "implement", when: "always" }, { id: "npm test", kind: "run", target: "npm test", when: "always" }, { id: "review", kind: "prompt", target: "review", when: "changed" }],
 		});
+		assert.equal(buildPromptCommandDescription(prompt), "[adaptive chain steps:3/5 model-calls:3] (project)");
 		assert.equal(result.diagnostics.length, 0);
 	});
 });

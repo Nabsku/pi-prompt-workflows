@@ -2759,6 +2759,12 @@ export function formatPromptSourceLabel(prompt: Pick<PromptWithModel, "source" |
 
 export function buildPromptCommandDescription(prompt: PromptWithModel): string {
 	const sourceLabel = `(${formatPromptSourceLabel(prompt)})`;
+	if (prompt.adaptiveChain) {
+		const { maxSteps, maxModelCalls } = prompt.adaptiveChain.limits;
+		const stepCount = (prompt.adaptiveChain.steps as StructuredChainStep[]).length;
+		const details = `[adaptive chain steps:${stepCount}/${maxSteps} model-calls:${maxModelCalls}] ${sourceLabel}`;
+		return prompt.description ? `${prompt.description} ${details}` : details;
+	}
 	if (prompt.chain) {
 		const chainContextLabel = prompt.chainContext ? ` ${prompt.chainContext}` : "";
 		const cwdLabel = prompt.cwd ? ` cwd:${prompt.cwd}` : "";

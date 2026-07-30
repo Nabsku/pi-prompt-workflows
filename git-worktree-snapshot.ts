@@ -107,7 +107,13 @@ function splitNul(output: Buffer, code: "INVALID_STATUS" | "INVALID_INDEX" = "IN
 }
 function parseUntrackedPaths(output: Buffer): Buffer[] {
 	const unique = new Map<string, Buffer>();
-	for (const path of splitNul(output)) unique.set(path.toString("base64"), Buffer.from(path));
+	for (const rawPath of splitNul(output)) {
+		// Git collapses an embedded untracked repository to an opaque `path/`.
+		// Fingerprint that directory itself and never descend into it.
+		const path = rawPath.at(-1) === 0x2f ? rawPath.subarray(0, -1) : rawPath;
+		if (!path.length) throw new GitWorktreeSnapshotError("UNSAFE_PATH", "Git reported an unsafe path");
+		unique.set(path.toString("base64"), Buffer.from(path));
+	}
 	return [...unique].sort(([a], [b]) => a.localeCompare(b)).map(([, path]) => path);
 }
 function fingerprintIndex(paths: readonly Buffer[], output: Buffer, maxRecords: number): GitIndexPathSnapshot[] {
@@ -180,6 +186,7 @@ function semanticIndexIdentity(stageOutput: Buffer, flagOutput: Buffer): string 
 function verifySubmodule(root: string, path: Buffer, metadata: Buffer, maxGit: number, deadline: CaptureDeadline): void {
 	const relative = path.toString("utf8");
 	if (!Buffer.from(relative).equals(path)) throw new GitWorktreeSnapshotError("UNSUPPORTED_SUBMODULE", "Submodule path is not safely observable");
+	assertNoSymlinkedAncestors(Buffer.from(root), path);
 	const full = join(root, relative);
 	let stat: Stats;
 	try { stat = lstatSync(full); }
