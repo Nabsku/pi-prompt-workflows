@@ -209,21 +209,25 @@ export async function prepareAdaptivePreflight(wrapper: PromptWithModel, catalog
 			targetIndependentIssues[index] = issue;
 			return { ...summary, status: "blocked" as const, issues: [...summary.issues, issue] };
 		}
+		const loaded = skills.kind === "ready" ? skills.skills as LoadedPromptSkill[] : [] as LoadedPromptSkill[];
+		// Skill resolution is independent of model-conditional body rendering. Keep
+		// its exact cost even when this initial rendering is invalid, because a
+		// reachable active-model route may still render the body successfully.
+		const skillPromptCost = loaded.length ? estimatePromptTokens(buildSkillLoadedMessage(loaded).content) : undefined;
+		const resolvedSkillSummary = { skills: loaded.map((skill) => skill.skillName), skillPromptCost };
 		const effective = { ...target, ...(options.modelOverride ? { models: [options.modelOverride] } : {}) };
 		const prepared = await preparePromptExecution(effective, options.args, options.currentModel, options.modelRegistry);
 		if (!prepared || "message" in prepared) {
 			const issue = capSanitizedText(prepared && "message" in prepared ? prepared.message : `No available model from: ${effective.models.join(", ")}`, 500);
-			return { ...summary, status: "blocked" as const, issues: [...summary.issues, issue] };
+			return { ...summary, ...resolvedSkillSummary, status: "blocked" as const, issues: [...summary.issues, issue] };
 		}
-		const loaded: LoadedPromptSkill[] = skills.kind === "ready" ? skills.skills : [];
 		// Nondelegated runtime sends resolved skills through before_agent_start; only
 		// the user prompt body is subject to the prompt's configured budget.
 		const content = prepared.content;
 		const budget = checkPromptExecutionBudget(target, content);
 
 		const bodyCost = estimatePromptTokens(content);
-		const skillPromptCost = loaded.length ? estimatePromptTokens(buildSkillLoadedMessage(loaded).content) : undefined;
-		return { ...summary, status: budget.message ? "blocked" as const : "ready" as const, effectiveModel: `${prepared.selectedModel.model.provider}/${prepared.selectedModel.model.id}`, budgetVerdict: budget.message ? "exceeded" : budget.warning ? "warning" : "ok", promptCost: bodyCost, skillPromptCost, skills: loaded.map((skill) => skill.skillName), issues: budget.message ? [...summary.issues, budget.message] : summary.issues };
+		return { ...summary, ...resolvedSkillSummary, status: budget.message ? "blocked" as const : "ready" as const, effectiveModel: `${prepared.selectedModel.model.provider}/${prepared.selectedModel.model.id}`, budgetVerdict: budget.message ? "exceeded" : budget.warning ? "warning" : "ok", promptCost: bodyCost, issues: budget.message ? [...summary.issues, budget.message] : summary.issues };
 	}));
 	// Expand specs exactly as runtime selection does. In particular, a bare `b`
 	// resolves to a concrete `provider/b` route state rather than being compared
