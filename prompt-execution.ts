@@ -3,6 +3,7 @@ import { substituteArgs } from "./args.js";
 import { getResolvedModelRef, selectModelCandidate, type RegistryLike, type SelectedModelCandidate } from "./model-selection.js";
 import type { PromptWithModel } from "./prompt-loader.js";
 import { evaluatePromptBudget } from "./prompt-budget.js";
+import { renderPromptInputValues } from "./prompt-inputs.js";
 import { renderTemplateConditionals, renderTemplateConditionalsWithInputs } from "./template-conditionals.js";
 
 export interface PreparedPromptExecution {
@@ -114,7 +115,10 @@ export function renderPromptForResolvedModel(
 	const rendered = prompt.resolvedInputValues
 		? renderTemplateConditionalsWithInputs(prompt.content, getResolvedModelRef(model), prompt.resolvedInputValues, prompt.name)
 		: renderTemplateConditionals(prompt.content, getResolvedModelRef(model), prompt.name);
-	const content = substituteArgs(rendered.content, args);
+	const inputRendered = prompt.resolvedInputValues
+		? renderPromptInputValues(rendered.content, Object.fromEntries(Object.entries(prompt.resolvedInputValues).map(([name, value]) => [name, { name, type: typeof value === "boolean" ? "boolean" : "string", value, source: "flag" }])) as never)
+		: rendered.content;
+	const content = substituteArgs(inputRendered, args);
 	if (content.trim().length === 0) {
 		return {
 			empty: `Prompt \`${prompt.name}\` rendered to an empty message.`,

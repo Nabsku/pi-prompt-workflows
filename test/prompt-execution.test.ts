@@ -98,15 +98,15 @@ test("preparePromptExecution renders input conditionals before named and positio
 		{
 			name: "demo",
 			models: ["claude-sonnet-4-20250514"],
-			resolvedInputValues: { "run-tests": true },
-			content: '<if-input name="run-tests" is="true">run<else>skip</if-input> $@',
+			resolvedInputValues: { "run-tests": true, target: "src/app.ts" },
+			content: '<if-input name="run-tests" is="true">run<else>skip</if-input> ${input.target} $@',
 		},
 		["src/a.ts", "src/b.ts"],
 		undefined,
 		registry as never,
 	);
 	assert.ok(prepared && !("message" in prepared));
-	assert.equal(prepared?.content, "run src/a.ts src/b.ts");
+	assert.equal(prepared?.content, "run src/app.ts src/a.ts src/b.ts");
 });
 test("preparePromptExecution aborts whitespace-only output after rendering", async () => {
 	const prepared = await preparePromptExecution(
