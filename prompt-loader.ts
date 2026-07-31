@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import type { PromptBudgetConfig } from "./prompt-budget.js";
+import { validatePromptInputSchema, type PromptInputSchema } from "./prompt-inputs.js";
 import { parseChainDeclaration, type ChainLimits, type StructuredChainStep } from "./chain-parser.js";
 import {
 	extractPromptInlineIncludes,
@@ -87,6 +88,7 @@ export interface PromptWithModel {
 	content: string;
 	models: string[];
 	budget?: PromptBudgetConfig;
+	inputs?: PromptInputSchema;
 	includes?: string[];
 	chain?: string;
 	adaptiveChain?: { steps: StructuredChainStep[]; limits: ChainLimits };
@@ -258,6 +260,23 @@ function normalizePromptBudget(
 		return { ok: false };
 	}
 	return { ok: true, budget: { ...(warnTokens !== undefined ? { warnTokens } : {}), ...(maxTokens !== undefined ? { maxTokens } : {}) } };
+}
+
+function normalizePromptInputs(
+	value: unknown,
+	filePath: string,
+	source: PromptSource,
+	diagnostics: PromptLoaderDiagnostic[],
+): { ok: true; inputs?: PromptInputSchema } | { ok: false } {
+	if (value === undefined) return { ok: true };
+	const errors = validatePromptInputSchema(value);
+	if (errors.length > 0 || !isFrontmatterRecord(value)) {
+		for (const error of errors.length > 0 ? errors : ["inputs must be a mapping"]) {
+			diagnostics.push(createDiagnostic("invalid-inputs", filePath, source, `Skipping prompt template at ${filePath}: ${error}.`));
+		}
+		return { ok: false };
+	}
+	return { ok: true, inputs: value as PromptInputSchema };
 }
 
 function isValidModelSelectionSpec(spec: string): boolean {
@@ -2166,6 +2185,13 @@ function loadPromptsWithModelFromDir(
 				const budgetResult = normalizePromptBudget(frontmatter.budget, fullPath, source, diagnostics);
 				if (!budgetResult.ok) continue;
 				const budget = budgetResult.budget;
+				const inputsResult = normalizePromptInputs(frontmatter.inputs, fullPath, source, diagnostics);
+				if (!inputsResult.ok) continue;
+				const inputs = inputsResult.inputs;
+				if (inputs && rawChain) {
+					diagnostics.push(createDiagnostic("invalid-inputs-chain", fullPath, source, "Prompt inputs are not supported on chain wrappers in v1."));
+					continue;
+				}
 				if (budget && rawChain) {
 					diagnostics.push(createDiagnostic("invalid-budget-chain", fullPath, source, "Prompt budgets belong on executable chain step templates, not chain wrappers."));
 					continue;
@@ -2287,6 +2313,7 @@ function loadPromptsWithModelFromDir(
 					converge === false ||
 					boomerang === true ||
 					budget !== undefined ||
+					inputs !== undefined ||
 					includeConfigIsCommandCapable ||
 					safeParallel !== undefined ||
 					deterministic !== undefined ||
@@ -2330,6 +2357,7 @@ function loadPromptsWithModelFromDir(
 					content,
 					models,
 					budget,
+					inputs,
 					hidden: hidden || undefined,
 					...(includes !== undefined ? { includes } : {}),
 					chain: chain || undefined,
