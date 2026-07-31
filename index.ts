@@ -2247,6 +2247,12 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				notify(ctx, `Templates not found: ${missingTemplates.map((step) => step.name).join(", ")}`, "error");
 				return false;
 			}
+			for (const step of flattened) {
+				if (chainPrompts.get(step.name)?.inputs) {
+					notify(ctx, `Step "${step.name}" declares inputs and cannot run through a legacy chain.`, "error");
+					return false;
+				}
+			}
 
 			for (const step of steps) {
 				if (isParallelChainStep(step)) {
