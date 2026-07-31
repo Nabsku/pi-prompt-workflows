@@ -118,8 +118,9 @@ export function renderPromptForResolvedModel(
 	const inputValues = prompt.resolvedInputValues
 		? Object.fromEntries(Object.entries(prompt.resolvedInputValues).map(([name, value]) => [name, { name, type: typeof value === "boolean" ? "boolean" : "string", value, source: "flag" }])) as never
 		: undefined;
-	const substituted = substituteArgs(rendered.content, args);
-	const content = inputValues ? renderPromptInputValues(substituted, inputValues) : substituted;
+	const protectedArgs = args.map((arg) => arg.replace(/\$\{input\./g, "\uE000pi-input."));
+	const substituted = substituteArgs(rendered.content, protectedArgs);
+	const content = inputValues ? renderPromptInputValues(substituted, inputValues).replace(/\uE000pi-input\./g, "${input.") : substituted.replace(/\uE000pi-input\./g, "${input.");
 	if (content.trim().length === 0) {
 		return {
 			empty: `Prompt \`${prompt.name}\` rendered to an empty message.`,

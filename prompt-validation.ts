@@ -8,7 +8,7 @@ import { evaluatePromptBudget, type PromptBudgetResult } from "./prompt-budget.j
 import { collectPromptIncludeGraphs, type PromptIncludeGraph, type PromptIncludeGraphEdge, type PromptIncludeGraphNode } from "./prompt-includes.js";
 import { collectPromptSourceRecords, discoverFilesystemSkills, loadPromptsWithModel, readSkillContent, resolveSkillPath, type PromptLoaderDiagnostic, type PromptSource, type PromptSourceRecord, type PromptWithModel } from "./prompt-loader.js";
 import { buildSkillLoadedMessage, getRequestedSkills, resolvePromptSkills } from "./prompt-skills.js";
-import { minimumTemplateConditionalContent, renderTemplateConditionals } from "./template-conditionals.js";
+import { minimumTemplateConditionalContent, renderTemplateConditionals, renderTemplateConditionalsWithInputs } from "./template-conditionals.js";
 import { createAdaptivePreflight, type AdaptivePreflight } from "./adaptive-preflight.js";
 import { createAdaptiveChainState, routeAdaptiveChain, type AdaptiveChainState, type ChainObservation } from "./adaptive-chain.js";
 import { capSanitizedText, capSanitizedUtf8Bytes, sanitizeForTerminal, utf8ByteLength } from "./render-safe.js";
@@ -693,7 +693,15 @@ export function validatePromptTemplates(cwd: string, options: PromptValidationOp
 			const slash = spec.indexOf("/");
 			return slash > 0 ? { provider: spec.slice(0, slash), id: spec.slice(slash + 1) } : undefined;
 		});
-		const candidateBodies = configuredModels.length > 0 && configuredModels.every((model) => model !== undefined)
+		const inputBodies = prompt.inputs ? (() => {
+			let variants: Array<Record<string, string | boolean>> = [{}];
+			for (const [name, definition] of Object.entries(prompt.inputs)) {
+				const choices = definition.type === "boolean" ? [false, true] : definition.type === "choice" ? (definition.options ?? []) : [definition.default ?? ""];
+				variants = variants.flatMap((variant) => choices.slice(0, 8).map((value) => ({ ...variant, [name]: value }))).slice(0, 64);
+			}
+			return variants.map((values) => renderTemplateConditionalsWithInputs(substitutedBody, { provider: "", id: "" }, values, prompt.name).content);
+		})() : undefined;
+		const candidateBodies = inputBodies?.length ? inputBodies : configuredModels.length > 0 && configuredModels.every((model) => model !== undefined)
 			? configuredModels.map((model) => renderTemplateConditionals(substitutedBody, model!).content)
 			: minimumConditionalBody !== undefined ? [minimumConditionalBody] : [substitutedBody];
 		const candidateBudgets = candidateBodies.map((body) => evaluatePromptBudget(
