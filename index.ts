@@ -3066,7 +3066,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			}
 		}
 
-		const parsedPromptArgs = [...parseCommandArgs(argsWithoutSubagent), ...boundary.after];
+		const parsedPromptArgs = [...parseCommandArgs(argsWithoutSubagent), ...(boundary.after.length ? ["--", ...boundary.after] : [])];
 		let resolvedInputs = prompt.inputs ? resolvePromptInputs(prompt.inputs, parsedPromptArgs) : undefined;
 		const repairableInputErrors = resolvedInputs?.errors.every((error) => error.startsWith("missing required input") || error.startsWith("missing value for input") || error.startsWith("invalid value for input") || error.includes("must be true or false"));
 		if (resolvedInputs?.errors.length && repairableInputErrors && prompt.inputs && ctx.mode === "tui" && ctx.hasUI && typeof (ctx.ui as { custom?: unknown }).custom === "function") {

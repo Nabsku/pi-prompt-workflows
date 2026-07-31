@@ -140,7 +140,7 @@ function analyzeCalls(steps: readonly StructuredChainStep[], maxSteps: number, m
 }
 export function isAdaptivePromptTarget(target: PromptWithModel | undefined): boolean {
 	return !!target && !target.chain && !target.adaptiveChain && !target.deterministic
-		&& !target.subagent && !target.inheritContext && !target.parallel
+		&& !target.inputs && !target.subagent && !target.inheritContext && !target.parallel
 		&& target.loop === undefined && !target.boomerang && !target.workers
 		&& !target.reviewers && !target.finalApplier && !target.preset;
 }
