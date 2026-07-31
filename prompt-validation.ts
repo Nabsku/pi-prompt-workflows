@@ -8,6 +8,7 @@ import { evaluatePromptBudget, type PromptBudgetResult } from "./prompt-budget.j
 import { collectPromptIncludeGraphs, type PromptIncludeGraph, type PromptIncludeGraphEdge, type PromptIncludeGraphNode } from "./prompt-includes.js";
 import { collectPromptSourceRecords, discoverFilesystemSkills, loadPromptsWithModel, readSkillContent, resolveSkillPath, type PromptLoaderDiagnostic, type PromptSource, type PromptSourceRecord, type PromptWithModel } from "./prompt-loader.js";
 import { buildSkillLoadedMessage, getRequestedSkills, resolvePromptSkills } from "./prompt-skills.js";
+import { renderPromptInputValues } from "./prompt-inputs.js";
 import { minimumTemplateConditionalContent, renderTemplateConditionals, renderTemplateConditionalsWithInputs } from "./template-conditionals.js";
 import { createAdaptivePreflight, type AdaptivePreflight } from "./adaptive-preflight.js";
 import { createAdaptiveChainState, routeAdaptiveChain, type AdaptiveChainState, type ChainObservation } from "./adaptive-chain.js";
@@ -699,7 +700,10 @@ export function validatePromptTemplates(cwd: string, options: PromptValidationOp
 				const choices = definition.type === "boolean" ? [false, true] : definition.type === "choice" ? (definition.options ?? []) : [definition.default ?? ""];
 				variants = variants.flatMap((variant) => choices.slice(0, 8).map((value) => ({ ...variant, [name]: value }))).slice(0, 64);
 			}
-			return variants.map((values) => renderTemplateConditionalsWithInputs(substitutedBody, { provider: "", id: "" }, values, prompt.name).content);
+			return variants.map((values) => {
+				const resolved = Object.fromEntries(Object.entries(values).map(([name, value]) => [name, { name, type: typeof value === "boolean" ? "boolean" : "string", value, source: "default" }]));
+				return renderTemplateConditionalsWithInputs(renderPromptInputValues(substitutedBody, resolved), { provider: "", id: "" }, values, prompt.name).content;
+			});
 		})() : undefined;
 		const candidateBodies = inputBodies?.length ? inputBodies : configuredModels.length > 0 && configuredModels.every((model) => model !== undefined)
 			? configuredModels.map((model) => renderTemplateConditionals(substitutedBody, model!).content)
