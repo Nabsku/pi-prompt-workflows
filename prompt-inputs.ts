@@ -194,6 +194,11 @@ export function validatePromptInputReferences(content: string, schema: PromptInp
 		if (!INPUT_NAME.test(name)) errors.push(`input reference ${JSON.stringify(name)} must use a kebab-case name`);
 		else if (!names.has(name)) errors.push(`input reference ${JSON.stringify(name)} is not declared`);
 	}
+	for (const match of content.matchAll(/<if-input\s+name="([^"]*)"\s+is="([^"]*)"/g)) {
+		const definition = schema[match[1]];
+		if (definition?.type === "choice" && !definition.options.includes(match[2])) errors.push(`input conditional ${JSON.stringify(match[1])} has impossible value ${JSON.stringify(match[2])}`);
+		if (definition?.type === "boolean" && match[2] !== "true" && match[2] !== "false") errors.push(`input conditional ${JSON.stringify(match[1])} has invalid boolean value ${JSON.stringify(match[2])}`);
+	}
 	if (content.includes("<if-input") && !content.includes("</if-input>")) errors.push("missing closing </if-input> tag");
 	if (content.includes("</if-input>") && !content.includes("<if-input")) errors.push("closing </if-input> tag has no opening tag");
 	return [...new Set(errors)];
