@@ -3070,12 +3070,16 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		let resolvedInputs = prompt.inputs ? resolvePromptInputs(prompt.inputs, parsedPromptArgs) : undefined;
 		const repairableInputErrors = resolvedInputs?.errors.every((error) => error.startsWith("missing required input") || error.startsWith("missing value for input") || error.startsWith("invalid value for input") || error.includes("must be true or false"));
 		if (resolvedInputs?.errors.length && repairableInputErrors && prompt.inputs && ctx.mode === "tui" && ctx.hasUI && typeof (ctx.ui as { custom?: unknown }).custom === "function") {
-			const initialValues = Object.fromEntries(Object.entries(resolvedInputs.values).map(([name, input]) => [name, input.value]));
-			const formResult = await ctx.ui.custom((tui, theme, _layout, done) => new PromptInputForm(prompt.inputs!, initialValues, done));
+			const repairNames = new Set(resolvedInputs.errors.map((error) => error.match(/input ["']?([a-z][a-z0-9-]*)/)?.[1]).filter((name): name is string => Boolean(name)));
+			const repairSchema = Object.fromEntries(Object.entries(prompt.inputs).filter(([name]) => repairNames.has(name)));
+			const initialValues = Object.fromEntries(Object.entries(resolvedInputs.values).filter(([name]) => repairNames.has(name)).map(([name, input]) => [name, input.value]));
+			const formResult = await ctx.ui.custom((tui, theme, _layout, done) => new PromptInputForm(repairSchema, initialValues, done));
 			if (formResult && typeof formResult === "object" && (formResult as { action?: string }).action === "submitted") {
 				const values = (formResult as { values: Record<string, string | boolean> }).values;
 				const flags = Object.entries(values).map(([name, value]) => typeof value === "boolean" ? (value ? `--${name}` : `--no-${name}`) : `--${name}=${value}`);
-				resolvedInputs = resolvePromptInputs(prompt.inputs, [...flags, ...resolvedInputs.positional]);
+				const repaired = resolvePromptInputs(repairSchema, flags);
+				if (repaired.errors.length) resolvedInputs = { ...resolvedInputs, errors: repaired.errors };
+				else resolvedInputs = { values: { ...resolvedInputs.values, ...repaired.values }, positional: resolvedInputs.positional, errors: [] };
 			} else return;
 		}
 		if (resolvedInputs?.errors.length) {
