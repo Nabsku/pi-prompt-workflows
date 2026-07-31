@@ -38,6 +38,7 @@ import {
 	type PromptWithModel,
 } from "./prompt-loader.js";
 import { createInvalidAdaptivePreflight, isAdaptivePromptTarget, isAdaptiveRunTarget } from "./adaptive-preflight.js";
+import { PromptInputForm } from "./prompt-input-tui.js";
 import { resolvePromptInputs } from "./prompt-inputs.js";
 import {
 	buildSkillLoadedMessage,
@@ -3054,7 +3055,16 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return;
 
 		const parsedPromptArgs = parseCommandArgs(argsWithoutSubagent);
-		const resolvedInputs = prompt.inputs ? resolvePromptInputs(prompt.inputs, parsedPromptArgs) : undefined;
+		let resolvedInputs = prompt.inputs ? resolvePromptInputs(prompt.inputs, parsedPromptArgs) : undefined;
+		if (resolvedInputs?.errors.length && prompt.inputs && ctx.mode === "tui" && ctx.hasUI && typeof (ctx.ui as { custom?: unknown }).custom === "function") {
+			const initialValues = Object.fromEntries(Object.entries(resolvedInputs.values).map(([name, input]) => [name, input.value]));
+			const formResult = await ctx.ui.custom((tui, theme, _layout, done) => new PromptInputForm(prompt.inputs!, initialValues, done));
+			if (formResult && typeof formResult === "object" && (formResult as { action?: string }).action === "submitted") {
+				const values = (formResult as { values: Record<string, string | boolean> }).values;
+				const flags = Object.entries(values).map(([name, value]) => typeof value === "boolean" ? (value ? `--${name}` : `--no-${name}`) : `--${name}=${value}`);
+				resolvedInputs = resolvePromptInputs(prompt.inputs, [...flags, ...parsedPromptArgs]);
+			} else return;
+		}
 		if (resolvedInputs?.errors.length) {
 			notify(ctx, `Invalid prompt inputs: ${resolvedInputs.errors[0]}`, "error");
 			return;
