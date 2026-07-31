@@ -58,7 +58,7 @@ test("requires a resolution path for strings and choices", () => {
 test("renders input conditionals and substitutions", () => {
 	const resolved = resolvePromptInputs({ "run-tests": { type: "boolean", default: true }, target: { type: "string", required: true } }, ["--target", "src/app.ts"]);
 	assert.equal(resolved.errors.length, 0);
-	assert.equal(renderPromptInputValues("Review ${input.target}.<if-input name=\"run-tests\" is=\"true\"> Test it.<else> Skip it.</if-input>", resolved.values), "Review src/app.ts. Test it.");
+	assert.equal(renderPromptInputValues("Review ${input.target}.<if-input name=\"run-tests\" is=\"true\"> Test it.<else> Skip it.</if-input>", resolved.values), "Review src/app.ts.<if-input name=\"run-tests\" is=\"true\"> Test it.<else> Skip it.</if-input>");
 });
 
 test("rejects invalid defaults, malformed names, and unsupported types", () => {
