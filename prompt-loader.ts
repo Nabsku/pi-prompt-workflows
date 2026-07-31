@@ -2190,8 +2190,8 @@ function loadPromptsWithModelFromDir(
 				const inputsResult = normalizePromptInputs(frontmatter.inputs, fullPath, source, diagnostics);
 				if (!inputsResult.ok) continue;
 				const inputs = inputsResult.inputs;
-				if (inputs && rawChain) {
-					diagnostics.push(createDiagnostic("invalid-inputs-chain", fullPath, source, "Prompt inputs are not supported on chain wrappers in v1."));
+				if (inputs && (rawChain || frontmatter.loop !== undefined || frontmatter.subagent || frontmatter.parallel || frontmatter.workers || frontmatter.reviewers || frontmatter.finalApplier || frontmatter.preset || frontmatter.deterministic)) {
+					diagnostics.push(createDiagnostic(rawChain ? "invalid-inputs-chain" : "invalid-inputs-mode", fullPath, source, rawChain ? "Prompt inputs are not supported on chain wrappers in v1." : "Prompt inputs are unsupported with loops, delegation, parallel, compare, or deterministic execution."));
 					continue;
 				}
 				if (budget && rawChain) {
