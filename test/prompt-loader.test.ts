@@ -147,6 +147,61 @@ test("settings prompt patterns honor config-relative includes, excludes, and exa
 	});
 });
 
+test("settings filters apply to default prompt roots relative to their config directory", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const defaultRoot = join(cwd, ".pi", "prompts");
+		mkdirSync(defaultRoot, { recursive: true });
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ prompts: ["-prompts/excluded.md"] }));
+		writeFileSync(join(defaultRoot, "excluded.md"), "---\nmodel: test/excluded\n---\nexcluded");
+
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.has("excluded"), false);
+	});
+});
+
+test("project settings can override a user settings path pointing to the same canonical file", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const sharedPath = join(root, "shared.md");
+		mkdirSync(join(root, ".pi", "agent"), { recursive: true });
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		writeFileSync(join(root, ".pi", "agent", "settings.json"), JSON.stringify({ prompts: [sharedPath] }));
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ prompts: [sharedPath] }));
+		writeFileSync(sharedPath, "---\nmodel: test/shared\n---\nshared");
+
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.get("shared")?.source, "project");
+		assert.equal(collectPromptSourceRecords(cwd, true).inventoryRecords.filter((record) => record.promptName === "shared").length, 2);
+	});
+});
+
+test("configured prompt directories honor resource ignore files and standard exclusions", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const configuredRoot = join(cwd, "workspace");
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		for (const directory of ["node_modules", ".hidden", "git-only", "ignore-only", "fd-only", "keep"]) mkdirSync(join(configuredRoot, directory), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ prompts: ["../workspace"] }));
+		writeFileSync(join(configuredRoot, ".gitignore"), "git-only/\n");
+		writeFileSync(join(configuredRoot, ".ignore"), "ignore-only/\n");
+		writeFileSync(join(configuredRoot, ".fdignore"), "fd-only/\n");
+		for (const [directory, name] of [["node_modules", "dependency"], [".hidden", "hidden"], ["git-only", "git"], ["ignore-only", "ignore"], ["fd-only", "fd"], ["keep", "keep"]]) {
+			writeFileSync(join(configuredRoot, directory, `${name}.md`), `---\nmodel: test/${name}\n---\n${name}`);
+		}
+		writeFileSync(join(configuredRoot, ".hidden-file.md"), "---\nmodel: test/hidden-file\n---\nhidden-file");
+
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.get("keep")?.content, "keep");
+		for (const name of ["dependency", "hidden", "git", "ignore", "fd", "hidden-file"]) assert.equal(result.prompts.has(name), false);
+
+		const inventory = collectPromptSourceRecords(cwd, true);
+		for (const name of ["dependency", "hidden", "git", "ignore", "fd", "hidden-file"]) {
+			assert.equal(inventory.inventoryRecords.some((record) => record.promptName === name), false);
+		}
+	});
+});
+
 test("loadPromptsWithModel accepts max thinking in scalar and rotated metadata", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");

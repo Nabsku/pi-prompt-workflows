@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import type { Dirent } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -147,6 +147,17 @@ function projectPiPackageCandidates(cwd: string): string[] {
 	return candidates;
 }
 
+function isPiSubagentsPackageRoot(root: string): boolean {
+	const packagePath = join(root, "package.json");
+	if (!existsSync(packagePath)) return false;
+	try {
+		const packageJson = JSON.parse(readFileSync(packagePath, "utf-8")) as { name?: unknown };
+		return packageJson.name === "pi-subagents";
+	} catch {
+		return false;
+	}
+}
+
 function findManagedGitCandidates(root: string, maxDepth = 6, maxDirectories = 256): string[] {
 	const candidates: string[] = [];
 	const pending: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
@@ -154,7 +165,7 @@ function findManagedGitCandidates(root: string, maxDepth = 6, maxDirectories = 2
 	while (pending.length > 0 && visited < maxDirectories) {
 		const current = pending.shift()!;
 		visited++;
-		if (hasRuntimeModule(current.dir) || hasRuntimeModule(join(current.dir, "src", "agents")) || hasRuntimeModule(join(current.dir, "dist", "agents"))) {
+		if (isPiSubagentsPackageRoot(current.dir) && (hasRuntimeModule(current.dir) || hasRuntimeModule(join(current.dir, "src", "agents")) || hasRuntimeModule(join(current.dir, "dist", "agents")))) {
 			candidates.push(current.dir);
 			continue;
 		}
