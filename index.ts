@@ -38,7 +38,7 @@ import {
 	type PromptWithModel,
 } from "./prompt-loader.js";
 import { createInvalidAdaptivePreflight, isAdaptivePromptTarget, isAdaptiveRunTarget } from "./adaptive-preflight.js";
-import { renderPromptInputValues, resolvePromptInputs } from "./prompt-inputs.js";
+import { resolvePromptInputs } from "./prompt-inputs.js";
 import {
 	buildSkillLoadedMessage,
 	getRequestedSkills,
@@ -3077,7 +3077,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 		const effectivePrompt = {
 			...prompt,
-			...(resolvedInputs ? { content: renderPromptInputValues(prompt.content, resolvedInputs.values) } : {}),
+			...(resolvedInputs ? { resolvedInputValues: Object.fromEntries(Object.entries(resolvedInputs.values).map(([key, input]) => [key, input.value])) } : {}),
 			...(runtimeCwd ? {
 				cwd: runtimeCwd,
 				...(prompt.deterministic ? { deterministic: { ...prompt.deterministic, cwd: runtimeCwd } } : {}),

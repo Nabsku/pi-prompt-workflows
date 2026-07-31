@@ -3,7 +3,7 @@ import { substituteArgs } from "./args.js";
 import { getResolvedModelRef, selectModelCandidate, type RegistryLike, type SelectedModelCandidate } from "./model-selection.js";
 import type { PromptWithModel } from "./prompt-loader.js";
 import { evaluatePromptBudget } from "./prompt-budget.js";
-import { renderTemplateConditionals } from "./template-conditionals.js";
+import { renderTemplateConditionals, renderTemplateConditionalsWithInputs } from "./template-conditionals.js";
 
 export interface PreparedPromptExecution {
 	selectedModel: SelectedModelCandidate;
@@ -107,11 +107,13 @@ export function checkPromptExecutionBudget(
 }
 
 export function renderPromptForResolvedModel(
-	prompt: Pick<PromptWithModel, "name" | "content">,
+	prompt: Pick<PromptWithModel, "name" | "content" | "resolvedInputValues">,
 	args: string[],
 	model: Model<any>,
 ): RenderedPrompt {
-	const rendered = renderTemplateConditionals(prompt.content, getResolvedModelRef(model), prompt.name);
+	const rendered = prompt.resolvedInputValues
+		? renderTemplateConditionalsWithInputs(prompt.content, getResolvedModelRef(model), prompt.resolvedInputValues, prompt.name)
+		: renderTemplateConditionals(prompt.content, getResolvedModelRef(model), prompt.name);
 	const content = substituteArgs(rendered.content, args);
 	if (content.trim().length === 0) {
 		return {
@@ -131,7 +133,7 @@ function sameModel(a: Model<any> | undefined, b: Model<any> | undefined): boolea
 }
 
 export async function preparePromptExecution(
-	prompt: Pick<PromptWithModel, "name" | "content" | "models" | "budget">,
+	prompt: Pick<PromptWithModel, "name" | "content" | "models" | "budget" | "resolvedInputValues">,
 	args: string[],
 	currentModel: Model<any> | undefined,
 	modelRegistry: RegistryLike,
