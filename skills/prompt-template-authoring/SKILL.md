@@ -176,7 +176,7 @@ limits:
   maxModelCalls: 2
 ```
 
-Prompt actions cost one model call; run and skipped actions cost zero. `run` targets must be deterministic with `handoff: never`. Prompt targets cannot be loops, delegated/parallel, boomerang, compare, deterministic, or nested chains. Changed evidence is a fail-closed before/after Git snapshot, so use a readable Git worktree. For read-only Git companions, put `--no-optional-locks -c core.fsmonitor=false` before the subcommand and disable helpers explicitly. Use the staged-only check `git --no-optional-locks -c core.fsmonitor=false --no-pager diff --cached --no-ext-diff --no-textconv --check`; do not package a generic unstaged diff check, because configured conversion filters may execute while Git prepares it. Always run `/validate-prompts` and `/dry-run-prompt <chain> --plain` first; preflight is read-only and runtime revalidates targets, skills, models, budgets, cwd, and snapshots.
+Prompt actions cost one model call; run and skipped actions cost zero. `run` targets must be deterministic with `handoff: never`. Prompt targets cannot be loops, delegated/parallel, boomerang, compare, deterministic, or nested chains. Changed evidence is a fail-closed before/after Git snapshot, so use a readable Git worktree. For read-only Git companions, put `--no-optional-locks -c core.fsmonitor=false` before the subcommand and disable helpers explicitly. Use the staged-only check `git --no-optional-locks -c core.fsmonitor=false --no-pager diff --cached --no-ext-diff --no-textconv --check`. Status companions should combine filter-free worktree/untracked evidence with `git --no-optional-locks -c core.fsmonitor=false --no-pager diff --cached --name-status --no-ext-diff --no-textconv --` so staged additions, deletions, renames, and modifications remain visible. Do not package a generic unstaged diff check, because configured conversion filters may execute while Git prepares it. Always run `/validate-prompts` and `/dry-run-prompt <chain> --plain` first; preflight is read-only and runtime revalidates targets, skills, models, budgets, cwd, and snapshots.
 
 ## Model Conditionals
 
@@ -263,5 +263,9 @@ Override frontmatter at invocation:
 - `--worktree` — use git worktrees for parallel delegated work
 - `--preset=<name>` / `--preset <name>` — select a best-of-N preset for compare prompts only
 - `--keep-artifacts` — retain raw best-of-N worker/reviewer/final-applier artifacts next to the generated report
+
+## Typed Prompt Inputs
+
+Input-enabled templates may declare only `string`, `choice`, and `boolean` fields under `inputs`. Use `--name=value` or `--name value`; boolean fields also support `--no-name`. Defaults apply automatically. `${input.name}` and `<if-input name="..." is="...">...</if-input>` change body Markdown only. Use `--` before positional text when needed; named input flags are removed before `$@` substitution. Interactive TUI invocations open a compact form for unresolved values. Headless, plain, RPC, dry-run, and unsupported workflow modes never wait for input and instead fail clearly. Input values cannot select includes, models, skills, commands, paths, delegation, or other executable configuration.
 
 When stuck, check `README.md` and the packaged examples: start with `examples/hello.md` or `examples/review.md`, then use `examples/best-of-n-smoke.md` before the advanced `examples/best-of-n.md` compare prompt.

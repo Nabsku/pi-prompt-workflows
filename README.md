@@ -182,7 +182,32 @@ skill: tmux
 Start a Python REPL session and help me debug: $@
 ```
 
-## Validation
+For a prompt that needs typed named values, declare an `inputs` mapping. V1 supports `string`, `choice`, and `boolean` inputs:
+
+```markdown
+---
+description: Review a selected target
+model: claude-sonnet-4-20250514
+inputs:
+  target:
+    type: string
+    required: true
+  depth:
+    type: choice
+    options: [quick, deep]
+    default: quick
+  run-tests:
+    type: boolean
+    default: false
+---
+Review `${input.target}` at `${input.depth}` depth.
+<if-input name="run-tests" is="true">Run focused tests.<else>Do not run tests.</if-input>
+```
+
+Invoke named values with `--name=value` or `--name value`; boolean inputs also accept `--no-name`. A quote-aware `--` boundary leaves everything after it as positional `$@` text. `${input.name}` and `<if-input>` affect Markdown body content only; static include paths and executable configuration remain fixed. Missing values open one compact form in interactive TUI mode. Plain, RPC, dry-run, and other headless paths never block for input: they apply defaults and report unresolved values with an actionable error. Input-enabled loops, chains, delegation, compare/best-of-N, and deterministic prompts are rejected in v1.
+
+See [`examples/interactive-inputs.md`](examples/interactive-inputs.md) for a complete safe review example.
+
 
 Run `/validate-prompts` to check prompt templates before using them. It reloads the project and user prompt directories, validates frontmatter, include paths, include cycles, chain declarations, reserved command names, and skill references that can be resolved from registered or filesystem skills.
 
@@ -1258,7 +1283,7 @@ The plain report and Pi TUI inspector show the bounded graph, gates/transitions,
 
 Only one adaptive chain is allowed in flight for the extension. Cancellation is checked before routing, before dispatch, after snapshots, and after an action; the partial report is retained. Child command cleanup uses the deterministic runner's TERM-then-KILL behavior. On Unix this targets the managed child/process group where available, but no API can guarantee cleanup of a daemon that deliberately detaches itself. Windows uses the platform's available child termination fallback and cannot promise Unix signal/process-group semantics. Snapshot failure, malformed/reloaded targets, missing targets, unsupported modes, and report errors fail closed instead of bypassing routing checks.
 
-Packaged starters are `examples/adaptive-fix-review.md` (plus its hidden companion targets) and `examples/adaptive-validation-review.md`. Copy the complete adaptive example set so target names resolve. Their deterministic checks are hardened read-only Git commands: the staged-only `git --no-optional-locks -c core.fsmonitor=false --no-pager diff --cached --no-ext-diff --no-textconv --check` and `git --no-optional-locks -c core.fsmonitor=false status --porcelain=v1`. The packaged whitespace check intentionally does not inspect unstaged content, because configured conversion filters can execute while Git prepares an unstaged diff. These commands disable configured external diff/textconv/pager helpers and fsmonitor/index-refresh side effects, never invoke package lifecycle/config hooks, and never hand off to another model. Prompt/model steps can edit by design: implementation and fix prompts may mutate the worktree, while the companion review prompt explicitly requests findings only.
+Packaged starters are `examples/adaptive-fix-review.md` (plus its hidden companion targets) and `examples/adaptive-validation-review.md`. Copy the complete adaptive example set so target names resolve. Their deterministic checks are hardened read-only Git commands: the staged-only whitespace check `git --no-optional-locks -c core.fsmonitor=false --no-pager diff --cached --no-ext-diff --no-textconv --check`, plus status companions that combine `git --no-optional-locks -c core.fsmonitor=false ls-files --modified --deleted --others --exclude-standard` with `git --no-optional-locks -c core.fsmonitor=false --no-pager diff --cached --name-status --no-ext-diff --no-textconv --`. Thus staged additions, deletions, renames, and modifications are reported alongside worktree/untracked changes. The packaged whitespace check intentionally does not inspect unstaged content, because configured conversion filters can execute while Git prepares an unstaged diff. These commands disable configured external diff/textconv/pager helpers and fsmonitor/index-refresh side effects, never invoke package lifecycle/config hooks, and never hand off to another model. Prompt/model steps can edit by design: implementation and fix prompts may mutate the worktree, while the companion review prompt explicitly requests findings only.
 
 To migrate `chain: analyze -> fix -> review`, replace the scalar with a list of `{prompt: ...}` entries. With no gates/transitions, natural fallthrough preserves sequential intent, but adaptive limits and Git snapshot requirements still apply. Keep legacy string chains when you need their supported looping, delegation, parallel groups, shared arguments, or chain-context behavior; structured adaptive chains deliberately do not emulate those multi-call modes.
 
