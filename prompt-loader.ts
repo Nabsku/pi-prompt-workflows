@@ -144,6 +144,8 @@ export interface LoadPromptsWithModelResult {
 export interface LoadPromptsWithModelOptions {
 	/** Include parsed adaptive-chain wrappers for adaptive-aware consumers. Defaults to false. */
 	includeAdaptiveChains?: boolean;
+	/** Load project-local prompt roots only when the current Pi session trusts the project. Defaults to true. */
+	projectTrusted?: boolean;
 }
 
 export interface PromptSourceRecord {
@@ -1783,19 +1785,23 @@ function matchesSettingsPatterns(filePath: string, patterns: readonly string[], 
 	return enabled;
 }
 
-function discoverPromptRoots(cwd: string): PromptRootDiscovery {
+function discoverPromptRoots(cwd: string, options: Pick<LoadPromptsWithModelOptions, "projectTrusted"> = {}): PromptRootDiscovery {
 	const userBase = join(homedir(), ".pi", "agent");
 	const projectBase = resolve(cwd, ".pi");
 	const userSettings = loadSettingsPromptRoots(join(userBase, "settings.json"), "user", userBase);
-	const projectSettings = loadSettingsPromptRoots(join(projectBase, "settings.json"), "project", projectBase);
+	const projectSettings: { roots: PromptRoot[]; patterns?: string[]; diagnostics: PromptLoaderDiagnostic[] } = options.projectTrusted === false
+		? { roots: [], patterns: undefined, diagnostics: [] }
+		: loadSettingsPromptRoots(join(projectBase, "settings.json"), "project", projectBase);
 	return {
 		roots: [
 			...userSettings.roots,
 			{ source: "user", kind: "prompts", dir: join(userBase, "prompts"), patterns: userSettings.patterns?.filter((pattern) => /^[!+-]/.test(pattern)), patternsBaseDir: userBase },
 			{ source: "user", kind: "prompt-library", dir: join(userBase, "prompt-library") },
 			...projectSettings.roots,
-			{ source: "project", kind: "prompts", dir: join(projectBase, "prompts"), patterns: projectSettings.patterns?.filter((pattern) => /^[!+-]/.test(pattern)), patternsBaseDir: projectBase },
-			{ source: "project", kind: "prompt-library", dir: join(projectBase, "prompt-library") },
+			...(options.projectTrusted === false ? [] : [
+				{ source: "project" as const, kind: "prompts" as const, dir: join(projectBase, "prompts"), patterns: projectSettings.patterns?.filter((pattern) => /^[!+-]/.test(pattern)), patternsBaseDir: projectBase },
+			]),
+			{ source: "project" as const, kind: "prompt-library" as const, dir: join(projectBase, "prompt-library") },
 		],
 		diagnostics: [...userSettings.diagnostics, ...projectSettings.diagnostics],
 	};
@@ -2880,14 +2886,18 @@ function isIncludeGraphRelevantSkippedRecord(record: PromptSourceRecord): boolea
 	return record.includes !== undefined || record.hasInlineIncludes || record.hasIncludesPlaceholder || record.includeMetadataInvalid === true;
 }
 
-export function collectPromptSourceRecords(cwd: string, includePlainPrompts = true): CollectPromptSourceRecordsResult {
+export function collectPromptSourceRecords(
+	cwd: string,
+	includePlainPrompts = true,
+	options: LoadPromptsWithModelOptions = {},
+): CollectPromptSourceRecordsResult {
 	const recordMap = new Map<string, PromptSourceRecord[]>();
 	const inventoryRecords: PromptSourceRecord[] = [];
 	const diagnostics: PromptLoaderDiagnostic[] = [];
-	const discovery = discoverPromptRoots(cwd);
+	const discovery = discoverPromptRoots(cwd, options);
 	diagnostics.push(...discovery.diagnostics);
 	const seenFilesBySource: Record<PromptSource, Set<string>> = { user: new Set<string>(), project: new Set<string>() };
-	const loaderResult = loadPromptsWithModel(cwd, includePlainPrompts, { includeAdaptiveChains: true });
+	const loaderResult = loadPromptsWithModel(cwd, includePlainPrompts, { ...options, includeAdaptiveChains: true });
 	const effectivePromptPaths = new Set([...loaderResult.prompts.values()].map((prompt) => prompt.filePath));
 
 	function replaceRecord(bucket: PromptSourceRecord[], existing: PromptSourceRecord, record: PromptSourceRecord): PromptSourceRecord[] {
@@ -2958,7 +2968,7 @@ export function loadPromptsWithModel(
 ): LoadPromptsWithModelResult {
 	const promptMap = new Map<string, PromptWithModel>();
 	const diagnostics: PromptLoaderDiagnostic[] = [];
-	const discovery = discoverPromptRoots(cwd);
+	const discovery = discoverPromptRoots(cwd, options);
 	diagnostics.push(...discovery.diagnostics);
 	const seenFilesBySource: Record<PromptSource, Set<string>> = { user: new Set<string>(), project: new Set<string>() };
 

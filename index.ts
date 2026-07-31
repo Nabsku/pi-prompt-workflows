@@ -324,13 +324,18 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		});
 	}
 
+	function projectIsTrusted(ctx?: Partial<ExtensionContext>): boolean {
+		return typeof ctx?.isProjectTrusted === "function" ? ctx.isProjectTrusted() : true;
+	}
+
 	function refreshPrompts(cwd: string, ctx?: ExtensionContext) {
-		const result = loadPromptsWithModel(cwd);
-		const chainResult = loadPromptsWithModel(cwd, true, { includeAdaptiveChains: true });
+		const loaderOptions = { projectTrusted: projectIsTrusted(ctx) };
+		const result = loadPromptsWithModel(cwd, false, loaderOptions);
+		const chainResult = loadPromptsWithModel(cwd, true, { ...loaderOptions, includeAdaptiveChains: true });
 		prompts = result.prompts;
 		chainPrompts = chainResult.prompts;
 		adaptivePrompts = new Map([...chainResult.prompts].filter(([, prompt]) => prompt.adaptiveChain !== undefined));
-		const inventory = collectPromptSourceRecords(cwd, true).inventoryRecords;
+		const inventory = collectPromptSourceRecords(cwd, true, loaderOptions).inventoryRecords;
 		blockedAdaptivePrompts = new Map();
 		for (const record of selectEffectivePromptSourceRecords(inventory).values()) {
 			if (chainResult.prompts.has(record.promptName)) continue;
@@ -2873,7 +2878,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			executionStarted = true;
 			const fallbackCwd = wrapper.cwd ?? ctx.cwd;
 			const changedEvidenceSuppliers = new Set([...changedGateAnalysis.predecessors.values()].flatMap((ids) => [...ids]));
-			const freshAdaptiveTarget = (target: string) => loadPromptsWithModel(ctx.cwd, true, { includeAdaptiveChains: true }).prompts.get(target);
+			const freshAdaptiveTarget = (target: string) => loadPromptsWithModel(ctx.cwd, true, { includeAdaptiveChains: true, projectTrusted: projectIsTrusted(ctx) }).prompts.get(target);
 			const report = await executeAdaptiveChain(wrapper.adaptiveChain, {
 				signal: ctx.signal,
 				resolvePrompt(target) {
@@ -3444,7 +3449,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	pi.registerCommand("validate-prompts", {
 		description: "Validate prompt templates, includes, frontmatter, and skill references",
 		handler: async (args, ctx) => {
-			const validation = validatePromptTemplates(ctx.cwd, { registeredSkills: collectRegisteredPromptSkills() });
+			const validation = validatePromptTemplates(ctx.cwd, { registeredSkills: collectRegisteredPromptSkills(), projectTrusted: projectIsTrusted(ctx) });
 			const output = formatPromptValidationReport(validation);
 			const plain = args.split(/\s+/).some((arg) => arg === "--plain");
 			if (plain) {
