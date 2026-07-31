@@ -108,9 +108,11 @@ function parseOptionTokens(tokens: string[], schema: PromptInputSchema): { optio
 		if (token.startsWith("--")) {
 			options.push(token);
 			const equals = token.indexOf("=");
-			const nameToken = equals === -1 ? token : token.slice(0, equals);
-			const name = nameToken.startsWith("--no-") ? nameToken.slice(5) : nameToken.slice(2);
-			const definition = schema[name];
+			const rawName = equals === -1 ? token : token.slice(0, equals);
+			const isNegative = rawName.startsWith("--no-");
+			const name = isNegative ? rawName.slice(5) : rawName.slice(2);
+			const definition = Object.prototype.hasOwnProperty.call(schema, name) ? schema[name] : undefined;
+			if (isNegative && definition && definition.type !== "boolean") errors.push(`input ${JSON.stringify(name)} does not support a negative alias`);
 			if (definition && definition.type !== "boolean" && equals === -1) {
 				const next = tokens[index + 1];
 				if (next !== undefined && next !== "--" && !next.startsWith("--")) { options.push(next); index++; }
@@ -124,9 +126,9 @@ export function resolvePromptInputs(schema: PromptInputSchema, args: string[]): 
 	const schemaErrors = validatePromptInputSchema(schema);
 	if (schemaErrors.length > 0) return { values: {}, positional: args, errors: schemaErrors };
 	const inputArgs = parseOptionTokens(args, schema);
-	const values: Record<string, ResolvedPromptInput> = {};
+	const values: Record<string, ResolvedPromptInput> = Object.create(null);
 	const seen = new Set<string>();
-	const definitions = schema as Record<string, PromptInputDefinition>;
+	const definitions = schema;
 	for (const [name, definition] of Object.entries(definitions)) {
 		if (definition.default !== undefined) values[name] = { name, type: definition.type, value: definition.default, source: "default" };
 	}
@@ -152,7 +154,7 @@ export function resolvePromptInputs(schema: PromptInputSchema, args: string[]): 
 		if (definition.type === "choice" && !definition.options?.includes(rawValue as string)) inputArgs.errors.push(`invalid value for input ${JSON.stringify(name)}: ${JSON.stringify(rawValue)}`);
 		else values[name] = { name, type: definition.type, value: rawValue, source: "flag" };
 	}
-	for (const [name, definition] of Object.entries(definitions)) if (!values[name] && definition.required) inputArgs.errors.push(`missing required input ${JSON.stringify(name)}`);
+	for (const [name, definition] of Object.entries(definitions)) if (!Object.prototype.hasOwnProperty.call(values, name) && definition.required) inputArgs.errors.push(`missing required input ${JSON.stringify(name)}`);
 	return { values, positional: inputArgs.positional, errors: inputArgs.errors };
 }
 
