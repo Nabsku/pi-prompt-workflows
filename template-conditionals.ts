@@ -355,6 +355,7 @@ export function renderTemplateConditionals(
 			literals.push(match);
 			return token;
 		});
+		if (protectedContent === content) return { content };
 		const rendered = renderTemplateConditionals(protectedContent, model, commandName);
 		return { ...rendered, content: rendered.content.replace(/\uE000pi-input-(\d+)\uE001/g, (_, index) => literals[Number(index)] ?? "") };
 	}
