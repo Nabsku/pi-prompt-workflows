@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import type { PromptBudgetConfig } from "./prompt-budget.js";
-import { validatePromptInputSchema, type PromptInputSchema } from "./prompt-inputs.js";
+import { validatePromptInputReferences, validatePromptInputSchema, type PromptInputSchema } from "./prompt-inputs.js";
 import { parseChainDeclaration, type ChainLimits, type StructuredChainStep } from "./chain-parser.js";
 import {
 	extractPromptInlineIncludes,
@@ -2346,6 +2346,13 @@ function loadPromptsWithModelFromDir(
 					}
 					content = renderedIncludes.content;
 					includeGraph = renderedIncludes.includeGraph;
+				}
+				if (inputs) {
+					const inputReferenceErrors = validatePromptInputReferences(content, inputs);
+					if (inputReferenceErrors.length > 0) {
+						for (const error of inputReferenceErrors) diagnostics.push(createDiagnostic("invalid-inputs", fullPath, source, `Skipping prompt template at ${fullPath}: ${error}.`));
+						continue;
+					}
 				}
 				if (!promptCapable && (rootKind === "prompt-library" || !includePlainPrompts)) {
 					continue;

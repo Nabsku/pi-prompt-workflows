@@ -2859,10 +2859,12 @@ test("loadPromptsWithModel parses validated prompt inputs and rejects invalid in
 		mkdirSync(promptsDir, { recursive: true });
 		writeFileSync(join(promptsDir, "valid-inputs.md"), "---\ninputs:\n  target:\n    type: string\n    required: true\n  depth:\n    type: choice\n    options: [quick, deep]\n    default: quick\n  run-tests:\n    type: boolean\n    default: true\n---\nReview");
 		writeFileSync(join(promptsDir, "invalid-inputs.md"), "---\ninputs:\n  model:\n    type: string\n    required: true\n---\nInvalid");
+		writeFileSync(join(promptsDir, "undeclared-input.md"), "---\ninputs:\n  target:\n    type: string\n    required: true\n---\nReview ${input.missing}<if-input name=\"missing\" is=\"x\">x</if-input>");
 		const result = loadPromptsWithModel(cwd, true);
 		assert.deepEqual(Object.keys(result.prompts.get("valid-inputs")?.inputs ?? {}), ["target", "depth", "run-tests"]);
 		assert.equal(result.prompts.has("invalid-inputs"), false);
-		assert.equal(result.diagnostics.filter((item) => item.code === "invalid-inputs").length, 2);
+		assert.equal(result.prompts.has("undeclared-input"), false);
+		assert.equal(result.diagnostics.filter((item) => item.code === "invalid-inputs").length, 3);
 	});
 });
 
