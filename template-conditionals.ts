@@ -348,9 +348,9 @@ export function renderTemplateConditionals(
 	model: ResolvedModelRef,
 	commandName?: string,
 ): RenderConditionalsResult {
-	if (content.includes("<if-input")) {
+	if (content.includes("<if-input") || content.includes("</if-input")) {
 		const literals: string[] = [];
-		const protectedContent = content.replace(/<if-input\b[\s\S]*?<\/if-input>/g, (match) => {
+		const protectedContent = content.replace(/<\/?if-input\b[^>]*>/g, (match) => {
 			const token = `\uE000pi-input-${literals.length}\uE001`;
 			literals.push(match);
 			return token;

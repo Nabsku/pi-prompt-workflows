@@ -40,7 +40,7 @@ import {
 } from "./prompt-loader.js";
 import { createInvalidAdaptivePreflight, isAdaptivePromptTarget, isAdaptiveRunTarget } from "./adaptive-preflight.js";
 import { PromptInputForm } from "./prompt-input-tui.js";
-import { resolvePromptInputs } from "./prompt-inputs.js";
+import { inputModeEligibilityError, resolvePromptInputs } from "./prompt-inputs.js";
 import {
 	buildSkillLoadedMessage,
 	getRequestedSkills,
@@ -2951,8 +2951,13 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			notify(ctx, `Invalid --cwd path: must be absolute`, "error");
 			return;
 		}
+		const inputModeError = inputModeEligibilityError({ ...prompt, subagent: subagent.override || subagent.fork || prompt.subagent });
+		if (inputModeError) {
+			notify(ctx, inputModeError, "error");
+			return;
+		}
 		const argsWithoutSubagent = subagent.args;
-		if (prompt.inputs && (prompt.chain || prompt.loop !== undefined || prompt.workers || prompt.reviewers || prompt.finalApplier || prompt.preset || prompt.deterministic || prompt.subagent || prompt.parallel || subagent.override || subagent.fork || extractLoopCount(argsWithoutSubagent))) {
+		if (prompt.inputs && extractLoopCount(argsWithoutSubagent)) {
 			notify(ctx, "Prompt inputs are only supported on ordinary prompts without loops, chains, delegation, compare, or deterministic execution", "error");
 			return;
 		}
@@ -3058,13 +3063,14 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 		const parsedPromptArgs = [...parseCommandArgs(argsWithoutSubagent), ...boundary.after];
 		let resolvedInputs = prompt.inputs ? resolvePromptInputs(prompt.inputs, parsedPromptArgs) : undefined;
-		if (resolvedInputs?.errors.length && prompt.inputs && ctx.mode === "tui" && ctx.hasUI && typeof (ctx.ui as { custom?: unknown }).custom === "function") {
+		const repairableInputErrors = resolvedInputs?.errors.every((error) => error.startsWith("missing required input") || error.startsWith("invalid value for input"));
+		if (resolvedInputs?.errors.length && repairableInputErrors && prompt.inputs && ctx.mode === "tui" && ctx.hasUI && typeof (ctx.ui as { custom?: unknown }).custom === "function") {
 			const initialValues = Object.fromEntries(Object.entries(resolvedInputs.values).map(([name, input]) => [name, input.value]));
 			const formResult = await ctx.ui.custom((tui, theme, _layout, done) => new PromptInputForm(prompt.inputs!, initialValues, done));
 			if (formResult && typeof formResult === "object" && (formResult as { action?: string }).action === "submitted") {
 				const values = (formResult as { values: Record<string, string | boolean> }).values;
 				const flags = Object.entries(values).map(([name, value]) => typeof value === "boolean" ? (value ? `--${name}` : `--no-${name}`) : `--${name}=${value}`);
-				resolvedInputs = resolvePromptInputs(prompt.inputs, [...flags, ...parsedPromptArgs]);
+				resolvedInputs = resolvePromptInputs(prompt.inputs, [...flags, ...resolvedInputs.positional]);
 			} else return;
 		}
 		if (resolvedInputs?.errors.length) {

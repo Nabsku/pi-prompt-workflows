@@ -122,6 +122,25 @@ function parseOptionTokens(tokens: string[], schema: PromptInputSchema): { optio
 	return { options, positional, errors };
 }
 
+export function inputModeEligibilityError(prompt: {
+	inputs?: PromptInputSchema;
+	chain?: unknown;
+	loop?: unknown;
+	workers?: unknown;
+	reviewers?: unknown;
+	finalApplier?: unknown;
+	preset?: unknown;
+	deterministic?: unknown;
+	subagent?: unknown;
+	parallel?: unknown;
+}): string | undefined {
+	if (!prompt.inputs) return undefined;
+	if (prompt.chain || prompt.loop !== undefined || prompt.workers || prompt.reviewers || prompt.finalApplier || prompt.preset || prompt.deterministic || prompt.subagent || prompt.parallel) {
+		return "Prompt inputs are only supported on ordinary prompts without loops, chains, delegation, compare, or deterministic execution";
+	}
+	return undefined;
+}
+
 export function resolvePromptInputs(schema: PromptInputSchema, args: string[]): ResolvePromptInputsResult {
 	const schemaErrors = validatePromptInputSchema(schema);
 	if (schemaErrors.length > 0) return { values: {}, positional: args, errors: schemaErrors };
