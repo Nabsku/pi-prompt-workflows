@@ -109,8 +109,9 @@ function parseOptionTokens(tokens: string[], schema: PromptInputSchema): { optio
 			options.push(token);
 			const equals = token.indexOf("=");
 			const rawName = equals === -1 ? token : token.slice(0, equals);
-			const isNegative = rawName.startsWith("--no-");
-			const name = isNegative ? rawName.slice(5) : rawName.slice(2);
+			const exactName = rawName.slice(2);
+			const isNegative = rawName.startsWith("--no-") && !Object.prototype.hasOwnProperty.call(schema, exactName);
+			const name = isNegative ? rawName.slice(5) : exactName;
 			const definition = Object.prototype.hasOwnProperty.call(schema, name) ? schema[name] : undefined;
 			if (isNegative && definition && definition.type !== "boolean") errors.push(`input ${JSON.stringify(name)} does not support a negative alias`);
 			if (definition && definition.type !== "boolean" && equals === -1) {
@@ -155,15 +156,17 @@ export function resolvePromptInputs(schema: PromptInputSchema, args: string[]): 
 		const token = inputArgs.options[index];
 		const equals = token.indexOf("=");
 		const rawName = equals === -1 ? token : token.slice(0, equals);
-		const name = rawName.startsWith("--no-") ? rawName.slice(5) : rawName.slice(2);
+		const exactName = rawName.slice(2);
+		const negative = rawName.startsWith("--no-") && !Object.prototype.hasOwnProperty.call(definitions, exactName);
+		const name = negative ? rawName.slice(5) : exactName;
 		const definition = Object.prototype.hasOwnProperty.call(definitions, name) ? definitions[name] : undefined;
 		if (!definition) { inputArgs.errors.push(`unknown option ${token}`); continue; }
 		if (seen.has(name)) { inputArgs.errors.push(`duplicate input ${JSON.stringify(name)}`); continue; }
 		seen.add(name);
 		let rawValue: string | boolean;
 		if (definition.type === "boolean") {
-			if (rawName.startsWith("--no-") && equals !== -1) { inputArgs.errors.push(`negative boolean input ${JSON.stringify(name)} cannot take a value`); continue; }
-			rawValue = rawName.startsWith("--no-") ? false : equals === -1 ? true : token.slice(equals + 1);
+			if (negative && equals !== -1) { inputArgs.errors.push(`negative boolean input ${JSON.stringify(name)} cannot take a value`); continue; }
+			rawValue = negative ? false : equals === -1 ? true : token.slice(equals + 1);
 			if (rawValue !== true && rawValue !== false && rawValue !== "true" && rawValue !== "false") inputArgs.errors.push(`input ${JSON.stringify(name)} must be true or false`);
 			else values[name] = { name, type: definition.type, value: rawValue === true || rawValue === "true", source: "flag" };
 			continue;

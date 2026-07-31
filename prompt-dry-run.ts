@@ -346,7 +346,7 @@ function parseDryRunArgs(prompt: PromptWithModel, rawArgs: string | undefined, a
 	}
 
 	return {
-		args: [...parseCommandArgs(cleanedArgs), ...boundary.after],
+		args: [...parseCommandArgs(cleanedArgs), ...(boundary.after.length ? ["--", ...boundary.after] : [])],
 		runtime: {
 			...(subagent.model ? { model: subagent.model } : {}),
 			...(loop ? { loop } : {}),
