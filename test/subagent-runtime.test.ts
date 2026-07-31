@@ -35,6 +35,8 @@ function writeRuntime(root: string) {
 }
 
 function writeNestedPackageRuntime(packageRoot: string) {
+	mkdirSync(packageRoot, { recursive: true });
+	writeFileSync(join(packageRoot, "package.json"), JSON.stringify({ name: "pi-subagents" }));
 	writeRuntime(join(packageRoot, "src", "agents"));
 }
 
@@ -173,6 +175,18 @@ test("ensureSubagentRuntime discovers Pi-managed extension and git layouts", asy
 	});
 });
 
+test("ensureSubagentRuntime ignores unrelated runtime-looking managed git directories", async () => {
+	await withTempDir(async (root) => {
+		const project = join(root, "project");
+		const unrelatedRoot = join(project, ".pi", "git", "github.com", "aaa", "unrelated");
+		const validRoot = join(project, ".pi", "git", "github.com", "zzz", "pi-subagents");
+		writeRuntime(unrelatedRoot);
+		writeNestedPackageRuntime(validRoot);
+
+		const runtime = await ensureSubagentRuntime(project, { globalNodeModules: [] });
+		assert.equal(runtime.root, join(validRoot, "src", "agents"));
+	});
+});
 test("ensureSubagentRuntime prefers local layouts before injected global installs", async () => {
 	await withTempDir(async (root) => {
 		const project = join(root, "project");
