@@ -46,10 +46,11 @@ export class PromptInputForm implements Component {
 	}
 
 	handleInput(data: string): void {
-		if (data === "q" || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) { this.done?.({ action: "cancelled" }); return; }
+		const current = this.current();
+		if (data === "q" && current?.definition.type !== "string") { this.done?.({ action: "cancelled" }); return; }
+		if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) { this.done?.({ action: "cancelled" }); return; }
 		if (matchesKey(data, Key.up)) { this.index = Math.max(0, this.index - 1); this.error = ""; return; }
 		if (matchesKey(data, Key.down)) { this.index = Math.min(Math.max(0, this.names.length - 1), this.index + 1); this.error = ""; return; }
-		const current = this.current();
 		if (!current) return;
 		if (data === " " && current.definition.type !== "string") {
 			if (current.definition.type === "boolean") this.values[current.name] = !current.value;
