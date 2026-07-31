@@ -38,6 +38,7 @@ import {
 	type PromptWithModel,
 } from "./prompt-loader.js";
 import { createInvalidAdaptivePreflight, isAdaptivePromptTarget, isAdaptiveRunTarget } from "./adaptive-preflight.js";
+import { renderPromptInputValues, resolvePromptInputs } from "./prompt-inputs.js";
 import {
 	buildSkillLoadedMessage,
 	getRequestedSkills,
@@ -2941,6 +2942,10 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			notify(ctx, `Prompt "${name}" is no longer available as a slash command`, "error");
 			return;
 		}
+		if (prompt.inputs && (prompt.chain || prompt.loop !== undefined || prompt.workers || prompt.reviewers || prompt.finalApplier || prompt.preset || prompt.deterministic)) {
+			notify(ctx, "Prompt inputs are only supported on ordinary prompts in v1", "error");
+			return;
+		}
 		const subagent = extractSubagentOverride(args);
 		const runtimeCwd = subagent.cwd ? expandCwdPath(subagent.cwd) : undefined;
 		if (subagent.cwd && !runtimeCwd) {
@@ -3048,6 +3053,11 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 		if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return;
 
+		const resolvedInputs = prompt.inputs ? resolvePromptInputs(prompt.inputs, parseCommandArgs(argsWithoutSubagent)) : undefined;
+		if (resolvedInputs?.errors.length) {
+			notify(ctx, `Invalid prompt inputs: ${resolvedInputs.errors[0]}`, "error");
+			return;
+		}
 		const promptOverrides: Partial<Pick<PromptWithModel, "models" | "inheritContext">> = {
 			...(subagent.model ? { models: [subagent.model] } : {}),
 			...(subagent.fork ? { inheritContext: true } : {}),
@@ -3067,6 +3077,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 		const effectivePrompt = {
 			...prompt,
+			...(resolvedInputs ? { content: renderPromptInputValues(prompt.content, resolvedInputs.values) } : {}),
 			...(runtimeCwd ? {
 				cwd: runtimeCwd,
 				...(prompt.deterministic ? { deterministic: { ...prompt.deterministic, cwd: runtimeCwd } } : {}),
