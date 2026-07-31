@@ -18,7 +18,7 @@ import { stripPromptPartialFrontmatter, type PromptIncludeGraph } from "./prompt
 import { buildSkillLoadedMessage, getRequestedSkills, resolvePromptSkills, type RuntimeSkillCommand } from "./prompt-skills.js";
 import { DEFAULT_SUBAGENT_NAME } from "./subagent-runtime.js";
 import { prepareAdaptivePreflight, type AdaptivePreflight } from "./adaptive-preflight.js";
-import { resolvePromptInputs } from "./prompt-inputs.js";
+import { inputModeEligibilityError, resolvePromptInputs } from "./prompt-inputs.js";
 
 export const DRY_RUN_CHAIN_UNSUPPORTED =
 	"Dry-run for chain templates is not supported in v1. Use /validate-prompts for structural checks.";
@@ -366,9 +366,12 @@ export async function createPromptDryRun(
 	prompt: PromptWithModel,
 	options: CreatePromptDryRunOptions,
 ): Promise<PromptDryRunResult> {
+	const inputModeError = inputModeEligibilityError({ ...prompt, subagent: prompt.subagent || options.rawArgs?.includes("--subagent") || options.rawArgs?.includes("--fork") });
+	if (inputModeError) return errorResult(prompt, inputModeError, []);
 	const parsed = parseDryRunArgs(prompt, options.rawArgs, options.args);
 	const runtime: PromptDryRunRuntimeMetadata = { ...parsed.runtime };
 	const warnings: string[] = [];
+	if (prompt.inputs && parsed.runtime.loop) return errorResult(prompt, inputModeEligibilityError({ inputs: prompt.inputs }) ?? "Prompt inputs do not support runtime loops", warnings, runtime);
 	let resolvedPositional = parsed.args;
 	if (prompt.inputs) {
 		const resolved = resolvePromptInputs(prompt.inputs, parsed.args);
