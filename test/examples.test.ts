@@ -55,13 +55,13 @@ test("packaged adaptive examples load and validate with their companion targets"
 test("packaged Git checks use exact hardened argv and bypass configured helpers", () => {
 	withExamplePrompts((cwd) => {
 		const loaded = loadPromptsWithModel(cwd);
-		const expectedStatusCommand = "git --no-optional-locks -c core.fsmonitor=false ls-files --modified --deleted --others --exclude-standard && git --no-optional-locks -c core.fsmonitor=false --no-pager diff --cached --name-status --no-ext-diff --no-textconv --";
+		const expectedStatusArgs = ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--short"];
 		const expectedDiffCommand = "git --no-optional-locks -c core.fsmonitor=false --no-pager diff --cached --no-ext-diff --no-textconv --check";
 		for (const name of ["adaptive-status", "adaptive-validate"]) {
 			const execution = loaded.prompts.get(name)?.deterministic?.execution;
 			assert.equal(execution?.kind, "command");
-			assert.equal(execution?.command, "/bin/sh");
-			assert.deepEqual(execution?.args, ["-c", expectedStatusCommand]);
+			assert.equal(execution?.command, "git");
+			assert.deepEqual(execution?.args, expectedStatusArgs);
 		}
 		const diffExecution = loaded.prompts.get("adaptive-test")?.deterministic?.execution;
 		assert.equal(diffExecution?.kind, "run");
@@ -116,7 +116,7 @@ test("packaged Git checks use exact hardened argv and bypass configured helpers"
 			if (execution.kind !== "command") continue;
 			const output = execFileSync(execution.command, execution.args, { cwd, env: hostileEnv, timeout: 5000, encoding: "utf8" });
 			assert.match(output, /A\s+staged-add\.txt/);
-			assert.match(output, /R\d*\s+sample\.txt\s+staged-renamed\.txt/);
+			assert.match(output, /R\S*\s+sample\.txt\s+->\s+staged-renamed\.txt/);
 			assert.deepEqual(readFileSync(indexPath), indexBefore, `${name} must not refresh the index`);
 		}
 		assert.equal(existsSync(markers.fsmonitor), false, "change observation must disable configured fsmonitor");
