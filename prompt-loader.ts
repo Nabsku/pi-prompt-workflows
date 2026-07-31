@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { minimatch } from "minimatch";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import type { PromptBudgetConfig } from "./prompt-budget.js";
@@ -14,7 +15,7 @@ import {
 	type PromptIncludeGraph,
 } from "./prompt-includes.js";
 
-const VALID_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+const VALID_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export const RESERVED_COMMAND_NAMES = new Set([
 	"chain-prompts",
 	"compare-presets",
@@ -53,6 +54,9 @@ interface PromptRoot {
 	source: PromptSource;
 	kind: PromptRootKind;
 	dir: string;
+	onlyFileName?: string;
+	patterns?: string[];
+	patternsBaseDir?: string;
 }
 
 export interface DelegationLineupSlot {
@@ -1673,13 +1677,127 @@ function normalizeThinkingLevels(
 	return levels.map((level) => level.toLowerCase() as ThinkingLevel);
 }
 
-function getPromptRoots(cwd: string): PromptRoot[] {
-	return [
-		{ source: "user", kind: "prompts", dir: join(homedir(), ".pi", "agent", "prompts") },
-		{ source: "user", kind: "prompt-library", dir: join(homedir(), ".pi", "agent", "prompt-library") },
-		{ source: "project", kind: "prompts", dir: resolve(cwd, ".pi", "prompts") },
-		{ source: "project", kind: "prompt-library", dir: resolve(cwd, ".pi", "prompt-library") },
+interface PromptRootDiscovery {
+	roots: PromptRoot[];
+	diagnostics: PromptLoaderDiagnostic[];
+	patterns?: string[];
+}
+
+function expandSettingsPromptPath(value: string, baseDir: string): string {
+	const expanded = value === "~" ? homedir() : value.startsWith("~/") ? join(homedir(), value.slice(2)) : value;
+	return isAbsolute(expanded) ? resolve(expanded) : resolve(baseDir, expanded);
+}
+
+function isSettingsPattern(value: string): boolean {
+	return value.startsWith("!") || value.startsWith("+") || value.startsWith("-") || value.includes("*") || value.includes("?");
+}
+
+function loadSettingsPromptRoots(settingsPath: string, source: PromptSource, baseDir: string): PromptRootDiscovery {
+	const diagnostics: PromptLoaderDiagnostic[] = [];
+	if (!existsSync(settingsPath)) return { roots: [], diagnostics, patterns: [] };
+	let settings: unknown;
+	try {
+		settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+	} catch (error) {
+		diagnostics.push(createDiagnostic("invalid-settings-json", settingsPath, source, `Skipping prompt settings at ${settingsPath}: ${error instanceof Error ? error.message : String(error)}.`));
+		return { roots: [], diagnostics };
+	}
+	if (!isFrontmatterRecord(settings)) {
+		diagnostics.push(createDiagnostic("invalid-settings", settingsPath, source, `Skipping prompt settings at ${settingsPath}: settings must be a JSON object.`));
+		return { roots: [], diagnostics };
+	}
+	if (settings.prompts === undefined) return { roots: [], diagnostics };
+	if (!Array.isArray(settings.prompts)) {
+		diagnostics.push(createDiagnostic("invalid-settings-prompts", settingsPath, source, `Ignoring prompts in ${settingsPath}: expected "prompts" to be an array of strings.`));
+		return { roots: [], diagnostics };
+	}
+	const paths: string[] = [];
+	const patterns: string[] = [];
+	for (const [index, entry] of settings.prompts.entries()) {
+		if (typeof entry !== "string" || entry.trim().length === 0) {
+			diagnostics.push(createDiagnostic("invalid-settings-prompt-entry", settingsPath, source, `Ignoring prompts[${index}] in ${settingsPath}: expected a non-empty string.`));
+			continue;
+		}
+		const value = entry.trim();
+		if (isSettingsPattern(value)) patterns.push(value);
+		else paths.push(value);
+	}
+	const roots: PromptRoot[] = [];
+	for (const rawPath of paths) {
+		const resolvedPath = expandSettingsPromptPath(rawPath, baseDir);
+		if (!existsSync(resolvedPath)) {
+			diagnostics.push(createDiagnostic("missing-prompt-path", resolvedPath, source, `Skipping configured prompt path ${JSON.stringify(rawPath)} from ${settingsPath}: resolved path ${resolvedPath} does not exist.`));
+			continue;
+		}
+		try {
+			const stats = statSync(resolvedPath);
+			if (stats.isDirectory()) roots.push({ source, kind: "prompts", dir: resolvedPath, patterns, patternsBaseDir: baseDir });
+			else if (stats.isFile() && resolvedPath.endsWith(".md")) roots.push({ source, kind: "prompts", dir: dirname(resolvedPath), onlyFileName: basename(resolvedPath), patterns, patternsBaseDir: baseDir });
+			else diagnostics.push(createDiagnostic("invalid-prompt-path", resolvedPath, source, `Skipping configured prompt path ${JSON.stringify(rawPath)} from ${settingsPath}: expected a directory or .md file.`));
+		} catch (error) {
+			diagnostics.push(createDiagnostic("unreadable-prompt-path", resolvedPath, source, `Skipping configured prompt path ${JSON.stringify(rawPath)} from ${settingsPath}: ${error instanceof Error ? error.message : String(error)}.`));
+		}
+	}
+	return { roots, diagnostics, patterns };
+}
+
+function normalizeSettingsPattern(pattern: string): string {
+	const normalized = pattern.startsWith("./") || pattern.startsWith(".\\") ? pattern.slice(2) : pattern;
+	return normalized.replace(/\\/g, "/");
+}
+
+function matchesSettingsPattern(filePath: string, pattern: string, baseDir: string): boolean {
+	const normalizedPattern = pattern.replace(/\\/g, "/");
+	const candidates = [
+		relative(baseDir, filePath).replace(/\\/g, "/"),
+		basename(filePath),
+		filePath.replace(/\\/g, "/"),
 	];
+	return candidates.some((candidate) => minimatch(candidate, normalizedPattern));
+}
+
+function matchesExactSettingsPattern(filePath: string, pattern: string, baseDir: string): boolean {
+	const normalizedPattern = normalizeSettingsPattern(pattern);
+	const relativePath = relative(baseDir, filePath).replace(/\\/g, "/");
+	return normalizedPattern === relativePath || normalizedPattern === filePath.replace(/\\/g, "/");
+}
+
+function matchesSettingsPatterns(filePath: string, patterns: readonly string[], baseDir: string): boolean {
+	const includes: string[] = [];
+	const excludes: string[] = [];
+	const forceIncludes: string[] = [];
+	const forceExcludes: string[] = [];
+
+	for (const pattern of patterns) {
+		if (pattern.startsWith("+")) forceIncludes.push(pattern.slice(1));
+		else if (pattern.startsWith("-")) forceExcludes.push(pattern.slice(1));
+		else if (pattern.startsWith("!")) excludes.push(pattern.slice(1));
+		else includes.push(pattern);
+	}
+
+	let enabled = includes.length === 0 || includes.some((pattern) => matchesSettingsPattern(filePath, pattern, baseDir));
+	if (excludes.some((pattern) => matchesSettingsPattern(filePath, pattern, baseDir))) enabled = false;
+	if (forceIncludes.some((pattern) => matchesExactSettingsPattern(filePath, pattern, baseDir))) enabled = true;
+	if (forceExcludes.some((pattern) => matchesExactSettingsPattern(filePath, pattern, baseDir))) enabled = false;
+	return enabled;
+}
+
+function discoverPromptRoots(cwd: string): PromptRootDiscovery {
+	const userBase = join(homedir(), ".pi", "agent");
+	const projectBase = resolve(cwd, ".pi");
+	const userSettings = loadSettingsPromptRoots(join(userBase, "settings.json"), "user", userBase);
+	const projectSettings = loadSettingsPromptRoots(join(projectBase, "settings.json"), "project", projectBase);
+	return {
+		roots: [
+			...userSettings.roots,
+			{ source: "user", kind: "prompts", dir: join(userBase, "prompts"), patterns: userSettings.patterns?.filter((pattern) => /^[!+-]/.test(pattern)) },
+			{ source: "user", kind: "prompt-library", dir: join(userBase, "prompt-library") },
+			...projectSettings.roots,
+			{ source: "project", kind: "prompts", dir: join(projectBase, "prompts"), patterns: projectSettings.patterns?.filter((pattern) => /^[!+-]/.test(pattern)) },
+			{ source: "project", kind: "prompt-library", dir: join(projectBase, "prompt-library") },
+		],
+		diagnostics: [...userSettings.diagnostics, ...projectSettings.diagnostics],
+	};
 }
 
 function isPathInsideOrEqual(path: string, root: string): boolean {
@@ -1845,6 +1963,10 @@ function loadPromptsWithModelFromDir(
 	promptRoot = dir,
 	subdir = "",
 	visitedDirectories = new Set<string>(),
+	onlyFileName?: string,
+	seenFiles?: Set<string>,
+	patterns: readonly string[] = [],
+	patternsBaseDir = promptRoot,
 ): { prompts: PromptWithModel[]; diagnostics: PromptLoaderDiagnostic[] } {
 	const prompts: PromptWithModel[] = [];
 	const diagnostics: PromptLoaderDiagnostic[] = [];
@@ -1889,6 +2011,7 @@ function loadPromptsWithModelFromDir(
 		const entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) => lexicalCompare(a.name, b.name));
 
 		for (const entry of entries) {
+			if (onlyFileName && entry.name !== onlyFileName) continue;
 			const fullPath = join(dir, entry.name);
 			if (shouldSkipPromptLibraryEntry(entry.name, rootKind)) continue;
 
@@ -1902,14 +2025,19 @@ function loadPromptsWithModelFromDir(
 			}
 
 			if (isDirectory) {
+				if (onlyFileName) continue;
 				const nextSubdir = subdir ? `${subdir}:${entry.name}` : entry.name;
-				const nested = loadPromptsWithModelFromDir(fullPath, source, rootKind, includePlainPrompts, loadCwd, promptRoot, nextSubdir, visitedDirectories);
+				const nested = loadPromptsWithModelFromDir(fullPath, source, rootKind, includePlainPrompts, loadCwd, promptRoot, nextSubdir, visitedDirectories, undefined, seenFiles, patterns, patternsBaseDir);
 				prompts.push(...nested.prompts);
 				diagnostics.push(...nested.diagnostics);
 				continue;
 			}
 
 			if (!isFile || !entry.name.endsWith(".md")) continue;
+			if (patterns.length > 0 && !matchesSettingsPatterns(fullPath, patterns, patternsBaseDir)) continue;
+			const canonicalFile = realpathSync(fullPath);
+			if (seenFiles?.has(canonicalFile)) continue;
+			seenFiles?.add(canonicalFile);
 
 			try {
 				const rawContent = readFileSync(fullPath, "utf-8");
@@ -2433,6 +2561,10 @@ function collectPromptSourceRecordsFromDir(
 	promptRoot = dir,
 	subdir = "",
 	visitedDirectories = new Set<string>(),
+	onlyFileName?: string,
+	seenFiles?: Set<string>,
+	patterns: readonly string[] = [],
+	patternsBaseDir = promptRoot,
 ): { records: PromptSourceRecord[]; diagnostics: PromptLoaderDiagnostic[] } {
 	const records: PromptSourceRecord[] = [];
 	const diagnostics: PromptLoaderDiagnostic[] = [];
@@ -2477,6 +2609,7 @@ function collectPromptSourceRecordsFromDir(
 		const entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) => lexicalCompare(a.name, b.name));
 
 		for (const entry of entries) {
+			if (onlyFileName && entry.name !== onlyFileName) continue;
 			const fullPath = join(dir, entry.name);
 			if (shouldSkipPromptLibraryEntry(entry.name, rootKind)) continue;
 
@@ -2490,14 +2623,19 @@ function collectPromptSourceRecordsFromDir(
 			}
 
 			if (isDirectory) {
+				if (onlyFileName) continue;
 				const nextSubdir = subdir ? `${subdir}:${entry.name}` : entry.name;
-				const nested = collectPromptSourceRecordsFromDir(fullPath, source, rootKind, includePlainPrompts, loadCwd, promptRoot, nextSubdir, visitedDirectories);
+				const nested = collectPromptSourceRecordsFromDir(fullPath, source, rootKind, includePlainPrompts, loadCwd, promptRoot, nextSubdir, visitedDirectories, undefined, seenFiles, patterns, patternsBaseDir);
 				records.push(...nested.records);
 				diagnostics.push(...nested.diagnostics);
 				continue;
 			}
 
 			if (!isFile || !entry.name.endsWith(".md")) continue;
+			if (patterns.length > 0 && !matchesSettingsPatterns(fullPath, patterns, patternsBaseDir)) continue;
+			const canonicalFile = realpathSync(fullPath);
+			if (seenFiles?.has(canonicalFile)) continue;
+			seenFiles?.add(canonicalFile);
 
 			try {
 				const rawContent = readFileSync(fullPath, "utf-8");
@@ -2677,6 +2815,9 @@ export function collectPromptSourceRecords(cwd: string, includePlainPrompts = tr
 	const recordMap = new Map<string, PromptSourceRecord[]>();
 	const inventoryRecords: PromptSourceRecord[] = [];
 	const diagnostics: PromptLoaderDiagnostic[] = [];
+	const discovery = discoverPromptRoots(cwd);
+	diagnostics.push(...discovery.diagnostics);
+	const seenFiles = new Set<string>();
 	const loaderResult = loadPromptsWithModel(cwd, includePlainPrompts, { includeAdaptiveChains: true });
 	const effectivePromptPaths = new Set([...loaderResult.prompts.values()].map((prompt) => prompt.filePath));
 
@@ -2731,8 +2872,8 @@ export function collectPromptSourceRecords(cwd: string, includePlainPrompts = tr
 		);
 	}
 
-	for (const root of getPromptRoots(cwd)) {
-		const rootResult = collectPromptSourceRecordsFromDir(root.dir, root.source, root.kind, includePlainPrompts, cwd, root.dir);
+	for (const root of discovery.roots) {
+		const rootResult = collectPromptSourceRecordsFromDir(root.dir, root.source, root.kind, includePlainPrompts, cwd, root.dir, "", new Set<string>(), root.onlyFileName, seenFiles, root.patterns, root.patternsBaseDir);
 		inventoryRecords.push(...rootResult.records);
 		diagnostics.push(...rootResult.diagnostics);
 		for (const record of rootResult.records) addRecord(record);
@@ -2748,6 +2889,9 @@ export function loadPromptsWithModel(
 ): LoadPromptsWithModelResult {
 	const promptMap = new Map<string, PromptWithModel>();
 	const diagnostics: PromptLoaderDiagnostic[] = [];
+	const discovery = discoverPromptRoots(cwd);
+	diagnostics.push(...discovery.diagnostics);
+	const seenFiles = new Set<string>();
 
 	function addPrompt(prompt: PromptWithModel) {
 		const existing = promptMap.get(prompt.name);
@@ -2771,8 +2915,8 @@ export function loadPromptsWithModel(
 		promptMap.set(prompt.name, prompt);
 	}
 
-	for (const root of getPromptRoots(cwd)) {
-		const rootResult = loadPromptsWithModelFromDir(root.dir, root.source, root.kind, includePlainPrompts, cwd, root.dir);
+	for (const root of discovery.roots) {
+		const rootResult = loadPromptsWithModelFromDir(root.dir, root.source, root.kind, includePlainPrompts, cwd, root.dir, "", new Set<string>(), root.onlyFileName, seenFiles, root.patterns, root.patternsBaseDir);
 		diagnostics.push(...rootResult.diagnostics);
 		for (const prompt of rootResult.prompts) {
 			addPrompt(prompt);

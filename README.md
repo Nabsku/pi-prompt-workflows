@@ -85,6 +85,10 @@ pi install npm:pi-prompt-workflows
 
 Restart pi to load the extension.
 
+### Prompt discovery
+
+Alongside the default user (`~/.pi/agent/prompts`) and project (`<cwd>/.pi/prompts`) directories, the extension loads `prompts` paths from the corresponding `settings.json` files. Relative entries resolve from the settings file's directory; absolute paths, `~/...`, directories, and individual Markdown files are supported. Settings paths precede defaults within a scope, while project prompts continue to override user prompts. Missing or malformed settings entries are reported without stopping discovery.
+
 ### Command map
 
 | Command | Use it for |
@@ -316,7 +320,7 @@ All fields are optional. Templates that don't use any extension features (no `mo
 | `model` | current session model | Which model to use. Accepts a single model, a `provider/model-id` pair, or a comma-separated fallback list (see [Model Format](#model-format)). Ignored when `chain` is set. |
 | `skill` | — | Injects a skill, or a constrained suffix-`*` wildcard selector such as `golang-*`, as context before the agent handles your task. Kept for backward compatibility and simple prompts. See [Skills](#skills). |
 | `skills` | — | List of skills to inject, with optional suffix-`*` wildcard selectors such as `golang-*`. See [Skills](#skills). |
-| `thinking` | — | Thinking level for the model: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`. |
+| `thinking` | — | Thinking level for the model: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. `max` requires Pi 0.80.6 or newer and a model that exposes that level; older runtimes retain their existing levels. |
 | `includes` | — | List of shared `.md` partials to insert into the prompt. See [Prompt includes](#prompt-includes). |
 | `include` | — | Shortcut for a single partial, equivalent to `includes: [file.md]`. See [Prompt includes](#prompt-includes). |
 | `description` | — | Short text shown next to the command in autocomplete. |

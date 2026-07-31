@@ -69,6 +69,97 @@ test("loadPromptsWithModel lets project prompts override user prompts", () => {
 	});
 });
 
+test("loadPromptsWithModel loads settings paths relative to config directories", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const agentDir = join(root, ".pi", "agent");
+		mkdirSync(join(agentDir, "custom"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "custom"), { recursive: true });
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ prompts: ["custom"] }));
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ prompts: ["custom"] }));
+		writeFileSync(join(agentDir, "custom", "user-settings.md"), "---\nmodel: test/user\n---\nuser");
+		writeFileSync(join(cwd, ".pi", "custom", "project-settings.md"), "---\nmodel: test/project\n---\nproject");
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.get("user-settings")?.content, "user");
+		assert.equal(result.prompts.get("project-settings")?.content, "project");
+	});
+});
+
+test("settings files load exactly without scanning siblings", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const external = join(root, "external");
+		mkdirSync(join(cwd, ".pi"), { recursive: true });
+		mkdirSync(external, { recursive: true });
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ prompts: [join(external, "absolute.md"), "~/external/tilde.md"] }));
+		for (const name of ["absolute", "tilde", "sibling"]) writeFileSync(join(external, `${name}.md`), `---\nmodel: test/${name}\n---\n${name}`);
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.get("absolute")?.content, "absolute");
+		assert.equal(result.prompts.get("tilde")?.content, "tilde");
+		assert.equal(result.prompts.has("sibling"), false);
+	});
+});
+
+test("settings prompts precede defaults and project precedes user", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const agentDir = join(root, ".pi", "agent");
+		for (const dir of [join(agentDir, "custom"), join(agentDir, "prompts"), join(cwd, ".pi", "custom"), join(cwd, ".pi", "prompts")]) mkdirSync(dir, { recursive: true });
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ prompts: ["custom"] }));
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ prompts: ["custom"] }));
+		for (const [path, body] of [[join(agentDir, "custom", "same.md"), "user-settings"], [join(agentDir, "prompts", "same.md"), "user-default"], [join(cwd, ".pi", "custom", "same.md"), "project-settings"], [join(cwd, ".pi", "prompts", "same.md"), "project-default"]]) writeFileSync(path, `---\nmodel: test/model\n---\n${body}`);
+		assert.equal(loadPromptsWithModel(cwd).prompts.get("same")?.content, "project-settings");
+	});
+});
+
+test("malformed and missing settings paths are diagnostic without suppressing defaults", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(root, ".pi", "agent"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(root, ".pi", "agent", "settings.json"), "{");
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ prompts: [42, "missing"] }));
+		writeFileSync(join(cwd, ".pi", "prompts", "default.md"), "---\nmodel: test/default\n---\ndefault");
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.get("default")?.content, "default");
+		for (const code of ["invalid-settings-json", "invalid-settings-prompt-entry", "missing-prompt-path"]) assert.ok(result.diagnostics.some((item) => item.code === code));
+	});
+});
+
+test("settings prompt patterns honor config-relative includes, excludes, and exact overrides", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const customRoot = join(cwd, ".pi", "custom");
+		mkdirSync(join(customRoot, "nested"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ prompts: ["custom", "custom/nested/*.md", "+./custom/forced.md", "-custom/nested/excluded.md"] }));
+		for (const [name, body] of [
+			["nested/kept.md", "kept"],
+			["nested/excluded.md", "excluded"],
+			["forced.md", "forced"],
+		]) {
+			writeFileSync(join(customRoot, name), `---\nmodel: test/${name}\n---\n${body}`);
+		}
+
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.get("kept")?.content, "kept");
+		assert.equal(result.prompts.get("forced")?.content, "forced");
+		assert.equal(result.prompts.has("excluded"), false);
+	});
+});
+
+test("loadPromptsWithModel accepts max thinking in scalar and rotated metadata", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "max.md"), "---\nmodel: test/max\nthinking: max\n---\nmax");
+		writeFileSync(join(cwd, ".pi", "prompts", "rotate-max.md"), "---\nmodel: test/one, test/two\nrotate: true\nthinking: high, max\n---\nrotate");
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.get("max")?.thinking, "max");
+		assert.deepEqual(result.prompts.get("rotate-max")?.thinkingLevels, ["high", "max"]);
+		assert.equal(result.diagnostics.some((item) => item.code.includes("thinking")), false);
+	});
+});
+
 test("loadPromptsWithModel skips reserved command names and surfaces diagnostics", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
