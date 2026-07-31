@@ -2852,6 +2852,20 @@ test("loadPromptsWithModel parses valid prompt budgets and rejects invalid budge
 	});
 });
 
+test("loadPromptsWithModel parses validated prompt inputs and rejects invalid input metadata", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const promptsDir = join(cwd, ".pi", "prompts");
+		mkdirSync(promptsDir, { recursive: true });
+		writeFileSync(join(promptsDir, "valid-inputs.md"), "---\ninputs:\n  target:\n    type: string\n    required: true\n  depth:\n    type: choice\n    options: [quick, deep]\n    default: quick\n  run-tests:\n    type: boolean\n    default: true\n---\nReview");
+		writeFileSync(join(promptsDir, "invalid-inputs.md"), "---\ninputs:\n  model:\n    type: string\n    required: true\n---\nInvalid");
+		const result = loadPromptsWithModel(cwd, true);
+		assert.deepEqual(Object.keys(result.prompts.get("valid-inputs")?.inputs ?? {}), ["target", "depth", "run-tests"]);
+		assert.equal(result.prompts.has("invalid-inputs"), false);
+		assert.equal(result.diagnostics.filter((item) => item.code === "invalid-inputs").length, 2);
+	});
+});
+
 test("loadPromptsWithModel excludes structured chains by default and includes them only for adaptive-aware consumers", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
