@@ -188,10 +188,11 @@ export function resolvePromptInputs(schema: PromptInputSchema, args: string[]): 
 export function validatePromptInputReferences(content: string, schema: PromptInputSchema): string[] {
 	const errors: string[] = [];
 	const names = new Set(Object.keys(schema));
-	const references = [...content.matchAll(/\$\{input\.([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\}|<if-input\s+name="([a-z][a-z0-9]*(?:-[a-z0-9]+)*)"/g)];
+	const references = [...content.matchAll(/\$\{input\.([^}]*)\}|<if-input\s+name="([^"]*)"/g)];
 	for (const match of references) {
 		const name = match[1] ?? match[2];
-		if (!names.has(name)) errors.push(`input reference "${name}" is not declared`);
+		if (!INPUT_NAME.test(name)) errors.push(`input reference ${JSON.stringify(name)} must use a kebab-case name`);
+		else if (!names.has(name)) errors.push(`input reference ${JSON.stringify(name)} is not declared`);
 	}
 	if (content.includes("<if-input") && !content.includes("</if-input>")) errors.push("missing closing </if-input> tag");
 	if (content.includes("</if-input>") && !content.includes("<if-input")) errors.push("closing </if-input> tag has no opening tag");

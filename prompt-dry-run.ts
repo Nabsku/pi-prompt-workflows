@@ -572,7 +572,7 @@ export async function createPromptDryRun(
 		status: "ok",
 		promptName: prompt.name,
 		content,
-		args: parsed.args,
+		args: resolvedPositional,
 		model: prepared.selectedModel.model,
 		modelAlreadyActive: prepared.selectedModel.alreadyActive,
 		warnings,
