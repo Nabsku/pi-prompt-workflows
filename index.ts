@@ -3066,11 +3066,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			}
 		}
 
-		if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return;
-
 		const parsedPromptArgs = [...parseCommandArgs(argsWithoutSubagent), ...boundary.after];
 		let resolvedInputs = prompt.inputs ? resolvePromptInputs(prompt.inputs, parsedPromptArgs) : undefined;
-		const repairableInputErrors = resolvedInputs?.errors.every((error) => error.startsWith("missing required input") || error.startsWith("invalid value for input"));
+		const repairableInputErrors = resolvedInputs?.errors.every((error) => error.startsWith("missing required input") || error.startsWith("missing value for input") || error.startsWith("invalid value for input") || error.includes("must be true or false"));
 		if (resolvedInputs?.errors.length && repairableInputErrors && prompt.inputs && ctx.mode === "tui" && ctx.hasUI && typeof (ctx.ui as { custom?: unknown }).custom === "function") {
 			const initialValues = Object.fromEntries(Object.entries(resolvedInputs.values).map(([name, input]) => [name, input.value]));
 			const formResult = await ctx.ui.custom((tui, theme, _layout, done) => new PromptInputForm(prompt.inputs!, initialValues, done));
@@ -3084,6 +3082,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			notify(ctx, `Invalid prompt inputs: ${resolvedInputs.errors[0]}`, "error");
 			return;
 		}
+		if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return;
 		const promptOverrides: Partial<Pick<PromptWithModel, "models" | "inheritContext">> = {
 			...(subagent.model ? { models: [subagent.model] } : {}),
 			...(subagent.fork ? { inheritContext: true } : {}),
