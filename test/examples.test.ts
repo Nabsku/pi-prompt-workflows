@@ -32,7 +32,7 @@ test("packaged examples load as prompt commands", () => {
 		const diagnostics = result.diagnostics.map((item) => item.message).join("\n");
 
 		assert.equal(diagnostics, "");
-		assert.deepEqual([...result.prompts.keys()].sort(), ["adaptive-review", "adaptive-status", "adaptive-test", "adaptive-validate", "best-of-n", "best-of-n-smoke", "hello", "review"]);
+		assert.deepEqual([...result.prompts.keys()].sort(), ["adaptive-review", "adaptive-status", "adaptive-test", "adaptive-validate", "best-of-n", "best-of-n-smoke", "hello", "interactive-inputs", "review"]);
 		assert.deepEqual(result.prompts.get("hello")?.models, []);
 		assert.deepEqual(result.prompts.get("review")?.models, []);
 		assert.equal(result.prompts.get("best-of-n-smoke")?.workers?.length, 1);
@@ -55,13 +55,13 @@ test("packaged adaptive examples load and validate with their companion targets"
 test("packaged Git checks use exact hardened argv and bypass configured helpers", () => {
 	withExamplePrompts((cwd) => {
 		const loaded = loadPromptsWithModel(cwd);
-		const expectedStatusArgs = ["--no-optional-locks", "-c", "core.fsmonitor=false", "ls-files", "--modified", "--deleted", "--others", "--exclude-standard"];
+		const expectedStatusCommand = "git --no-optional-locks -c core.fsmonitor=false ls-files --modified --deleted --others --exclude-standard && git --no-optional-locks -c core.fsmonitor=false --no-pager diff --cached --name-status --no-ext-diff --no-textconv --";
 		const expectedDiffCommand = "git --no-optional-locks -c core.fsmonitor=false --no-pager diff --cached --no-ext-diff --no-textconv --check";
 		for (const name of ["adaptive-status", "adaptive-validate"]) {
 			const execution = loaded.prompts.get(name)?.deterministic?.execution;
 			assert.equal(execution?.kind, "command");
-			assert.equal(execution?.command, "git");
-			assert.deepEqual(execution?.args, expectedStatusArgs);
+			assert.equal(execution?.command, "/bin/sh");
+			assert.deepEqual(execution?.args, ["-c", expectedStatusCommand]);
 		}
 		const diffExecution = loaded.prompts.get("adaptive-test")?.deterministic?.execution;
 		assert.equal(diffExecution?.kind, "run");
@@ -102,6 +102,10 @@ test("packaged Git checks use exact hardened argv and bypass configured helpers"
 		execFileSync("git", ["config", "filter.hostile.clean", clean], { cwd });
 		execFileSync("git", ["config", "filter.hostile.process", processFilter], { cwd });
 		writeFileSync(join(cwd, "sample.txt"), "changed\n");
+		writeFileSync(join(cwd, "staged-add.txt"), "added\n");
+		execFileSync("git", ["add", "staged-add.txt"], { cwd });
+		execFileSync("git", ["mv", "sample.txt", "staged-renamed.txt"], { cwd });
+		rmSync(markers.fsmonitor, { force: true });
 
 		const hostileEnv = { ...process.env, GIT_PAGER: pager, PAGER: pager, GIT_EDITOR: editor, EDITOR: editor };
 		const indexPath = join(cwd, ".git", "index");
@@ -110,7 +114,9 @@ test("packaged Git checks use exact hardened argv and bypass configured helpers"
 			const execution = loaded.prompts.get(name)!.deterministic!.execution;
 			assert.equal(execution.kind, "command");
 			if (execution.kind !== "command") continue;
-			execFileSync(execution.command, execution.args, { cwd, env: hostileEnv, timeout: 5000 });
+			const output = execFileSync(execution.command, execution.args, { cwd, env: hostileEnv, timeout: 5000, encoding: "utf8" });
+			assert.match(output, /A\s+staged-add\.txt/);
+			assert.match(output, /R\d*\s+sample\.txt\s+staged-renamed\.txt/);
 			assert.deepEqual(readFileSync(indexPath), indexBefore, `${name} must not refresh the index`);
 		}
 		assert.equal(existsSync(markers.fsmonitor), false, "change observation must disable configured fsmonitor");
