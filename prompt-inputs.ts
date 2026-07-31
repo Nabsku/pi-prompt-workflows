@@ -242,9 +242,7 @@ export function renderPromptInputConditionals(content: string, values: Record<st
 }
 
 export function renderPromptInputValues(content: string, values: Record<string, ResolvedPromptInput>): string {
-	const conditionals = renderPromptInputConditionals(content, values);
-	if (conditionals.error) throw new Error(`Invalid <if-input> markup: ${conditionals.error}`);
-	return conditionals.content.replace(/\$\{input\.([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\}/g, (match, name: string) => {
+	return content.replace(/\$\{input\.([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\}/g, (match, name: string) => {
 		const value = values[name]?.value;
 		return value === undefined ? match : String(value);
 	});
