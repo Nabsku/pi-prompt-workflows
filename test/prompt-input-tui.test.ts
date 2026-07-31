@@ -21,9 +21,16 @@ test("PromptInputForm toggles booleans and cycles choices", () => {
 	assert.deepEqual(result, { action: "submitted", values: { mode: "deep", run: true } });
 });
 
-test("PromptInputForm supports cancellation", () => {
+test("PromptInputForm supports q cancellation for non-text fields", () => {
+	let result: unknown;
+	const form = new PromptInputForm({ mode: { type: "choice", options: ["deep", "fast"], required: true } }, {}, (value) => { result = value; });
+	form.handleInput("q");
+	assert.deepEqual(result, { action: "cancelled" });
+});
+
+test("PromptInputForm keeps q in string values", () => {
 	let result: unknown;
 	const form = new PromptInputForm({ target: { type: "string", required: true } }, {}, (value) => { result = value; });
 	form.handleInput("q");
-	assert.deepEqual(result, { action: "cancelled" });
+	assert.equal(result, undefined);
 });
