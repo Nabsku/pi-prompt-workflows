@@ -159,14 +159,56 @@ test("PI_SUBAGENT_RUNTIME_ROOT env override replaces cached automatic runtime", 
 	});
 });
 
-test("ensureSubagentRuntime does not discover legacy subagent extension paths", async () => {
+test("ensureSubagentRuntime discovers Pi-managed extension and git layouts", async () => {
+	await withTempDir(async (root) => {
+		const extensionProject = join(root, "extension-project");
+		const extensionRoot = join(extensionProject, ".pi", "extensions", "subagent");
+		writeRuntime(extensionRoot);
+		assert.equal((await ensureSubagentRuntime(extensionProject, { globalNodeModules: [] })).root, extensionRoot);
+
+		const gitProject = join(root, "git-project");
+		const gitRoot = join(gitProject, ".pi", "git", "github.com", "owner", "pi-subagents");
+		writeNestedPackageRuntime(gitRoot);
+		assert.equal((await ensureSubagentRuntime(gitProject, { globalNodeModules: [] })).root, join(gitRoot, "src", "agents"));
+	});
+});
+
+test("ensureSubagentRuntime prefers local layouts before injected global installs", async () => {
+	await withTempDir(async (root) => {
+		const project = join(root, "project");
+		const localRoot = join(project, ".pi", "extensions", "subagent");
+		const globalModules = join(root, "global", "node_modules");
+		writeRuntime(localRoot);
+		writeRuntime(join(globalModules, "pi-subagents"));
+		assert.equal((await ensureSubagentRuntime(project, { globalNodeModules: [globalModules] })).root, localRoot);
+	});
+});
+
+test("ensureSubagentRuntime discovers injected global node_modules without shelling out", async () => {
+	await withTempDir(async (root) => {
+		const globalModules = join(root, "global", "node_modules");
+		const runtimeRoot = join(globalModules, "pi-subagents", "src", "agents");
+		writeRuntime(runtimeRoot);
+		assert.equal((await ensureSubagentRuntime(join(root, "project"), { globalNodeModules: [globalModules] })).root, runtimeRoot);
+	});
+});
+
+test("managed git discovery is fail-safe for missing paths and bounded against deep layouts", async () => {
+	await withTempDir(async (root) => {
+		const project = join(root, "project");
+		const tooDeep = join(project, ".pi", "git", "1", "2", "3", "4", "5", "6", "7", "pi-subagents");
+		writeRuntime(tooDeep);
+		await assert.rejects(() => ensureSubagentRuntime(project, { globalNodeModules: [] }), /Checked runtime directories/i);
+	});
+});
+
+test("ensureSubagentRuntime does not discover legacy project .pi/agent extension paths", async () => {
 	await withTempDir(async (root) => {
 		const project = join(root, "project");
 		writeRuntime(join(project, ".pi", "agent", "extensions", "subagent"));
-		writeRuntime(join(root, ".pi", "agent", "extensions", "subagent"));
 
 		await assert.rejects(
-			() => ensureSubagentRuntime(project),
+			() => ensureSubagentRuntime(project, { globalNodeModules: [] }),
 			/pi-subagents[\s\S]*PI_SUBAGENT_RUNTIME_ROOT/i,
 		);
 	});
