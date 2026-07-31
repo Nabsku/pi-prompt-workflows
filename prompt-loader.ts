@@ -1832,6 +1832,7 @@ function hasPromptLibraryCommandMarker(frontmatter: Record<string, unknown>): bo
 		"loop",
 		"converge",
 		"boomerang",
+		"inputs",
 	].some((key) => Object.hasOwn(frontmatter, key));
 }
 
