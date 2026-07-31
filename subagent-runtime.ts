@@ -135,16 +135,20 @@ function resolvePiAgentDir(): string {
 	return configured ? resolveHomeRelative(configured) : resolve(homedir(), ".pi", "agent");
 }
 
-function projectPiPackageCandidates(cwd: string): string[] {
+function projectPiConfigDirs(cwd: string): string[] {
 	const candidates: string[] = [];
 	let current = resolve(cwd);
 	while (true) {
-		candidates.push(join(current, ".pi", "npm", "node_modules", "pi-subagents"));
+		candidates.push(join(current, ".pi"));
 		const parent = dirname(current);
 		if (parent === current) break;
 		current = parent;
 	}
 	return candidates;
+}
+
+function projectPiPackageCandidates(cwd: string): string[] {
+	return projectPiConfigDirs(cwd).map((configDir) => join(configDir, "npm", "node_modules", "pi-subagents"));
 }
 
 function isPiSubagentsPackageRoot(root: string): boolean {
@@ -195,7 +199,7 @@ function runtimeCandidates(cwd: string, options: SubagentRuntimeDiscoveryOptions
 	const localSibling = resolve(packageDir, "..", "pi-subagents");
 	const includeLocalSibling = basename(dirname(packageDir)) === "node_modules";
 	const piAgentDir = resolvePiAgentDir();
-	const projectConfigDir = resolve(cwd, ".pi");
+	const projectConfigDirs = projectPiConfigDirs(cwd);
 	const globalNodeModules = options.globalNodeModules ?? [
 		resolve(dirname(process.execPath), "..", "lib", "node_modules"),
 		"/usr/local/lib/node_modules",
@@ -203,8 +207,10 @@ function runtimeCandidates(cwd: string, options: SubagentRuntimeDiscoveryOptions
 	];
 	return uniquePaths([
 		...projectPiPackageCandidates(cwd),
-		resolve(projectConfigDir, "extensions", "subagent"),
-		...findManagedGitCandidates(resolve(projectConfigDir, "git")),
+		...projectConfigDirs.flatMap((configDir) => [
+			resolve(configDir, "extensions", "subagent"),
+			...findManagedGitCandidates(resolve(configDir, "git")),
+		]),
 		resolve(piAgentDir, "npm", "node_modules", "pi-subagents"),
 		resolve(piAgentDir, "node_modules", "pi-subagents"),
 		resolve(piAgentDir, "extensions", "subagent"),

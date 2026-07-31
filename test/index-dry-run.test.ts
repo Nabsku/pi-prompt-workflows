@@ -154,6 +154,20 @@ test("registers print-prompt and dry-run-prompt commands", async () => {
 	});
 });
 
+test("untrusted project settings do not register project prompts", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "configured"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ prompts: ["configured"] }));
+		writeFileSync(join(cwd, ".pi", "configured", "unsafe.md"), "---\nmodel: test/unsafe\n---\nunsafe");
+		const pi = new FakePi();
+		const ctx = createContext(cwd, pi, { trusted: false });
+		promptModelExtension(pi as never);
+		await pi.emit("session_start", {}, ctx);
+		assert.equal(pi.commands.has("unsafe"), false);
+	});
+});
+
 test("missing template name reports usage error in plain command path", async () => {
 	await setup(async (_root, _cwd, pi, ctx) => {
 		await pi.commands.get("print-prompt")!.handler!("", ctx);

@@ -22,6 +22,8 @@ export interface RegisteredPromptSkill {
 
 export interface PromptValidationOptions {
 	registeredSkills?: RegisteredPromptSkill[];
+	/** Load project-local prompt roots only when the current Pi session trusts the project. Defaults to true. */
+	projectTrusted?: boolean;
 }
 
 /** Read-only structured-chain preflight attached to the validation report. */
@@ -664,8 +666,8 @@ function collectValidationSourceSummary(sourceRecords: PromptSourceRecord[], inv
 }
 
 export function validatePromptTemplates(cwd: string, options: PromptValidationOptions = {}): PromptValidationResult {
-	const loaded = loadPromptsWithModel(cwd, true, { includeAdaptiveChains: true });
-	const sourceRecordResult = collectPromptSourceRecords(cwd, true);
+	const loaded = loadPromptsWithModel(cwd, true, { includeAdaptiveChains: true, projectTrusted: options.projectTrusted });
+	const sourceRecordResult = collectPromptSourceRecords(cwd, true, { projectTrusted: options.projectTrusted });
 	const includeGraphs = collectValidationIncludeGraphs(sourceRecordResult.records, loaded);
 	const budgets: PromptValidationBudgetSummary[] = [];
 	const result: PromptValidationResult = {
