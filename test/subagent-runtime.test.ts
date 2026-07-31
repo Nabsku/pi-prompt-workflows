@@ -87,6 +87,19 @@ test("ensureSubagentRuntime discovers nested pi-subagents npm runtime layout", a
 	});
 });
 
+test("ensureSubagentRuntime discovers ancestor project pi-subagents extension layout from nested cwd", async () => {
+	await withTempDir(async (root) => {
+		const project = join(root, "project");
+		const nestedCwd = join(project, "packages", "app", "src");
+		mkdirSync(nestedCwd, { recursive: true });
+		const extensionRoot = join(project, ".pi", "extensions", "subagent");
+		writeRuntime(extensionRoot);
+
+		const runtime = await ensureSubagentRuntime(nestedCwd, { globalNodeModules: [] });
+		assert.equal(runtime.root, extensionRoot);
+	});
+});
+
 test("ensureSubagentRuntime accepts PI_SUBAGENT_RUNTIME_ROOT pointing at pi-subagents package root", async () => {
 	await withTempDir(async (root) => {
 		const packageRoot = join(root, "pi-subagents");
