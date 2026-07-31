@@ -156,6 +156,19 @@ export function resolvePromptInputs(schema: PromptInputSchema, args: string[]): 
 	return { values, positional: inputArgs.positional, errors: inputArgs.errors };
 }
 
+export function validatePromptInputReferences(content: string, schema: PromptInputSchema): string[] {
+	const errors: string[] = [];
+	const names = new Set(Object.keys(schema));
+	const references = [...content.matchAll(/\$\{input\.([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\}|<if-input\s+name="([a-z][a-z0-9]*(?:-[a-z0-9]+)*)"/g)];
+	for (const match of references) {
+		const name = match[1] ?? match[2];
+		if (!names.has(name)) errors.push(`input reference "${name}" is not declared`);
+	}
+	if (content.includes("<if-input") && !content.includes("</if-input>")) errors.push("missing closing </if-input> tag");
+	if (content.includes("</if-input>") && !content.includes("<if-input")) errors.push("closing </if-input> tag has no opening tag");
+	return [...new Set(errors)];
+}
+
 export function renderPromptInputConditionals(content: string, values: Record<string, ResolvedPromptInput>): { content: string; error?: string } {
 	if (!content.includes("<if-input")) return { content };
 	const open = /<if-input\s+name="([a-z][a-z0-9]*(?:-[a-z0-9]+)*)"\s+is="([^"]*)">/g;
