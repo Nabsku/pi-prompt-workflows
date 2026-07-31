@@ -156,7 +156,7 @@ export function resolvePromptInputs(schema: PromptInputSchema, args: string[]): 
 		const equals = token.indexOf("=");
 		const rawName = equals === -1 ? token : token.slice(0, equals);
 		const name = rawName.startsWith("--no-") ? rawName.slice(5) : rawName.slice(2);
-		const definition = definitions[name];
+		const definition = Object.prototype.hasOwnProperty.call(definitions, name) ? definitions[name] : undefined;
 		if (!definition) { inputArgs.errors.push(`unknown option ${token}`); continue; }
 		if (seen.has(name)) { inputArgs.errors.push(`duplicate input ${JSON.stringify(name)}`); continue; }
 		seen.add(name);
@@ -169,6 +169,11 @@ export function resolvePromptInputs(schema: PromptInputSchema, args: string[]): 
 			continue;
 		}
 		rawValue = equals === -1 ? inputArgs.options[++index] : token.slice(equals + 1);
+		if (equals === -1 && typeof rawValue === "string" && rawValue.startsWith("--")) {
+			inputArgs.errors.push(`missing value for input ${JSON.stringify(name)}`);
+			index--;
+			continue;
+		}
 		if (rawValue === undefined) { inputArgs.errors.push(`missing value for input ${JSON.stringify(name)}`); continue; }
 		if (definition.type === "choice" && !definition.options?.includes(rawValue as string)) inputArgs.errors.push(`invalid value for input ${JSON.stringify(name)}: ${JSON.stringify(rawValue)}`);
 		else values[name] = { name, type: definition.type, value: rawValue, source: "flag" };
