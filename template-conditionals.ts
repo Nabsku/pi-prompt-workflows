@@ -5,11 +5,11 @@ export interface ResolvedModelRef {
 
 type Node =
 	| { type: "text"; value: string }
-	| { type: "if"; specs: string[]; truthy: Node[]; falsy: Node[] };
+	| { type: "if"; kind: "model" | "input"; specs: string[]; inputName?: string; truthy: Node[]; falsy: Node[] };
 
-type OpenToken = { type: "open"; specs: string[] };
+type OpenToken = { type: "open"; kind: "model" | "input"; specs: string[]; inputName?: string };
 type ElseToken = { type: "else" };
-type CloseToken = { type: "close" };
+type CloseToken = { type: "close"; kind: "model" | "input" };
 type Token = OpenToken | ElseToken | CloseToken;
 
 interface ParseError {
@@ -29,6 +29,8 @@ interface ParseFailure {
 type ParseResult = ParseSuccess | ParseFailure;
 
 interface StackFrame {
+	kind: "model" | "input";
+	inputName?: string;
 	specs: string[];
 	truthy: Node[];
 	falsy: Node[];
@@ -128,18 +130,24 @@ function parseIfModelTag(tagContent: string): OpenToken | ParseFailure {
 		}
 	}
 
-	return { type: "open", specs };
+	return { type: "open", kind: "model", specs };
 }
 
 function isDirectiveBoundaryChar(char: string | undefined): boolean {
 	return char === undefined || char === ">" || /\s/.test(char);
 }
-
 function readToken(input: string, index: number): { token: Token; length: number } | ParseFailure | undefined {
-	if (input.startsWith("</if-model>", index)) {
-		return { token: { type: "close" }, length: "</if-model>".length };
+	if (input.startsWith("</if-input>", index)) {
+		return { token: { type: "close", kind: "input" }, length: "</if-input>".length };
 	}
-
+	if (input.startsWith("<if-input", index)) {
+		const match = input.slice(index).match(/^<if-input\s+name="([a-z][a-z0-9]*(?:-[a-z0-9]+)*)"\s+is="([^"]*)">/);
+		if (!match) return { ok: false, error: { message: 'Invalid `<if-input>` opening tag.' } };
+		return { token: { type: "open", kind: "input", inputName: match[1], specs: [match[2]] }, length: match[0].length };
+	}
+	if (input.startsWith("</if-model>", index)) {
+		return { token: { type: "close", kind: "model" }, length: "</if-model>".length };
+	}
 	if (input.startsWith("</if-model", index) && isDirectiveBoundaryChar(input[index + "</if-model".length])) {
 		return { ok: false, error: { message: '`</if-model>` cannot have attributes or extra characters.' } };
 	}
@@ -225,7 +233,7 @@ function parseNodes(input: string): ParseResult {
 
 		const { token, length } = tokenResult as { token: Token; length: number };
 		if (token.type === "open") {
-			stack.push({ specs: token.specs, truthy: [], falsy: [], inElse: false });
+			stack.push({ kind: token.kind, inputName: token.inputName, specs: token.specs, truthy: [], falsy: [], inElse: false });
 		} else if (token.type === "else") {
 			const frame = stack[stack.length - 1];
 			if (!frame) {
@@ -238,9 +246,12 @@ function parseNodes(input: string): ParseResult {
 		} else {
 			const frame = stack.pop();
 			if (!frame) {
-				return { ok: false, error: { message: 'Found closing `</if-model>` without a matching `<if-model>`.' } };
+				return { ok: false, error: { message: 'Found a closing conditional tag without a matching opening tag.' } };
 			}
-			appendNode(stack, root, { type: "if", specs: frame.specs, truthy: frame.truthy, falsy: frame.falsy });
+			if (frame.kind !== token.kind) {
+				return { ok: false, error: { message: `Mismatched closing tag for <if-${frame.kind}>.` } };
+			}
+			appendNode(stack, root, { type: "if", kind: frame.kind, inputName: frame.inputName, specs: frame.specs, truthy: frame.truthy, falsy: frame.falsy });
 		}
 
 		cursor += length;
@@ -258,7 +269,7 @@ function parseNodes(input: string): ParseResult {
 	return { ok: true, nodes: root };
 }
 
-function renderNodes(nodes: Node[], model: ResolvedModelRef): string {
+function renderNodes(nodes: Node[], model: ResolvedModelRef, inputs?: Record<string, string | boolean>): string {
 	let output = "";
 
 	for (const node of nodes) {
@@ -267,8 +278,11 @@ function renderNodes(nodes: Node[], model: ResolvedModelRef): string {
 			continue;
 		}
 
-		const branch = node.specs.some((spec) => matchSpec(spec, model)) ? node.truthy : node.falsy;
-		output += renderNodes(branch, model);
+		const matches = node.kind === "model"
+			? node.specs.some((spec) => matchSpec(spec, model))
+			: inputs !== undefined && node.inputName !== undefined && String(inputs[node.inputName]) === node.specs[0];
+		const branch = matches ? node.truthy : node.falsy;
+		output += renderNodes(branch, model, inputs);
 	}
 
 	return output;
@@ -315,11 +329,26 @@ export function minimumTemplateConditionalContent(content: string): string | und
 	return minimum;
 }
 
+
+export function renderTemplateConditionalsWithInputs(
+	content: string,
+	model: ResolvedModelRef,
+	inputs: Record<string, string | boolean>,
+	commandName?: string,
+): RenderConditionalsResult {
+	if (!content.includes("<if-input") && !content.includes("<if-model") && !content.includes("<else")) return { content };
+	const parsed = parseNodes(content);
+	if (parsed.ok) return { content: renderNodes(parsed.nodes, model, inputs) };
+	const label = commandName ? ` in prompt \`${commandName}\`` : "";
+	return { content, error: `Invalid conditional markup${label}: ${(parsed as ParseFailure).error.message}` };
+}
+
 export function renderTemplateConditionals(
 	content: string,
 	model: ResolvedModelRef,
 	commandName?: string,
 ): RenderConditionalsResult {
+	if (content.includes("<if-input")) return { content };
 	if (!content.includes("<if-model") && !content.includes("<else") && !content.includes("</if-model") && !content.includes("</else")) {
 		return { content };
 	}

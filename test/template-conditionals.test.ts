@@ -1,8 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { renderTemplateConditionals } from "../template-conditionals.ts";
+import { renderTemplateConditionals, renderTemplateConditionalsWithInputs } from "../template-conditionals.ts";
 
 const model = { provider: "anthropic", id: "claude-sonnet-4-20250514" };
+
+test("renderTemplateConditionalsWithInputs binds mixed nesting and else to the innermost frame", () => {
+	const template = '<if-model is="anthropic/*"><if-input name="run-tests" is="true">run<else>skip</if-input><else>other</if-model>';
+	assert.equal(renderTemplateConditionalsWithInputs(template, model, { "run-tests": true }).content, "run");
+	assert.equal(renderTemplateConditionalsWithInputs(template, model, { "run-tests": false }).content, "skip");
+	assert.equal(renderTemplateConditionalsWithInputs(template, { provider: "openai", id: "gpt-5" }, { "run-tests": true }).content, "other");
+});
+
+test("renderTemplateConditionalsWithInputs rejects mismatched closing tags", () => {
+	const result = renderTemplateConditionalsWithInputs('<if-model is="anthropic/*">bad</if-input>', model, {});
+	assert.match(result.error ?? "", /Mismatched/);
+});
 
 test("renderTemplateConditionals matches exact provider, bare id, and provider wildcard specs", () => {
 	const template = [

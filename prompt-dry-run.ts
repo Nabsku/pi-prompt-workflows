@@ -17,7 +17,7 @@ import { stripPromptPartialFrontmatter, type PromptIncludeGraph } from "./prompt
 import { buildSkillLoadedMessage, getRequestedSkills, resolvePromptSkills, type RuntimeSkillCommand } from "./prompt-skills.js";
 import { DEFAULT_SUBAGENT_NAME } from "./subagent-runtime.js";
 import { prepareAdaptivePreflight, type AdaptivePreflight } from "./adaptive-preflight.js";
-import { renderPromptInputValues, resolvePromptInputs } from "./prompt-inputs.js";
+import { resolvePromptInputs } from "./prompt-inputs.js";
 
 export const DRY_RUN_CHAIN_UNSUPPORTED =
 	"Dry-run for chain templates is not supported in v1. Use /validate-prompts for structural checks.";
@@ -370,7 +370,7 @@ export async function createPromptDryRun(
 	if (prompt.inputs) {
 		const resolved = resolvePromptInputs(prompt.inputs, parsed.args);
 		if (resolved.errors.length > 0) return errorResult(prompt, `Invalid prompt inputs: ${resolved.errors[0]}`, warnings, runtime);
-		prompt = { ...prompt, content: renderPromptInputValues(prompt.content, resolved.values) };
+		prompt = { ...prompt, resolvedInputValues: Object.fromEntries(Object.entries(resolved.values).map(([key, input]) => [key, input.value])) };
 	}
 
 	if (prompt.adaptiveChain) {

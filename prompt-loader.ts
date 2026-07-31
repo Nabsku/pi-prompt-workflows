@@ -89,6 +89,7 @@ export interface PromptWithModel {
 	models: string[];
 	budget?: PromptBudgetConfig;
 	inputs?: PromptInputSchema;
+	resolvedInputValues?: Record<string, string | boolean>;
 	includes?: string[];
 	chain?: string;
 	adaptiveChain?: { steps: StructuredChainStep[]; limits: ChainLimits };
