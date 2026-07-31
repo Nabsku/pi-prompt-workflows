@@ -46,7 +46,7 @@ export class PromptInputForm implements Component {
 	}
 
 	handleInput(data: string): void {
-		if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) { this.done?.({ action: "cancelled" }); return; }
+		if (data === "q" || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) { this.done?.({ action: "cancelled" }); return; }
 		if (matchesKey(data, Key.up)) { this.index = Math.max(0, this.index - 1); this.error = ""; return; }
 		if (matchesKey(data, Key.down)) { this.index = Math.min(Math.max(0, this.names.length - 1), this.index + 1); this.error = ""; return; }
 		const current = this.current();
