@@ -3053,7 +3053,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 		if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return;
 
-		const resolvedInputs = prompt.inputs ? resolvePromptInputs(prompt.inputs, parseCommandArgs(argsWithoutSubagent)) : undefined;
+		const parsedPromptArgs = parseCommandArgs(argsWithoutSubagent);
+		const resolvedInputs = prompt.inputs ? resolvePromptInputs(prompt.inputs, parsedPromptArgs) : undefined;
 		if (resolvedInputs?.errors.length) {
 			notify(ctx, `Invalid prompt inputs: ${resolvedInputs.errors[0]}`, "error");
 			return;
@@ -3088,7 +3089,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		await executeOrdinaryPrompt(
 			name,
 			effectivePrompt,
-			parseCommandArgs(argsWithoutSubagent),
+			resolvedInputs?.positional ?? parsedPromptArgs,
 			ctx,
 			savedModel,
 			subagent.override,

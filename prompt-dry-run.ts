@@ -367,9 +367,11 @@ export async function createPromptDryRun(
 	const parsed = parseDryRunArgs(prompt, options.rawArgs, options.args);
 	const runtime: PromptDryRunRuntimeMetadata = { ...parsed.runtime };
 	const warnings: string[] = [];
+	let resolvedPositional = parsed.args;
 	if (prompt.inputs) {
 		const resolved = resolvePromptInputs(prompt.inputs, parsed.args);
 		if (resolved.errors.length > 0) return errorResult(prompt, `Invalid prompt inputs: ${resolved.errors[0]}`, warnings, runtime);
+		resolvedPositional = resolved.positional;
 		prompt = { ...prompt, resolvedInputValues: Object.fromEntries(Object.entries(resolved.values).map(([key, input]) => [key, input.value])) };
 	}
 
@@ -532,7 +534,7 @@ export async function createPromptDryRun(
 
 	const prepared = await preparePromptExecution(
 		effectivePrompt,
-		parsed.args,
+		resolvedPositional,
 		options.currentModel,
 		options.modelRegistry,
 	);
