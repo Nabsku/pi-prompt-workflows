@@ -1,4 +1,5 @@
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
+import type { Dirent } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -109,6 +110,11 @@ export interface SubagentRuntime {
 	discoverAgents: DiscoverAgentsFn;
 }
 
+export interface SubagentRuntimeDiscoveryOptions {
+	/** Additional global node_modules roots for hermetic hosts and tests. */
+	globalNodeModules?: readonly string[];
+}
+
 let runtimeCache: SubagentRuntime | null = null;
 const delegatedLiveState = new Map<string, DelegatedSubagentLiveState>();
 
@@ -141,22 +147,59 @@ function projectPiPackageCandidates(cwd: string): string[] {
 	return candidates;
 }
 
+function findManagedGitCandidates(root: string, maxDepth = 6, maxDirectories = 256): string[] {
+	const candidates: string[] = [];
+	const pending: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
+	let visited = 0;
+	while (pending.length > 0 && visited < maxDirectories) {
+		const current = pending.shift()!;
+		visited++;
+		if (hasRuntimeModule(current.dir) || hasRuntimeModule(join(current.dir, "src", "agents")) || hasRuntimeModule(join(current.dir, "dist", "agents"))) {
+			candidates.push(current.dir);
+			continue;
+		}
+		if (current.depth >= maxDepth) continue;
+		let entries: Dirent[];
+		try {
+			entries = readdirSync(current.dir, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+			if (!entry.isDirectory() || entry.name === ".git" || entry.name === "node_modules") continue;
+			pending.push({ dir: join(current.dir, entry.name), depth: current.depth + 1 });
+		}
+	}
+	return candidates;
+}
+
 function uniquePaths(paths: string[]): string[] {
 	return [...new Set(paths)];
 }
 
-function runtimeCandidates(cwd: string): string[] {
+function runtimeCandidates(cwd: string, options: SubagentRuntimeDiscoveryOptions = {}): string[] {
 	const fromEnv = process.env.PI_SUBAGENT_RUNTIME_ROOT?.trim();
 	if (fromEnv) return [resolveHomeRelative(fromEnv)];
 	const packageDir = dirname(fileURLToPath(import.meta.url));
 	const localSibling = resolve(packageDir, "..", "pi-subagents");
 	const includeLocalSibling = basename(dirname(packageDir)) === "node_modules";
 	const piAgentDir = resolvePiAgentDir();
+	const projectConfigDir = resolve(cwd, ".pi");
+	const globalNodeModules = options.globalNodeModules ?? [
+		resolve(dirname(process.execPath), "..", "lib", "node_modules"),
+		"/usr/local/lib/node_modules",
+		"/opt/homebrew/lib/node_modules",
+	];
 	return uniquePaths([
 		...projectPiPackageCandidates(cwd),
+		resolve(projectConfigDir, "extensions", "subagent"),
+		...findManagedGitCandidates(resolve(projectConfigDir, "git")),
 		resolve(piAgentDir, "npm", "node_modules", "pi-subagents"),
 		resolve(piAgentDir, "node_modules", "pi-subagents"),
+		resolve(piAgentDir, "extensions", "subagent"),
+		...findManagedGitCandidates(resolve(piAgentDir, "git")),
 		...(includeLocalSibling ? [localSibling] : []),
+		...globalNodeModules.map((root) => resolve(root, "pi-subagents")),
 	]);
 }
 
@@ -170,10 +213,10 @@ interface FindSubagentRootResult {
 	envOnly: boolean;
 }
 
-function findSubagentRoot(cwd: string): FindSubagentRootResult {
+function findSubagentRoot(cwd: string, options: SubagentRuntimeDiscoveryOptions = {}): FindSubagentRootResult {
 	const checked: string[] = [];
 	const envOnly = Boolean(process.env.PI_SUBAGENT_RUNTIME_ROOT?.trim());
-	for (const candidate of runtimeCandidates(cwd)) {
+	for (const candidate of runtimeCandidates(cwd, options)) {
 		for (const runtimeRoot of runtimeEntryCandidates(candidate)) {
 			checked.push(runtimeRoot);
 			if (hasRuntimeModule(runtimeRoot)) {
@@ -260,8 +303,8 @@ export function clearDelegatedLiveState(requestId: string): void {
 	delegatedLiveState.delete(requestId);
 }
 
-export async function ensureSubagentRuntime(cwd: string): Promise<SubagentRuntime> {
-	const result = findSubagentRoot(cwd);
+export async function ensureSubagentRuntime(cwd: string, options: SubagentRuntimeDiscoveryOptions = {}): Promise<SubagentRuntime> {
+	const result = findSubagentRoot(cwd, options);
 	const root = result.root;
 	if (!root) {
 		throw new Error(
