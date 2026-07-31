@@ -93,6 +93,21 @@ test("preparePromptExecution renders conditionals before substituting user args"
 	assert.equal(prepared?.content, '<if-model is="openai/gpt-5.2">bad</if-model>\nkept');
 });
 
+test("preparePromptExecution renders input conditionals before named and positional substitution", async () => {
+	const prepared = await preparePromptExecution(
+		{
+			name: "demo",
+			models: ["claude-sonnet-4-20250514"],
+			resolvedInputValues: { "run-tests": true },
+			content: '<if-input name="run-tests" is="true">run<else>skip</if-input> $@',
+		},
+		["src/a.ts", "src/b.ts"],
+		undefined,
+		registry as never,
+	);
+	assert.ok(prepared && !("message" in prepared));
+	assert.equal(prepared?.content, "run src/a.ts src/b.ts");
+});
 test("preparePromptExecution aborts whitespace-only output after rendering", async () => {
 	const prepared = await preparePromptExecution(
 		{
