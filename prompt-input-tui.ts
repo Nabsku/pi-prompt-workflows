@@ -67,7 +67,7 @@ export class PromptInputForm implements Component {
 			return;
 		}
 		if (current.definition.type !== "string" && current.definition.type !== "choice") return;
-		if (matchesKey(data, Key.backspace)) { this.values[current.name] = String(current.value).slice(0, -1); this.error = ""; return; }
+		if (matchesKey(data, Key.backspace) && current.definition.type === "string") { this.values[current.name] = String(current.value).slice(0, -1); this.error = ""; return; }
 		const printable = decodeKittyPrintable(data) ?? (data.length === 1 && data >= " " && data !== "\u007f" ? data : undefined);
 		if (printable !== undefined && current.definition.type === "string") { this.values[current.name] = `${current.value}${printable}`; this.error = ""; }
 	}
