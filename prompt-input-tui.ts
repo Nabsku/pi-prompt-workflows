@@ -20,7 +20,7 @@ export class PromptInputForm implements Component {
 		this.values = { ...initialValues };
 		for (const name of this.names) {
 			const definition = schema[name]!;
-			if (!(name in this.values)) this.values[name] = definition.type === "boolean" ? false : definition.type === "choice" ? definition.options?.[0] ?? "" : "";
+			if (!Object.prototype.hasOwnProperty.call(this.values, name)) this.values[name] = definition.type === "boolean" ? false : definition.type === "choice" ? definition.options?.[0] ?? "" : "";
 		}
 	}
 
@@ -46,12 +46,12 @@ export class PromptInputForm implements Component {
 	}
 
 	handleInput(data: string): void {
-		if (matchesKey(data, "q") || matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) { this.done?.({ action: "cancelled" }); return; }
+		if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) { this.done?.({ action: "cancelled" }); return; }
 		if (matchesKey(data, Key.up)) { this.index = Math.max(0, this.index - 1); this.error = ""; return; }
 		if (matchesKey(data, Key.down)) { this.index = Math.min(Math.max(0, this.names.length - 1), this.index + 1); this.error = ""; return; }
 		const current = this.current();
 		if (!current) return;
-		if (data === " ") {
+		if (data === " " && current.definition.type !== "string") {
 			if (current.definition.type === "boolean") this.values[current.name] = !current.value;
 			else if (current.definition.type === "choice") {
 				const options = current.definition.options ?? [];

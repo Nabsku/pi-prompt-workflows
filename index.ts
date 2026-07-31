@@ -13,6 +13,7 @@ import {
 	extractSubagentOverride,
 	extractWorktreeFlag,
 	parseCommandArgs,
+	splitRawArgsAtBoundary,
 	substituteArgs,
 	type LineupOverrideAction,
 	type SubagentOverride,
@@ -2943,17 +2944,18 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			notify(ctx, `Prompt "${name}" is no longer available as a slash command`, "error");
 			return;
 		}
-		if (prompt.inputs && (prompt.chain || prompt.loop !== undefined || prompt.workers || prompt.reviewers || prompt.finalApplier || prompt.preset || prompt.deterministic)) {
-			notify(ctx, "Prompt inputs are only supported on ordinary prompts in v1", "error");
-			return;
-		}
-		const subagent = extractSubagentOverride(args);
+		const boundary = splitRawArgsAtBoundary(args);
+		const subagent = extractSubagentOverride(boundary.before);
 		const runtimeCwd = subagent.cwd ? expandCwdPath(subagent.cwd) : undefined;
 		if (subagent.cwd && !runtimeCwd) {
 			notify(ctx, `Invalid --cwd path: must be absolute`, "error");
 			return;
 		}
 		const argsWithoutSubagent = subagent.args;
+		if (prompt.inputs && (prompt.chain || prompt.loop !== undefined || prompt.workers || prompt.reviewers || prompt.finalApplier || prompt.preset || prompt.deterministic || prompt.subagent || prompt.parallel || subagent.override || subagent.fork || extractLoopCount(argsWithoutSubagent))) {
+			notify(ctx, "Prompt inputs are only supported on ordinary prompts without loops, chains, delegation, compare, or deterministic execution", "error");
+			return;
+		}
 		if (prompt.deterministic) {
 			if (subagent.override || subagent.fork) {
 				notify(ctx, `Deterministic prompts do not support runtime --subagent/--fork in v1`, "error");
@@ -3054,7 +3056,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 		if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return;
 
-		const parsedPromptArgs = parseCommandArgs(argsWithoutSubagent);
+		const parsedPromptArgs = [...parseCommandArgs(argsWithoutSubagent), ...boundary.after];
 		let resolvedInputs = prompt.inputs ? resolvePromptInputs(prompt.inputs, parsedPromptArgs) : undefined;
 		if (resolvedInputs?.errors.length && prompt.inputs && ctx.mode === "tui" && ctx.hasUI && typeof (ctx.ui as { custom?: unknown }).custom === "function") {
 			const initialValues = Object.fromEntries(Object.entries(resolvedInputs.values).map(([name, input]) => [name, input.value]));

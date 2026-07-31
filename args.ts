@@ -743,6 +743,26 @@ export function splitByUnquotedSeparator(input: string, separator: string): stri
 	return parts;
 }
 
+export function splitRawArgsAtBoundary(argsString: string): { before: string; after: string[] } {
+	let quote: string | null = null;
+	let start = 0;
+	for (let i = 0; i < argsString.length; i++) {
+		const c = argsString[i];
+		if (quote) {
+			if (c === "\\" && quote === '"') i++;
+			else if (c === quote) quote = null;
+			continue;
+		}
+		if (c === '"' || c === "'") { quote = c; continue; }
+		if (c === "-" && argsString.slice(i, i + 2) === "--" && (i === 0 || /\s/.test(argsString[i - 1])) && (i + 2 === argsString.length || /\s/.test(argsString[i + 2]))) {
+			const before = argsString.slice(0, i).trim();
+			const after = parseCommandArgs(argsString.slice(i + 2));
+			return { before, after };
+		}
+	}
+	return { before: argsString, after: [] };
+}
+
 export function parseCommandArgs(argsString: string): string[] {
 	const args: string[] = [];
 	let current = "";

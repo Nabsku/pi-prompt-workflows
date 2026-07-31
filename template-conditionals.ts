@@ -348,7 +348,16 @@ export function renderTemplateConditionals(
 	model: ResolvedModelRef,
 	commandName?: string,
 ): RenderConditionalsResult {
-	if (content.includes("<if-input")) return { content };
+	if (content.includes("<if-input")) {
+		const literals: string[] = [];
+		const protectedContent = content.replace(/<if-input\b[\s\S]*?<\/if-input>/g, (match) => {
+			const token = `\uE000pi-input-${literals.length}\uE001`;
+			literals.push(match);
+			return token;
+		});
+		const rendered = renderTemplateConditionals(protectedContent, model, commandName);
+		return { ...rendered, content: rendered.content.replace(/\uE000pi-input-(\d+)\uE001/g, (_, index) => literals[Number(index)] ?? "") };
+	}
 	if (!content.includes("<if-model") && !content.includes("<else") && !content.includes("</if-model") && !content.includes("</else")) {
 		return { content };
 	}

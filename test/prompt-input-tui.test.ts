@@ -25,5 +25,6 @@ test("PromptInputForm supports cancellation", () => {
 	let result: unknown;
 	const form = new PromptInputForm({ target: { type: "string", required: true } }, {}, (value) => { result = value; });
 	form.handleInput("q");
+	form.handleInput("\u001b");
 	assert.deepEqual(result, { action: "cancelled" });
 });

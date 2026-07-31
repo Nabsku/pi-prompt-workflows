@@ -6,6 +6,7 @@ import {
 	extractLoopFlags,
 	extractSubagentOverride,
 	parseCommandArgs,
+	splitRawArgsAtBoundary,
 	type SubagentOverride,
 } from "./args.js";
 import { createBestOfNPreflight, type BestOfNPreflight } from "./best-of-n-preflight.js";
@@ -326,7 +327,8 @@ function parseDryRunArgs(prompt: PromptWithModel, rawArgs: string | undefined, a
 		} as const;
 	}
 
-	const subagent = extractSubagentOverride(rawArgs);
+	const boundary = splitRawArgsAtBoundary(rawArgs);
+	const subagent = extractSubagentOverride(boundary.before);
 	let cleanedArgs = subagent.args;
 	let loop: PromptDryRunLoopMetadata | undefined;
 	const extractedLoop = extractLoopCount(cleanedArgs);
@@ -344,7 +346,7 @@ function parseDryRunArgs(prompt: PromptWithModel, rawArgs: string | undefined, a
 	}
 
 	return {
-		args: parseCommandArgs(cleanedArgs),
+		args: [...parseCommandArgs(cleanedArgs), ...boundary.after],
 		runtime: {
 			...(subagent.model ? { model: subagent.model } : {}),
 			...(loop ? { loop } : {}),
