@@ -417,7 +417,13 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		loopContext?: string,
 		promptTurnRestore?: PromptTurnRestore,
 		adaptiveAbortStatus?: (status: "failed" | "blocked") => void,
+		inputsResolved = false,
 		): Promise<PromptStepResult | "aborted"> {
+		if (prompt.inputs && !inputsResolved) {
+			notify(ctx, "Input-enabled prompts cannot run through workflows; invoke them directly", "error");
+			adaptiveAbortStatus?.("blocked");
+			return "aborted";
+		}
 		if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) {
 			adaptiveAbortStatus?.("blocked");
 			return "aborted";
@@ -588,6 +594,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		override?: SubagentOverride,
 		adaptiveAbortStatus?: (status: "failed" | "blocked") => void,
 		inheritedModel?: Model<any>,
+		inputsResolved = false,
 	): Promise<PromptStepResult | "aborted"> {
 		const savedThinking = pi.getThinkingLevel();
 		const isDelegatedPrompt = shouldDelegatePrompt(prompt, override);
@@ -595,7 +602,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			? { originalModel: currentModel, originalThinking: savedThinking }
 			: undefined;
 		const boomerangTargetId = prompt.boomerang ? ctx.sessionManager.getLeafId() : null;
-		const result = await executePromptStep(prompt, args, ctx, currentModel, override, inheritedModel, undefined, undefined, promptTurnRestore, adaptiveAbortStatus);
+		const result = await executePromptStep(prompt, args, ctx, currentModel, override, inheritedModel, undefined, undefined, promptTurnRestore, adaptiveAbortStatus, inputsResolved);
 		if (isAbortedStepResult(result)) return result;
 		if (isDelegatedPrompt && result.text) {
 			const parentStartId = ctx.sessionManager.getLeafId();
@@ -2944,7 +2951,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			notify(ctx, `Prompt "${name}" is no longer available as a slash command`, "error");
 			return;
 		}
-		const boundary = splitRawArgsAtBoundary(args);
+		const boundary = prompt.inputs ? splitRawArgsAtBoundary(args) : { before: args, after: [] };
 		const subagent = extractSubagentOverride(boundary.before);
 		const runtimeCwd = subagent.cwd ? expandCwdPath(subagent.cwd) : undefined;
 		if (subagent.cwd && !runtimeCwd) {
@@ -3111,6 +3118,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			ctx,
 			savedModel,
 			subagent.override,
+			undefined,
+			undefined,
+			true,
 		);
 	}
 

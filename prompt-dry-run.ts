@@ -327,7 +327,7 @@ function parseDryRunArgs(prompt: PromptWithModel, rawArgs: string | undefined, a
 		} as const;
 	}
 
-	const boundary = splitRawArgsAtBoundary(rawArgs);
+	const boundary = prompt.inputs ? splitRawArgsAtBoundary(rawArgs) : { before: rawArgs, after: [] };
 	const subagent = extractSubagentOverride(boundary.before);
 	let cleanedArgs = subagent.args;
 	let loop: PromptDryRunLoopMetadata | undefined;
@@ -366,9 +366,9 @@ export async function createPromptDryRun(
 	prompt: PromptWithModel,
 	options: CreatePromptDryRunOptions,
 ): Promise<PromptDryRunResult> {
-	const inputModeError = inputModeEligibilityError({ ...prompt, subagent: prompt.subagent || options.rawArgs?.includes("--subagent") || options.rawArgs?.includes("--fork") });
-	if (inputModeError) return errorResult(prompt, inputModeError, []);
 	const parsed = parseDryRunArgs(prompt, options.rawArgs, options.args);
+	const inputModeError = inputModeEligibilityError({ ...prompt, subagent: prompt.subagent || parsed.override || parsed.fork });
+	if (inputModeError) return errorResult(prompt, inputModeError, []);
 	const runtime: PromptDryRunRuntimeMetadata = { ...parsed.runtime };
 	const warnings: string[] = [];
 	if (prompt.inputs && parsed.runtime.loop) return errorResult(prompt, inputModeEligibilityError({ inputs: prompt.inputs }) ?? "Prompt inputs do not support runtime loops", warnings, runtime);
