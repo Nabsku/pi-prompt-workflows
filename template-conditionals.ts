@@ -336,7 +336,7 @@ export function renderTemplateConditionalsWithInputs(
 	inputs: Record<string, string | boolean>,
 	commandName?: string,
 ): RenderConditionalsResult {
-	if (!content.includes("<if-input") && !content.includes("<if-model") && !content.includes("<else")) return { content };
+	if (!content.includes("<if-input") && !content.includes("</if-input") && !content.includes("<if-model") && !content.includes("</if-model") && !content.includes("<else")) return { content };
 	const parsed = parseNodes(content);
 	if (parsed.ok) return { content: renderNodes(parsed.nodes, model, inputs) };
 	const label = commandName ? ` in prompt \`${commandName}\`` : "";
