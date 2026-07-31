@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.18.0](https://github.com/Nabsku/pi-prompt-workflows/compare/v0.17.0...v0.18.0) (2026-07-31)
+
+
+### Features
+
+* add typed prompt inputs ([f988eb3](https://github.com/Nabsku/pi-prompt-workflows/commit/f988eb3aab9690427bc49452b06b0e79dd9aa656))
+* collect missing prompt inputs in TUI ([3f7586b](https://github.com/Nabsku/pi-prompt-workflows/commit/3f7586b99f5a090bf4de9cdd4bf925b0d2876e38))
+* port low-risk upstream parity slices ([af1e837](https://github.com/Nabsku/pi-prompt-workflows/commit/af1e837917540e84d6bf53431991c8bf902e0717))
+* render input and model conditionals together ([eac35ed](https://github.com/Nabsku/pi-prompt-workflows/commit/eac35ed8cc36a1d293f76c7a189a98945d847090))
+
+
+### Bug Fixes
+
+* close parity review gaps ([7c76a9c](https://github.com/Nabsku/pi-prompt-workflows/commit/7c76a9c13de5c0f8df8dee8005346c5a9f43cd11))
+* close rebased codex findings ([710c8f5](https://github.com/Nabsku/pi-prompt-workflows/commit/710c8f59493eace5f2fc30e3fb2a61a429a0223d))
+* close remaining codex input review gaps ([506ee8b](https://github.com/Nabsku/pi-prompt-workflows/commit/506ee8b812a547eccf428b5e99e42592f5f56f5f))
+* close remaining interactive input review gaps ([792cfdb](https://github.com/Nabsku/pi-prompt-workflows/commit/792cfdb0d68690428ea2acb1c88776595eaff2fc))
+* complete final input review findings ([8f7ec6c](https://github.com/Nabsku/pi-prompt-workflows/commit/8f7ec6c0e31b124f3b9dc945a0a0a2c3abc36849))
+* harden input workflow and argument handling ([21c6bf0](https://github.com/Nabsku/pi-prompt-workflows/commit/21c6bf0c24e54d8ef54878eb01ed9439c2fec4bf))
+* harden interactive prompt input boundaries ([fc606b6](https://github.com/Nabsku/pi-prompt-workflows/commit/fc606b6cfe9f6a49bbd53ef1a9c7417db6347b21))
+* honor project trust and nested runtime discovery ([f5f3b96](https://github.com/Nabsku/pi-prompt-workflows/commit/f5f3b96c5138c9189f50271699b7a898d4feb4c6))
+* honor q as prompt input cancellation ([3d7ae87](https://github.com/Nabsku/pi-prompt-workflows/commit/3d7ae8729016562bb6e1e663e7fadbd6592c2387))
+* keep input value replacement non-recursive ([c9677b6](https://github.com/Nabsku/pi-prompt-workflows/commit/c9677b6316104a4a3dde54c2f7e458f4e5ac6684))
+* limit interactive input repairs ([3e914bc](https://github.com/Nabsku/pi-prompt-workflows/commit/3e914bc9cac95c42ec453b9d27920bc9c66a0f10))
+* make input cancellation side-effect free ([086335a](https://github.com/Nabsku/pi-prompt-workflows/commit/086335a09ea9bb8efdc7ed88d51e32552f4ce408))
+* preserve input boundary semantics ([e2b29ec](https://github.com/Nabsku/pi-prompt-workflows/commit/e2b29ecb3435d7a9672c19a5f37bbad80eb1dd59))
+* refine input form cancellation and diagnostics ([9da537c](https://github.com/Nabsku/pi-prompt-workflows/commit/9da537c66562e089fde16f6767c7716a1aa63f51))
+* validate input references and dry-run args ([ed051b9](https://github.com/Nabsku/pi-prompt-workflows/commit/ed051b91ca2af101afb4a8b2c5ce5dd873771e21))
+* validate prompt input references ([feba7fa](https://github.com/Nabsku/pi-prompt-workflows/commit/feba7fabcaa498cceeeefee30cda5d99ee078808))
+* wire resolved inputs into prompt rendering ([e337ea6](https://github.com/Nabsku/pi-prompt-workflows/commit/e337ea611dbe792d73eb7110dd1e928ad7d2c1e1))
+
 ## [0.17.0](https://github.com/Nabsku/pi-prompt-workflows/compare/v0.16.1...v0.17.0) (2026-07-30)
 
 
