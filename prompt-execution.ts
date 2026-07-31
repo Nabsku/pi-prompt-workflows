@@ -3,7 +3,7 @@ import { substituteArgs } from "./args.js";
 import { getResolvedModelRef, selectModelCandidate, type RegistryLike, type SelectedModelCandidate } from "./model-selection.js";
 import type { PromptWithModel } from "./prompt-loader.js";
 import { evaluatePromptBudget } from "./prompt-budget.js";
-import { renderPromptInputConditionals, renderPromptInputValues } from "./prompt-inputs.js";
+import { renderPromptInputValues } from "./prompt-inputs.js";
 import { renderTemplateConditionals, renderTemplateConditionalsWithInputs } from "./template-conditionals.js";
 
 export interface PreparedPromptExecution {
@@ -118,10 +118,7 @@ export function renderPromptForResolvedModel(
 	const inputValues = prompt.resolvedInputValues
 		? Object.fromEntries(Object.entries(prompt.resolvedInputValues).map(([name, value]) => [name, { name, type: typeof value === "boolean" ? "boolean" : "string", value, source: "flag" }])) as never
 		: undefined;
-	const inputConditionalRendered = inputValues
-		? renderPromptInputConditionals(rendered.content, inputValues).content
-		: rendered.content;
-	const substituted = substituteArgs(inputConditionalRendered, args);
+	const substituted = substituteArgs(rendered.content, args);
 	const content = inputValues ? renderPromptInputValues(substituted, inputValues) : substituted;
 	if (content.trim().length === 0) {
 		return {
