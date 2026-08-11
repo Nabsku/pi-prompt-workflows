@@ -1,6 +1,6 @@
 {
   "name": "pi-prompt-workflows",
-  "version": "0.18.0",
+  "version": "0.18.1",
   "type": "module",
   "description": "Prompt workflow extension for Pi coding agent",
   "author": "Nico Bailon",

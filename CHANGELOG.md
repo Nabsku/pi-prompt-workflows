@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.18.1](https://github.com/Nabsku/pi-prompt-workflows/compare/v0.18.0...v0.18.1) (2026-08-11)
+
+
+### Bug Fixes
+
+* harden prompt execution lifecycle ([40397a4](https://github.com/Nabsku/pi-prompt-workflows/commit/40397a4b2453c1366bdcc6dcf0eb96cfc01ec951))
+* sync upstream prompt workflows ([b7ca73e](https://github.com/Nabsku/pi-prompt-workflows/commit/b7ca73ee63ff9550cc21db0a2b42bd5bc3d369e9))
+
 ## [0.18.0](https://github.com/Nabsku/pi-prompt-workflows/compare/v0.17.0...v0.18.0) (2026-07-31)
 
 
