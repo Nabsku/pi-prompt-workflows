@@ -380,6 +380,28 @@ test("a direct ordinary prompt reports an assistant error stop as failed", async
 	});
 });
 
+test("input form cancellation emits cancelled lifecycle status", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "input.md"), `---\nmodel: ${MODEL_ID}\ninputs:\n  target:\n    type: string\n    required: true\n---\nTARGET:\${input.target}`);
+
+		const pi = new FakePi();
+		let finishedPayload: any;
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, (payload) => { finishedPayload = payload; });
+		promptModelExtension(pi as never);
+		const { ctx } = createContext(cwd, pi);
+		(ctx as any).mode = "tui";
+		(ctx.ui as any).custom = async () => ({ action: "cancelled" });
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("input")!.handler("", ctx);
+
+		assert.equal(finishedPayload.status, "cancelled");
+		assert.deepEqual(pi.userMessages, []);
+	});
+});
+
 test("chain template validation failure emits failed lifecycle status", async () => {
 	await withTempHome(async (root) => {
 		const cwd = join(root, "project");
@@ -594,6 +616,338 @@ test("session replacement cancels an invocation whose owned send is waiting for 
 		await pi.commands.get("invoke")!.handler("", newContext);
 		assert.equal(sendCalls, 1);
 		assert.deepEqual(pi.userMessages, ["new task"]);
+	});
+});
+
+test("session replacement prevents stale loop cleanup from restoring prior model state", async () => {
+	await withTempHome(async (root) => {
+		const oldCwd = join(root, "old-loop");
+		const newCwd = join(root, "new-loop");
+		mkdirSync(join(oldCwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(newCwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(oldCwd, ".pi", "prompts", "work.md"), "---\nmodel: anthropic/target-model\nthinking: high\nrestore: true\n---\nOLD LOOP");
+		writeFileSync(join(newCwd, ".pi", "prompts", "next.md"), "---\nmodel: anthropic/new-base\n---\nNEW SESSION");
+
+		const oldBase = { provider: "anthropic", id: "old-base" };
+		const target = { provider: "anthropic", id: "target-model" };
+		const newBase = { provider: "anthropic", id: "new-base" };
+		const pi = new FakePi();
+		pi.currentModel = oldBase;
+		promptModelExtension(pi as never);
+		let resolveWaitStarted!: () => void;
+		const waitStarted = new Promise<void>((resolve) => { resolveWaitStarted = resolve; });
+		const oldContext = createContext(oldCwd, pi, [oldBase, target, newBase], {
+			waitForIdle: async () => {
+				resolveWaitStarted();
+				await new Promise<void>(() => {});
+			},
+		}).ctx;
+		const newContext = createContext(newCwd, pi, [oldBase, target, newBase]).ctx;
+		await pi.emit("session_start", {}, oldContext);
+
+		const running = pi.commands.get("work")!.handler("--loop 2", oldContext);
+		await waitStarted;
+		pi.currentModel = newBase;
+		pi.setThinkingLevel("low");
+		await pi.emit("session_start", {}, newContext);
+		await assert.rejects(running, /aborted while waiting/);
+
+		assert.equal(pi.currentModel.id, "new-base");
+		assert.equal(pi.getThinkingLevel(), "low");
+		await pi.commands.get("next")!.handler("", newContext);
+		assert.equal(pi.userMessages.at(-1), "NEW SESSION");
+	});
+});
+
+test("session replacement prevents stale chain cleanup from restoring prior model state", async () => {
+	await withTempHome(async (root) => {
+		const oldCwd = join(root, "old-chain");
+		const newCwd = join(root, "new-chain");
+		mkdirSync(join(oldCwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(newCwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(oldCwd, ".pi", "prompts", "worker.md"), "---\nmodel: anthropic/target-model\nthinking: high\n---\nOLD CHAIN");
+		writeFileSync(join(oldCwd, ".pi", "prompts", "pipeline.md"), "---\nchain: worker\nrestore: true\n---\nignored");
+		writeFileSync(join(newCwd, ".pi", "prompts", "next.md"), "---\nmodel: anthropic/new-base\n---\nNEW SESSION");
+
+		const oldBase = { provider: "anthropic", id: "old-base" };
+		const target = { provider: "anthropic", id: "target-model" };
+		const newBase = { provider: "anthropic", id: "new-base" };
+		const pi = new FakePi();
+		pi.currentModel = oldBase;
+		promptModelExtension(pi as never);
+		let resolveWaitStarted!: () => void;
+		const waitStarted = new Promise<void>((resolve) => { resolveWaitStarted = resolve; });
+		const oldContext = createContext(oldCwd, pi, [oldBase, target, newBase], {
+			waitForIdle: async () => {
+				resolveWaitStarted();
+				await new Promise<void>(() => {});
+			},
+		}).ctx;
+		const newContext = createContext(newCwd, pi, [oldBase, target, newBase]).ctx;
+		await pi.emit("session_start", {}, oldContext);
+
+		const running = pi.commands.get("pipeline")!.handler("", oldContext);
+		await waitStarted;
+		pi.currentModel = newBase;
+		pi.setThinkingLevel("low");
+		await pi.emit("session_start", {}, newContext);
+		await assert.rejects(running, /aborted while waiting/);
+
+		assert.equal(pi.currentModel.id, "new-base");
+		assert.equal(pi.getThinkingLevel(), "low");
+		await pi.commands.get("next")!.handler("", newContext);
+		assert.equal(pi.userMessages.at(-1), "NEW SESSION");
+	});
+});
+
+for (const scenario of [
+	{ kind: "loop", command: "work", args: "--loop 1 --no-converge" },
+	{ kind: "chain", command: "pipeline", args: "" },
+] as const) {
+	test(`session replacement fences asynchronous ${scenario.kind} restoration`, async () => {
+		await withTempHome(async (root) => {
+			const oldCwd = join(root, `old-${scenario.kind}-restore`);
+			const newCwd = join(root, `new-${scenario.kind}-restore`);
+			for (const cwd of [oldCwd, newCwd]) mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			if (scenario.kind === "loop") {
+				writeFileSync(join(oldCwd, ".pi", "prompts", "work.md"), "---\nmodel: anthropic/turn-model\nthinking: high\nrestore: true\n---\nOLD LOOP RESTORE");
+			} else {
+				writeFileSync(join(oldCwd, ".pi", "prompts", "worker.md"), "---\nmodel: anthropic/turn-model\nthinking: high\n---\nOLD CHAIN RESTORE");
+				writeFileSync(join(oldCwd, ".pi", "prompts", "pipeline.md"), "---\nchain: worker\nrestore: true\n---\nignored");
+			}
+			writeFileSync(join(newCwd, ".pi", "prompts", "replacement.md"), "---\nmodel: anthropic/new-base\n---\nREPLACEMENT LOOP");
+
+			const oldBase = { provider: "anthropic", id: "old-base" };
+			const turnModel = { provider: "anthropic", id: "turn-model" };
+			const newBase = { provider: "anthropic", id: "new-base" };
+			const pi = new FakePi();
+			pi.currentModel = oldBase;
+			promptModelExtension(pi as never);
+			const oldContext = createContext(oldCwd, pi, [oldBase, turnModel, newBase]).ctx;
+			const newContext = createContext(newCwd, pi, [oldBase, turnModel, newBase]).ctx;
+			(oldContext.sessionManager as any).getLeafId = () => "old-root";
+			(newContext.sessionManager as any).getLeafId = () => "replacement-root";
+
+			const statuses = new Map<string, string | undefined>();
+			(newContext as any).hasUI = true;
+			(newContext as any).ui.setStatus = (key: string, value: string | undefined) => statuses.set(key, value);
+
+			let restorationStarted!: () => void;
+			let releaseRestoration!: () => void;
+			const started = new Promise<void>((resolve) => { restorationStarted = resolve; });
+			const restorationGate = new Promise<void>((resolve) => { releaseRestoration = resolve; });
+			const setModel = pi.setModel.bind(pi);
+			let gateOldRestore = true;
+			pi.setModel = async (model) => {
+				if (gateOldRestore && model.id === oldBase.id) {
+					gateOldRestore = false;
+					restorationStarted();
+					await restorationGate;
+				}
+				return setModel(model);
+			};
+
+			let replacementNavigationStarted!: () => void;
+			let releaseReplacementNavigation!: () => void;
+			const replacementStarted = new Promise<void>((resolve) => { replacementNavigationStarted = resolve; });
+			const replacementGate = new Promise<void>((resolve) => { releaseReplacementNavigation = resolve; });
+			(newContext as any).navigateTree = async () => {
+				replacementNavigationStarted();
+				await replacementGate;
+				return { cancelled: false };
+			};
+
+			await pi.emit("session_start", {}, oldContext);
+			const staleRun = pi.commands.get(scenario.command)!.handler(scenario.args, oldContext);
+			await started;
+
+			pi.currentModel = newBase;
+			pi.setThinkingLevel("low");
+			const replacementStart = pi.emit("session_start", {}, newContext);
+			await Promise.resolve();
+			const replacementRun = pi.commands.get("replacement")!.handler("--loop 2 --fresh --no-converge", newContext);
+			await replacementStarted;
+
+			releaseRestoration();
+			await replacementStart;
+			await staleRun;
+
+			assert.equal(pi.currentModel.id, newBase.id);
+			assert.equal(pi.getThinkingLevel(), "low");
+			assert.equal(statuses.get("prompt-loop"), "loop 1/2");
+			const summary = await pi.emitWithResult("session_before_tree", {
+				preparation: {
+					targetId: "replacement-root",
+					entriesToSummarize: [{ id: "replacement-result", type: "message", message: { role: "assistant", content: [{ type: "text", text: "replacement result" }] } }],
+				},
+			}, newContext);
+			assert.match(String((summary?.summary as { summary?: string } | undefined)?.summary ?? ""), /^\[Loop iteration 1\/2\]/);
+
+			releaseReplacementNavigation();
+			await replacementRun;
+		});
+	});
+}
+
+test("session shutdown fences asynchronous chain restoration", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "shutdown-chain-restore");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "worker.md"), "---\nmodel: anthropic/turn-model\nthinking: high\n---\nSHUTDOWN CHAIN RESTORE");
+		writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), "---\nchain: worker\nrestore: true\n---\nignored");
+
+		const oldBase = { provider: "anthropic", id: "old-base" };
+		const turnModel = { provider: "anthropic", id: "turn-model" };
+		const shutdownModel = { provider: "anthropic", id: "shutdown-model" };
+		const pi = new FakePi();
+		pi.currentModel = oldBase;
+		promptModelExtension(pi as never);
+		const context = createContext(cwd, pi, [oldBase, turnModel, shutdownModel]).ctx;
+
+		let restorationStarted!: () => void;
+		let releaseRestoration!: () => void;
+		const started = new Promise<void>((resolve) => { restorationStarted = resolve; });
+		const restorationGate = new Promise<void>((resolve) => { releaseRestoration = resolve; });
+		const setModel = pi.setModel.bind(pi);
+		let gateOldRestore = true;
+		pi.setModel = async (model) => {
+			if (gateOldRestore && model.id === oldBase.id) {
+				gateOldRestore = false;
+				restorationStarted();
+				await restorationGate;
+			}
+			return setModel(model);
+		};
+
+		await pi.emit("session_start", {}, context);
+		const running = pi.commands.get("pipeline")!.handler("", context);
+		await started;
+		pi.currentModel = shutdownModel;
+		pi.setThinkingLevel("low");
+		const shutdown = pi.emit("session_shutdown", {}, context);
+		await Promise.resolve();
+		releaseRestoration();
+		await shutdown;
+		await running;
+
+		assert.equal(pi.currentModel.id, shutdownModel.id);
+		assert.equal(pi.getThinkingLevel(), "low");
+	});
+});
+
+test("session replacement prevents stale fresh navigation from clearing new collapse state", async () => {
+	await withTempHome(async (root) => {
+		const oldCwd = join(root, "old-fresh");
+		const newCwd = join(root, "new-fresh");
+		for (const cwd of [oldCwd, newCwd]) mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(oldCwd, ".pi", "prompts", "work.md"), `---\nmodel: ${MODEL_ID}\n---\nOLD FRESH`);
+		writeFileSync(join(newCwd, ".pi", "prompts", "work.md"), `---\nmodel: ${MODEL_ID}\n---\nNEW FRESH`);
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const oldContext = createContext(oldCwd, pi).ctx;
+		const newContext = createContext(newCwd, pi).ctx;
+		(oldContext.sessionManager as any).getLeafId = () => "old-root";
+		(newContext.sessionManager as any).getLeafId = () => "new-root";
+
+		let releaseOldNavigation!: () => void;
+		let releaseNewNavigation!: () => void;
+		let oldNavigationStarted!: () => void;
+		let newNavigationStarted!: () => void;
+		const oldStarted = new Promise<void>((resolve) => { oldNavigationStarted = resolve; });
+		const newStarted = new Promise<void>((resolve) => { newNavigationStarted = resolve; });
+		const oldGate = new Promise<void>((resolve) => { releaseOldNavigation = resolve; });
+		const newGate = new Promise<void>((resolve) => { releaseNewNavigation = resolve; });
+		(oldContext as any).navigateTree = async () => {
+			oldNavigationStarted();
+			await oldGate;
+			return { cancelled: false };
+		};
+		(newContext as any).navigateTree = async () => {
+			newNavigationStarted();
+			await newGate;
+			return { cancelled: false };
+		};
+
+		await pi.emit("session_start", {}, oldContext);
+		const oldRun = pi.commands.get("work")!.handler("--loop 2 --fresh --no-converge", oldContext);
+		await oldStarted;
+		await pi.emit("session_start", {}, newContext);
+		const newRun = pi.commands.get("work")!.handler("--loop 2 --fresh --no-converge", newContext);
+		await newStarted;
+
+		releaseOldNavigation();
+		await oldRun;
+		const summary = await pi.emitWithResult("session_before_tree", {
+			preparation: {
+				targetId: "new-root",
+				entriesToSummarize: [{ id: "new-result", type: "message", message: { role: "assistant", content: [{ type: "text", text: "new result" }] } }],
+			},
+		}, newContext);
+		assert.match(String((summary?.summary as { summary?: string } | undefined)?.summary ?? ""), /^\[Loop iteration 1\/2\]/);
+
+		releaseNewNavigation();
+		await newRun;
+		assert.deepEqual(pi.userMessages, ["[Loop 1/2]\n\nOLD FRESH", "[Loop 1/2]\n\nNEW FRESH", "[Loop 2/2]\n\nNEW FRESH"]);
+	});
+});
+
+test("session replacement prevents stale boomerang cleanup from clearing new collapse state", async () => {
+	await withTempHome(async (root) => {
+		const oldCwd = join(root, "old-boomerang");
+		const newCwd = join(root, "new-boomerang");
+		for (const cwd of [oldCwd, newCwd]) mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(oldCwd, ".pi", "prompts", "check.md"), `---\nmodel: ${MODEL_ID}\nboomerang: true\n---\nOLD BOOMERANG`);
+		writeFileSync(join(newCwd, ".pi", "prompts", "check.md"), `---\nmodel: ${MODEL_ID}\nboomerang: true\n---\nNEW BOOMERANG`);
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const oldContext = createContext(oldCwd, pi).ctx;
+		const newContext = createContext(newCwd, pi).ctx;
+		(oldContext.sessionManager as any).getLeafId = () => "old-root";
+		(newContext.sessionManager as any).getLeafId = () => "new-root";
+
+		let releaseOldNavigation!: () => void;
+		let releaseNewNavigation!: () => void;
+		let oldNavigationStarted!: () => void;
+		let newNavigationStarted!: () => void;
+		const oldStarted = new Promise<void>((resolve) => { oldNavigationStarted = resolve; });
+		const newStarted = new Promise<void>((resolve) => { newNavigationStarted = resolve; });
+		const oldGate = new Promise<void>((resolve) => { releaseOldNavigation = resolve; });
+		const newGate = new Promise<void>((resolve) => { releaseNewNavigation = resolve; });
+		(oldContext as any).navigateTree = async () => {
+			oldNavigationStarted();
+			await oldGate;
+			return { cancelled: false };
+		};
+		(newContext as any).navigateTree = async () => {
+			newNavigationStarted();
+			await newGate;
+			return { cancelled: false };
+		};
+
+		await pi.emit("session_start", {}, oldContext);
+		const oldRun = pi.commands.get("check")!.handler("", oldContext);
+		await oldStarted;
+		await pi.emit("session_start", {}, newContext);
+		const newRun = pi.commands.get("check")!.handler("", newContext);
+		await newStarted;
+
+		releaseOldNavigation();
+		await oldRun;
+		assert.equal((globalThis as typeof globalThis & { __boomerangCollapseInProgress?: boolean }).__boomerangCollapseInProgress, true);
+		const summary = await pi.emitWithResult("session_before_tree", {
+			preparation: {
+				targetId: "new-root",
+				entriesToSummarize: [{ id: "new-result", type: "message", message: { role: "assistant", content: [{ type: "text", text: "new result" }] } }],
+			},
+		}, newContext);
+		assert.match(String((summary?.summary as { summary?: string } | undefined)?.summary ?? ""), /Task: "check"/);
+
+		releaseNewNavigation();
+		await newRun;
+		assert.equal((globalThis as typeof globalThis & { __boomerangCollapseInProgress?: boolean }).__boomerangCollapseInProgress, false);
+		assert.deepEqual(pi.userMessages, ["OLD BOOMERANG", "NEW BOOMERANG"]);
 	});
 });
 
@@ -2944,6 +3298,29 @@ test("queued model-less prompt uses agent-end runtime model when stored command 
 	});
 });
 
+test("ordinary execution does not resolve project skills when project trust is false", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(root, ".pi", "agent", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, ".pi", "skills", "unsafe"), { recursive: true });
+		writeFileSync(join(root, ".pi", "agent", "prompts", "global.md"), `---\nmodel: ${MODEL_ID}\nskill: unsafe\n---\nGLOBAL TASK`);
+		writeFileSync(join(cwd, ".pi", "skills", "unsafe", "SKILL.md"), "---\nname: unsafe\ndescription: project only\n---\nUNTRUSTED PROJECT SKILL");
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const { ctx, getNotifications } = createContext(cwd, pi);
+		(ctx as any).isProjectTrusted = () => false;
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("global")!.handler("", ctx);
+		const beforeStart = await pi.emitWithResult("before_agent_start", { systemPrompt: "BASE", prompt: "GLOBAL TASK" }, ctx);
+
+		assert.equal(beforeStart?.message, undefined);
+		assert.deepEqual(pi.userMessages, []);
+		assert.match(getNotifications().join("\n"), /Skill "unsafe" not found/);
+	});
+});
+
 test("skill injects as before_agent_start message without mutating system prompt", async () => {
 	await withTempHome(async (root) => {
 		const cwd = join(root, "project");
@@ -4002,6 +4379,8 @@ test("delegated loop and chain abort do not inject follow-up user messages", asy
 			writeFileSync(join(cwd, ".pi", "prompts", "worker.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nWORKER`);
 
 			const pi = new FakePi();
+			const finished: any[] = [];
+			pi.events.on(PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, (payload) => finished.push(payload));
 			promptModelExtension(pi as never);
 			const { ctx } = createBranchingContext(cwd, pi);
 			ctx.navigateTree = async () => ({ cancelled: true });
@@ -4017,6 +4396,7 @@ test("delegated loop and chain abort do not inject follow-up user messages", asy
 			await pi.commands.get("chain-abort")!.handler("", ctx);
 
 			assert.equal(pi.userMessages.length, 0);
+			assert.equal(finished.find((payload) => payload.name === "chain-abort")?.status, "cancelled");
 		});
 	});
 });
