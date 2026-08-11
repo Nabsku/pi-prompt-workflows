@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { executeSubagentPromptStep, executeSubagentPromptStepOutcome } from "../subagent-step.ts";
+import { parseSubagentDelegationRequest } from "../node_modules/pi-subagents/src/slash/delegation-request.ts";
+import { DelegatedPromptCancelledError, executeSubagentPromptStep, executeSubagentPromptStepOutcome } from "../subagent-step.ts";
 import {
 	PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT,
 	PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT,
@@ -45,10 +47,64 @@ function createPi() {
 	} as any;
 }
 
+function emitStarted(pi: any, request: any): void {
+	pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, {
+		requestId: request.requestId,
+		ownerRunId: request.ownerRunId,
+		nodeId: request.nodeId,
+	});
+}
+
+function emitCompleted(pi: any, request: any, text?: string, toolCalls = 0): void {
+	pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+		requestId: request.requestId,
+		ownerRunId: request.ownerRunId,
+		nodeId: request.nodeId,
+		status: "completed",
+		agent: request.agent,
+		model: request.model,
+		...(text ? { result: { kind: "text", text } } : {}),
+		usage: {
+			input: 120,
+			output: 34,
+			cacheRead: 5,
+			cacheWrite: 6,
+			cost: 0.1234,
+			turns: 3,
+			toolCalls,
+			durationMs: 1500,
+		},
+	});
+}
+
+function emitFailed(pi: any, request: any, error: string): void {
+	pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+		requestId: request.requestId,
+		ownerRunId: request.ownerRunId,
+		nodeId: request.nodeId,
+		status: "failed",
+		error,
+	});
+}
+
+function withIdentity(request: any, payload: Record<string, unknown>): Record<string, unknown> {
+	return {
+		requestId: request.requestId,
+		ownerRunId: request.ownerRunId,
+		nodeId: request.nodeId,
+		...payload,
+	};
+}
+
 function createCtx(cwd: string) {
 	const model = { provider: "anthropic", id: "claude-sonnet-4-20250514" };
 	return {
 		cwd,
+		mode: "print",
+		scopedModels: [],
+		isProjectTrusted() {
+			return true;
+		},
 		hasUI: false,
 		model,
 		modelRegistry: {
@@ -96,6 +152,7 @@ function createCtx(cwd: string) {
 
 function createInteractiveCtx(cwd: string) {
 	const ctx = createCtx(cwd);
+	ctx.mode = "tui";
 	ctx.hasUI = true;
 	let terminalHandler: ((input: string) => { consume?: boolean; data?: string } | undefined) | undefined;
 	ctx.ui.onTerminalInput = (handler: (input: string) => { consume?: boolean; data?: string } | undefined) => {
@@ -127,20 +184,8 @@ test("executeSubagentPromptStep returns delegated change info", async () => {
 		const ctx = createCtx(root);
 		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
 			const request = data as any;
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-				...request,
-				messages: [
-					{
-						role: "assistant",
-						content: [
-							{ type: "toolCall", id: "1", name: "write", arguments: { path: "a.ts" } },
-							{ type: "text", text: "Done." },
-						],
-					},
-				],
-				isError: false,
-			});
+			emitStarted(pi, request);
+			emitCompleted(pi, request, "Done.", 1);
 		});
 
 		const result = await executeSubagentPromptStep({
@@ -152,6 +197,84 @@ test("executeSubagentPromptStep returns delegated change info", async () => {
 		});
 		assert.equal(result?.changed, true);
 		assert.equal(pi.customMessages.length, 1);
+		assert.deepEqual((pi.customMessages[0] as any).details.usage, {
+			input: 120,
+			output: 34,
+			cacheRead: 5,
+			cacheWrite: 6,
+			cost: 0.1234,
+			turns: 3,
+			toolCalls: 1,
+			durationMs: 1500,
+		});
+	});
+});
+
+test("executeSubagentPromptStep uses the structured pi-subagents contract", async () => {
+	await withDelegationBridge(async (root) => {
+		const pi = createPi();
+		const ctx = createCtx(root);
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+			const request = data as any;
+			assert.equal(request.ownerRunId, request.requestId);
+			assert.equal(request.nodeId, "single");
+			assert.deepEqual(request.result, { kind: "text" });
+			emitStarted(pi, request);
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				requestId: request.requestId,
+				status: "invalid_request",
+				error: "spoofed response without structured identity",
+			});
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				requestId: request.requestId,
+				ownerRunId: request.ownerRunId,
+				nodeId: request.nodeId,
+				status: "completed",
+				agent: request.agent,
+				model: request.model,
+				result: { kind: "text", text: "Done from structured delegation." },
+			});
+		});
+
+		const result = await executeSubagentPromptStep({
+			pi,
+			prompt,
+			args: [],
+			ctx,
+			currentModel: ctx.model,
+		});
+
+		assert.equal(result?.text, "Done from structured delegation.");
+		assert.equal(result?.changed, false);
+	});
+});
+
+test("pi-subagents 0.44 production parser accepts the emitted request", async () => {
+	await withDelegationBridge(async (root) => {
+		const pi = createPi();
+		const ctx = createCtx(root);
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+			const parsed = parseSubagentDelegationRequest(data);
+			assert.equal(parsed.ok, true, parsed.ok ? undefined : parsed.error);
+			if (!parsed.ok) return;
+			const request = parsed.request;
+			assert.equal(request.ownerRunId, request.requestId);
+			assert.equal(request.nodeId, "single");
+			assert.deepEqual(request.result, { kind: "text" });
+			assert.equal("tasks" in request, false);
+			assert.equal("worktree" in request, false);
+			emitStarted(pi, request);
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				requestId: request.requestId,
+				ownerRunId: request.ownerRunId,
+				nodeId: request.nodeId,
+				status: "completed",
+				result: { kind: "text", text: "strict parser accepted" },
+			});
+		});
+
+		const result = await executeSubagentPromptStep({ pi, prompt, args: [], ctx, currentModel: ctx.model });
+		assert.equal(result?.text, "strict parser accepted");
 	});
 });
 
@@ -161,12 +284,8 @@ test("executeSubagentPromptStepOutcome preserves delegated success payload", asy
 		const ctx = createCtx(root);
 		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
 			const request = data as any;
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-				...request,
-				messages: [{ role: "assistant", content: [{ type: "text", text: "Done." }] }],
-				isError: false,
-			});
+			emitStarted(pi, request);
+			emitCompleted(pi, request, "Done.");
 		});
 
 		const outcome = await executeSubagentPromptStepOutcome({ pi, prompt, args: [], ctx, currentModel: ctx.model });
@@ -181,8 +300,8 @@ test("executeSubagentPromptStepOutcome classifies delegated failures and budget 
 		const failurePi = createPi();
 		failurePi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
 			const request = data as any;
-			failurePi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-			failurePi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, { ...request, messages: [], isError: true, errorText: "boom" });
+			emitStarted(failurePi, request);
+			emitFailed(failurePi, request, "boom");
 		});
 		assert.equal((await executeSubagentPromptStepOutcome({ pi: failurePi, prompt, args: [], ctx, currentModel: ctx.model })).status, "failed");
 
@@ -228,6 +347,121 @@ test("executeSubagentPromptStep enforces budgets after assembling delegated prea
 	});
 });
 
+test("structured delegated skill content still counts toward the prompt budget", async () => {
+	await withDelegationBridge(async (root) => {
+		const skillDir = join(root, ".pi", "skills", "large-skill");
+		mkdirSync(skillDir, { recursive: true });
+		writeFileSync(join(skillDir, "SKILL.md"), "this delegated skill payload is intentionally larger than the configured prompt budget");
+		const pi = createPi();
+		const ctx = createCtx(root);
+		let requests = 0;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, () => { requests += 1; });
+
+		await assert.rejects(
+			executeSubagentPromptStep({
+				pi,
+				prompt: { ...prompt, content: "x", skills: ["large-skill"], budget: { maxTokens: 2 } },
+				args: [],
+				ctx,
+				currentModel: ctx.model,
+			}),
+			/exceeds configured maximum of 2/i,
+		);
+		assert.equal(requests, 0);
+	});
+});
+
+test("structured delegation embeds the host-resolved skill instead of letting the child re-resolve its name", async () => {
+	await withDelegationBridge(async (root) => {
+		const project = join(root, "project");
+		const projectSkillDir = join(project, ".pi", "skills", "shared");
+		const globalSkillPath = join(root, "global-shared.md");
+		mkdirSync(projectSkillDir, { recursive: true });
+		writeFileSync(join(projectSkillDir, "SKILL.md"), "untrusted project skill content");
+		writeFileSync(globalSkillPath, "approved global skill content");
+
+		const pi = createPi();
+		pi.getCommands = () => [{ name: "shared", source: "skill", sourceInfo: { path: globalSkillPath } }];
+		const ctx = createCtx(project);
+		let outbound: any;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+			outbound = data;
+			emitStarted(pi, outbound);
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				requestId: outbound.requestId,
+				ownerRunId: outbound.ownerRunId,
+				nodeId: outbound.nodeId,
+				status: "completed",
+				result: { kind: "text", text: "Done." },
+			});
+		});
+
+		await executeSubagentPromptStep({
+			pi,
+			prompt: { ...prompt, skills: ["shared"] },
+			args: [],
+			ctx,
+			currentModel: ctx.model,
+		});
+
+		assert.equal(outbound.skill, undefined);
+		assert.match(outbound.task, /approved global skill content/);
+		assert.doesNotMatch(outbound.task, /untrusted project skill content/);
+	});
+});
+
+test("structured delegation rejects an untrusted session cwd before a child request", async () => {
+	await withDelegationBridge(async (root) => {
+		const project = join(root, "project");
+		mkdirSync(project, { recursive: true });
+		const pi = createPi();
+		const ctx = createCtx(project);
+		ctx.isProjectTrusted = () => false;
+		let requests = 0;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, () => { requests += 1; });
+
+		await assert.rejects(
+			() => executeSubagentPromptStep({
+				pi,
+				prompt,
+				args: [],
+				ctx,
+				currentModel: ctx.model,
+			}),
+			/project trust.*not active/i,
+		);
+		assert.equal(requests, 0);
+	});
+});
+
+test("structured delegation does not trust project skills outside the trusted session root", async () => {
+	await withDelegationBridge(async (root) => {
+		const hostProject = join(root, "host-project");
+		const externalProject = join(root, "external-project");
+		const skillName = "external-only-skill-41d389";
+		mkdirSync(join(hostProject, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(externalProject, ".pi", "skills", skillName), { recursive: true });
+		writeFileSync(join(externalProject, ".pi", "skills", skillName, "SKILL.md"), "external project skill content");
+
+		const pi = createPi();
+		const ctx = createCtx(hostProject);
+		let requests = 0;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, () => { requests += 1; });
+
+		await assert.rejects(
+			() => executeSubagentPromptStep({
+				pi,
+				prompt: { ...prompt, cwd: externalProject, skills: [skillName] },
+				args: [],
+				ctx,
+				currentModel: ctx.model,
+			}),
+			/outside the trusted session root/i,
+		);
+		assert.equal(requests, 0);
+	});
+});
+
 test("executeSubagentPromptStep forwards prompt cwd to delegated request", async () => {
 	await withDelegationBridge(async (root) => {
 		const pi = createPi();
@@ -239,12 +473,8 @@ test("executeSubagentPromptStep forwards prompt cwd to delegated request", async
 		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
 			const request = data as any;
 			requestCwd = request.cwd;
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-				...request,
-				messages: [{ role: "assistant", content: [{ type: "text", text: "Done." }] }],
-				isError: false,
-			});
+			emitStarted(pi, request);
+			emitCompleted(pi, request, "Done.");
 		});
 
 		await executeSubagentPromptStep({
@@ -254,27 +484,92 @@ test("executeSubagentPromptStep forwards prompt cwd to delegated request", async
 			ctx,
 			currentModel: ctx.model,
 		});
-		assert.equal(requestCwd, delegatedCwd);
+		assert.equal(requestCwd, realpathSync(delegatedCwd));
+	});
+});
+
+test("executeSubagentPromptStep rejects nested project configuration without separate interactive approval", async () => {
+	await withDelegationBridge(async (root) => {
+		const sessionRoot = join(root, "project");
+		const nestedProject = join(sessionRoot, "nested");
+		mkdirSync(join(nestedProject, ".pi"), { recursive: true });
+		const pi = createPi();
+		const ctx = createCtx(sessionRoot);
+		let requests = 0;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, () => { requests++; });
+
+		await assert.rejects(
+			() => executeSubagentPromptStep({
+				pi,
+				prompt: { ...prompt, cwd: nestedProject },
+				args: [],
+				ctx,
+				currentModel: ctx.model,
+			}),
+			/separate approval.*nested project/i,
+		);
+		assert.equal(requests, 0);
+	});
+});
+
+test("executeSubagentPromptStep uses the approved nested project's canonical cwd for skills, snapshots, and requests", async () => {
+	await withDelegationBridge(async (root) => {
+		const sessionRoot = join(root, "project");
+		const nestedProject = join(sessionRoot, "nested-target");
+		const nestedAlias = join(sessionRoot, "nested-alias");
+		const skillName = "canonical-target-skill";
+		const skillContent = "skill content from canonical nested target";
+		mkdirSync(join(nestedProject, ".pi", "skills", skillName), { recursive: true });
+		writeFileSync(join(nestedProject, ".pi", "skills", skillName, "SKILL.md"), skillContent);
+		writeFileSync(join(nestedProject, "tracked.txt"), "before");
+		execFileSync("git", ["init", "--quiet"], { cwd: nestedProject });
+		execFileSync("git", ["add", "--", "tracked.txt"], { cwd: nestedProject });
+		symlinkSync(nestedProject, nestedAlias);
+		const pi = createPi();
+		const { ctx } = createInteractiveCtx(sessionRoot);
+		let approvals = 0;
+		ctx.ui.confirm = async () => {
+			approvals++;
+			return true;
+		};
+		let outbound: any;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+			outbound = data;
+			writeFileSync(join(nestedProject, "tracked.txt"), "after");
+			emitStarted(pi, outbound);
+			emitCompleted(pi, outbound, "done");
+		});
+
+		const result = await executeSubagentPromptStep({
+			pi,
+			prompt: { ...prompt, cwd: nestedAlias, skills: [skillName] },
+			args: [],
+			ctx,
+			currentModel: ctx.model,
+		});
+
+		assert.equal(approvals, 1);
+		assert.equal(outbound.cwd, realpathSync(nestedProject));
+		assert.match(outbound.task, new RegExp(skillContent));
+		assert.equal(result.changed, true);
+		assert.equal((pi.customMessages.at(-1) as any).details.changed, true);
 	});
 });
 
 test("executeSubagentPromptStep forwards custom agents to the loaded bridge", async () => {
 	await withDelegationBridge(async (root) => {
 		const pi = createPi();
-		const ctx = createCtx(join(root, "host-project"));
-		const delegatedCwd = join(root, "delegated-project");
+		const hostProject = join(root, "host-project");
+		const ctx = createCtx(hostProject);
+		const delegatedCwd = join(hostProject, "delegated-project");
 		mkdirSync(delegatedCwd, { recursive: true });
 		let requestAgent: string | undefined;
 
 		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
 			const request = data as any;
 			requestAgent = request.agent;
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-				...request,
-				messages: [{ role: "assistant", content: [{ type: "text", text: "Done." }] }],
-				isError: false,
-			});
+			emitStarted(pi, request);
+			emitCompleted(pi, request, "Done.");
 		});
 
 		const result = await executeSubagentPromptStep({
@@ -295,13 +590,8 @@ test("executeSubagentPromptStep fails on delegated error response", async () => 
 		const ctx = createCtx(root);
 		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
 			const request = data as any;
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-				...request,
-				messages: [],
-				isError: true,
-				errorText: "boom",
-			});
+			emitStarted(pi, request);
+			emitFailed(pi, request, "boom");
 		});
 
 		await assert.rejects(
@@ -324,12 +614,8 @@ test("executeSubagentPromptStep fails when delegated response has no assistant t
 		const ctx = createCtx(root);
 		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
 			const request = data as any;
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-				...request,
-				messages: [{ role: "assistant", content: [{ type: "toolCall", id: "1", name: "read", arguments: { path: "a.ts" } }] }],
-				isError: false,
-			});
+			emitStarted(pi, request);
+			emitCompleted(pi, request, undefined, 1);
 		});
 
 		await assert.rejects(
@@ -395,13 +681,8 @@ test("executeSubagentPromptStep preserves missing-agent errors from the loaded b
 		const ctx = createCtx(root);
 		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
 			const request = data as any;
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-				...request,
-				messages: [],
-				isError: true,
-				errorText: "Delegated subagent `missing` not found. Available agents: delegate, reviewer.",
-			});
+			emitStarted(pi, request);
+			emitFailed(pi, request, "Delegated subagent `missing` not found. Available agents: delegate, reviewer.");
 		});
 
 		await assert.rejects(
@@ -422,15 +703,15 @@ test("executeSubagentPromptStep emits cancel on escape in UI mode", async () => 
 	await withDelegationBridge(async (root) => {
 		const pi = createPi();
 		const { ctx, sendInput } = createInteractiveCtx(root);
-		let cancelledRequestId: string | undefined;
+		let cancelPayload: Record<string, unknown> | undefined;
 
 		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT, (data) => {
-			cancelledRequestId = (data as { requestId?: string }).requestId;
+			cancelPayload = data as Record<string, unknown>;
 		});
 
 		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
 			const request = data as any;
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			emitStarted(pi, request);
 			setTimeout(() => sendInput("\x1b"), 0);
 		});
 
@@ -443,9 +724,11 @@ test("executeSubagentPromptStep emits cancel on escape in UI mode", async () => 
 					ctx,
 					currentModel: ctx.model,
 				}),
-			/cancelled/i,
+			(error: Error) => error instanceof DelegatedPromptCancelledError,
 		);
-		assert.ok(cancelledRequestId);
+		assert.ok(cancelPayload?.requestId);
+		assert.equal(cancelPayload?.ownerRunId, cancelPayload?.requestId);
+		assert.equal(cancelPayload?.nodeId, "single");
 	});
 });
 
@@ -454,15 +737,15 @@ test("executeSubagentPromptStep emits cancel on abort signal", async () => {
 		const pi = createPi();
 		const ctx = createCtx(root);
 		const controller = new AbortController();
-		let cancelledRequestId: string | undefined;
+		let cancelPayload: Record<string, unknown> | undefined;
 
 		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT, (data) => {
-			cancelledRequestId = (data as { requestId?: string }).requestId;
+			cancelPayload = data as Record<string, unknown>;
 		});
 
 		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
 			const request = data as any;
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+			emitStarted(pi, request);
 			setTimeout(() => controller.abort(), 0);
 		});
 
@@ -476,164 +759,68 @@ test("executeSubagentPromptStep emits cancel on abort signal", async () => {
 					currentModel: ctx.model,
 					signal: controller.signal,
 				}),
-			/cancelled/i,
+			(error: Error) => error instanceof DelegatedPromptCancelledError,
 		);
-		assert.ok(cancelledRequestId);
+		assert.ok(cancelPayload?.requestId);
+		assert.equal(cancelPayload?.ownerRunId, cancelPayload?.requestId);
+		assert.equal(cancelPayload?.nodeId, "single");
 	});
 });
 
-test("executeSubagentPromptStep delegates parallel prompts with per-task cwd, taskPrefix, and aggregate text", async () => {
+test("executeSubagentPromptStep emits no bridge events when its signal is already aborted", async () => {
 	await withDelegationBridge(async (root) => {
 		const pi = createPi();
 		const ctx = createCtx(root);
-		const workerA = join(root, "worker-a");
-		const workerB = join(root, "worker-b");
-		mkdirSync(workerA, { recursive: true });
-		mkdirSync(workerB, { recursive: true });
-		const contentText = [
-			"2/2 succeeded",
-			"",
-			"=== Parallel Task 1 (delegate) ===",
-			"Frontend issues.",
-			"",
-			"=== Parallel Task 2 (reviewer) ===",
-			"Backend issues.",
-			"",
-			"=== Worktree Changes ===",
-			"",
-			"--- Task 1 (delegate): 2 files changed, +2 -0 ---",
-		].join("\n");
-		let requestTasks: Array<{ agent: string; task: string; model?: string; cwd?: string }> | undefined;
-
-		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
-			const request = data as any;
-			requestTasks = request.tasks;
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-				...request,
-				messages: [],
-				parallelResults: [
-					{
-						agent: "delegate",
-						messages: [{ role: "assistant", content: [{ type: "text", text: "Frontend issues." }] }],
-						isError: false,
-					},
-					{
-						agent: "reviewer",
-						messages: [
-							{
-								role: "assistant",
-								content: [
-									{ type: "toolCall", id: "2", name: "write", arguments: { path: "report.md" } },
-									{ type: "text", text: "Backend issues." },
-								],
-							},
-						],
-						isError: false,
-					},
-				],
-				contentText,
-				isError: false,
-			});
-		});
-
-		const result = await executeSubagentPromptStep({
-			pi,
-			parallel: [
-				{ prompt: { ...prompt, cwd: workerA }, args: [], taskPrefix: "[Parallel subagent 1/2]" },
-				{ prompt: { ...prompt, name: "review", subagent: "reviewer", cwd: workerB }, args: [] },
-			],
-			ctx,
-			currentModel: ctx.model,
-			taskPreamble: "[Previous chain steps]",
-		});
-
-		assert.equal(Array.isArray(requestTasks), true);
-		assert.equal(requestTasks?.length, 2);
-		assert.deepEqual(requestTasks?.map((task) => task.agent), ["delegate", "reviewer"]);
-		assert.deepEqual(requestTasks?.map((task) => task.model), ["anthropic/claude-sonnet-4-20250514", "anthropic/claude-sonnet-4-20250514"]);
-		assert.equal(requestTasks?.[0]?.cwd, workerA);
-		assert.equal(requestTasks?.[1]?.cwd, workerB);
-		assert.equal(requestTasks?.[0]?.task, "[Parallel subagent 1/2]\n\n[Previous chain steps]\n\n---\n\ndo work");
-		assert.equal(requestTasks?.[1]?.task, "[Previous chain steps]\n\n---\n\ndo work");
-		assert.equal(result?.text, contentText);
-		assert.equal(result?.changed, true);
-		assert.equal((pi.customMessages[0] as { content: string }).content, contentText);
-	});
-});
-
-test("executeSubagentPromptStep rejects mixed cwd values when worktree is enabled", async () => {
-	await withDelegationBridge(async (root) => {
-		const pi = createPi();
-		const ctx = createCtx(root);
-		const workerA = join(root, "worker-a");
-		const workerB = join(root, "worker-b");
-		mkdirSync(workerA, { recursive: true });
-		mkdirSync(workerB, { recursive: true });
+		const controller = new AbortController();
+		controller.abort();
+		let requests = 0;
+		let cancels = 0;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, () => { requests += 1; });
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT, () => { cancels += 1; });
 
 		await assert.rejects(
-			() =>
-				executeSubagentPromptStep({
-					pi,
-					worktree: true,
-					parallel: [
-						{ prompt: { ...prompt, cwd: workerA }, args: [] },
-						{ prompt: { ...prompt, name: "review", subagent: "reviewer", cwd: workerB }, args: [] },
-					],
-					ctx,
-					currentModel: ctx.model,
-				}),
-			/worktree enabled must share the same cwd/i,
+			() => executeSubagentPromptStep({
+				pi,
+				prompt,
+				args: [],
+				ctx,
+				currentModel: ctx.model,
+				signal: controller.signal,
+			}),
+			(error: Error) => error instanceof DelegatedPromptCancelledError,
 		);
+		assert.equal(requests, 0);
+		assert.equal(cancels, 0);
 	});
 });
 
-test("executeSubagentPromptStep prefers aggregate parallel status over first-task tool status", async () => {
+test("executeSubagentPromptStep ignores terminal input outside TUI mode", async () => {
 	await withDelegationBridge(async (root) => {
 		const pi = createPi();
 		const ctx = createCtx(root);
+		ctx.mode = "rpc";
 		ctx.hasUI = true;
-		const statusLines: string[] = [];
-		ctx.ui.setStatus = (key: string, value?: string) => {
-			if (key === "prompt-subagent" && value) statusLines.push(value);
+		let terminalSubscriptions = 0;
+		ctx.ui.onTerminalInput = () => {
+			terminalSubscriptions += 1;
+			return () => {};
 		};
 
 		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
 			const request = data as any;
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT, {
-				requestId: request.requestId,
-				currentTool: "read",
-				currentToolArgs: "a.ts",
-				toolCount: 1,
-				taskProgress: [
-					{ index: 0, agent: "delegate", status: "running", currentTool: "read", currentToolArgs: "a.ts" },
-					{ index: 1, agent: "reviewer", status: "pending" },
-				],
-			});
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-				...request,
-				messages: [],
-				parallelResults: [
-					{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "A" }] }], isError: false },
-					{ agent: "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: "B" }] }], isError: false },
-				],
-				isError: false,
-			});
+			emitStarted(pi, request);
+			emitCompleted(pi, request, "done");
 		});
 
 		await executeSubagentPromptStep({
 			pi,
-			parallel: [
-				{ prompt, args: [] },
-				{ prompt: { ...prompt, name: "review", subagent: "reviewer" }, args: [] },
-			],
+			prompt,
+			args: [],
 			ctx,
 			currentModel: ctx.model,
 		});
 
-		assert.ok(statusLines.some((line) => line.includes("parallel 0/2 running")));
-		assert.equal(statusLines.some((line) => line.includes("running read")), false);
+		assert.equal(terminalSubscriptions, 0);
 	});
 });
 
@@ -649,17 +836,13 @@ test("executeSubagentPromptStep keeps single-task status running between tool ca
 
 		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
 			const request = data as any;
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT, {
-				requestId: request.requestId,
+			emitStarted(pi, request);
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT, withIdentity(request, {
 				toolCount: 1,
-				taskProgress: [{ index: 0, agent: "delegate", status: "running" }],
-			});
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-				...request,
-				messages: [{ role: "assistant", content: [{ type: "text", text: "Done." }] }],
-				isError: false,
-			});
+				currentTool: "read",
+				currentToolArgs: "README.md",
+			}));
+			emitCompleted(pi, request, "Done.", 1);
 		});
 
 		await executeSubagentPromptStep({
@@ -670,7 +853,7 @@ test("executeSubagentPromptStep keeps single-task status running between tool ca
 			currentModel: ctx.model,
 		});
 
-		assert.ok(statusLines.some((line) => line.includes("delegating to delegate · running")));
+		assert.ok(statusLines.some((line) => line.includes("delegating to delegate · running read")));
 		assert.equal(statusLines.some((line) => line.includes("completed 1 tool")), false);
 	});
 });
@@ -683,20 +866,12 @@ test("executeSubagentPromptStep avoids duplicating single-task output lines from
 
 		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
 			const request = data as any;
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT, {
-				requestId: request.requestId,
+			emitStarted(pi, request);
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT, withIdentity(request, {
 				recentOutputLines: ["single-a", "single-b"],
-				taskProgress: [
-					{ index: 0, agent: "delegate", status: "running", recentOutputLines: ["single-a", "single-b"] },
-				],
-			});
+			}));
 			capturedOutput = getDelegatedLiveState(request.requestId)?.recentOutput ?? [];
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-				...request,
-				messages: [{ role: "assistant", content: [{ type: "text", text: "Done." }] }],
-				isError: false,
-			});
+			emitCompleted(pi, request, "Done.");
 		});
 
 		await executeSubagentPromptStep({
@@ -711,233 +886,6 @@ test("executeSubagentPromptStep avoids duplicating single-task output lines from
 	});
 });
 
-test("executeSubagentPromptStep keeps identical consecutive output lines from different parallel tasks", async () => {
-	await withDelegationBridge(async (root) => {
-		const pi = createPi();
-		const ctx = createCtx(root);
-		let capturedOutput: string[] = [];
-
-		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
-			const request = data as any;
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT, {
-				requestId: request.requestId,
-				taskProgress: [
-					{ index: 0, agent: "delegate", status: "running", recentOutputLines: ["same-line"] },
-					{ index: 1, agent: "reviewer", status: "running", recentOutputLines: ["same-line"] },
-				],
-			});
-			capturedOutput = getDelegatedLiveState(request.requestId)?.recentOutput ?? [];
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-				...request,
-				messages: [],
-				parallelResults: [
-					{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "A" }] }], isError: false },
-					{ agent: "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: "B" }] }], isError: false },
-				],
-				isError: false,
-			});
-		});
-
-		await executeSubagentPromptStep({
-			pi,
-			parallel: [
-				{ prompt, args: [] },
-				{ prompt: { ...prompt, name: "review", subagent: "reviewer" }, args: [] },
-			],
-			ctx,
-			currentModel: ctx.model,
-		});
-
-		assert.deepEqual(capturedOutput, ["same-line", "same-line"]);
-	});
-});
-
-test("executeSubagentPromptStep avoids duplicating unchanged task output lines across updates", async () => {
-	await withDelegationBridge(async (root) => {
-		const pi = createPi();
-		const ctx = createCtx(root);
-		let capturedOutput: string[] = [];
-
-		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
-			const request = data as any;
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT, {
-				requestId: request.requestId,
-				taskProgress: [
-					{ index: 0, agent: "delegate", status: "running", recentOutputLines: ["task0-a"] },
-					{ index: 1, agent: "reviewer", status: "running", recentOutputLines: ["task1-a"] },
-				],
-			});
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT, {
-				requestId: request.requestId,
-				taskProgress: [
-					{ index: 0, agent: "delegate", status: "running", recentOutputLines: ["task0-a"] },
-					{ index: 1, agent: "reviewer", status: "running", recentOutputLines: ["task1-a", "task1-b"] },
-				],
-			});
-			capturedOutput = getDelegatedLiveState(request.requestId)?.recentOutput ?? [];
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-				...request,
-				messages: [],
-				parallelResults: [
-					{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "A" }] }], isError: false },
-					{ agent: "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: "B" }] }], isError: false },
-				],
-				isError: false,
-			});
-		});
-
-		await executeSubagentPromptStep({
-			pi,
-			parallel: [
-				{ prompt, args: [] },
-				{ prompt: { ...prompt, name: "review", subagent: "reviewer" }, args: [] },
-			],
-			ctx,
-			currentModel: ctx.model,
-		});
-
-		assert.deepEqual(capturedOutput, ["task0-a", "task1-a", "task1-b"]);
-	});
-});
-
-test("executeSubagentPromptStep keeps parallel output history when top-level progress includes recentOutputLines", async () => {
-	await withDelegationBridge(async (root) => {
-		const pi = createPi();
-		const ctx = createCtx(root);
-		let capturedOutput: string[] = [];
-
-		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
-			const request = data as any;
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT, {
-				requestId: request.requestId,
-				recentOutputLines: ["task0-a"],
-				taskProgress: [
-					{ index: 0, agent: "delegate", status: "running", recentOutputLines: ["task0-a"] },
-					{ index: 1, agent: "reviewer", status: "running", recentOutputLines: ["task1-a"] },
-				],
-			});
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT, {
-				requestId: request.requestId,
-				recentOutputLines: ["task0-a"],
-				taskProgress: [
-					{ index: 0, agent: "delegate", status: "running", recentOutputLines: ["task0-a"] },
-					{ index: 1, agent: "reviewer", status: "running", recentOutputLines: ["task1-a", "task1-b", "task1-c"] },
-				],
-			});
-			capturedOutput = getDelegatedLiveState(request.requestId)?.recentOutput ?? [];
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-				...request,
-				messages: [],
-				parallelResults: [
-					{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "A" }] }], isError: false },
-					{ agent: "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: "B" }] }], isError: false },
-				],
-				isError: false,
-			});
-		});
-
-		await executeSubagentPromptStep({
-			pi,
-			parallel: [
-				{ prompt, args: [] },
-				{ prompt: { ...prompt, name: "review", subagent: "reviewer" }, args: [] },
-			],
-			ctx,
-			currentModel: ctx.model,
-		});
-
-		assert.deepEqual(capturedOutput, ["task0-a", "task1-a", "task1-b", "task1-c"]);
-	});
-});
-
-test("executeSubagentPromptStep preserves per-task model metadata when updates omit model", async () => {
-	await withDelegationBridge(async (root) => {
-		const pi = createPi();
-		const ctx = createCtx(root);
-		let capturedModels: Array<string | undefined> = [];
-
-		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
-			const request = data as any;
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT, {
-				requestId: request.requestId,
-				taskProgress: [
-					{ index: 0, agent: "delegate", status: "running", model: "openai/gpt-5-mini" },
-					{ index: 1, agent: "reviewer", status: "running", model: "anthropic/claude-sonnet-4-20250514" },
-				],
-			});
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT, {
-				requestId: request.requestId,
-				taskProgress: [
-					{ index: 0, agent: "delegate", status: "running", model: undefined },
-					{ index: 1, agent: "reviewer", status: "running", model: undefined },
-				],
-			});
-			capturedModels = (getDelegatedLiveState(request.requestId)?.taskProgress ?? []).map((entry) => entry.model);
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-				...request,
-				messages: [],
-				parallelResults: [
-					{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "A" }] }], isError: false },
-					{ agent: "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: "B" }] }], isError: false },
-				],
-				isError: false,
-			});
-		});
-
-		await executeSubagentPromptStep({
-			pi,
-			parallel: [
-				{ prompt, args: [] },
-				{ prompt: { ...prompt, name: "review", subagent: "reviewer" }, args: [] },
-			],
-			ctx,
-			currentModel: ctx.model,
-		});
-
-		assert.deepEqual(capturedModels, ["openai/gpt-5-mini", "anthropic/claude-sonnet-4-20250514"]);
-	});
-});
-
-test("executeSubagentPromptStep fails on parallel task errors", async () => {
-	await withDelegationBridge(async (root) => {
-		const pi = createPi();
-		const ctx = createCtx(root);
-
-		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
-			const request = data as any;
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-				...request,
-				messages: [],
-				parallelResults: [
-					{
-						agent: "delegate",
-						messages: [],
-						isError: true,
-						errorText: "scan failed",
-					},
-				],
-				isError: false,
-			});
-		});
-
-		await assert.rejects(
-			() =>
-				executeSubagentPromptStep({
-					pi,
-					parallel: [{ prompt, args: [] }],
-					ctx,
-					currentModel: ctx.model,
-				}),
-			/scan failed/i,
-		);
-	});
-});
-
 test("executeSubagentPromptStep prepends taskPreamble for delegated single tasks", async () => {
 	await withDelegationBridge(async (root) => {
 		const pi = createPi();
@@ -946,12 +894,8 @@ test("executeSubagentPromptStep prepends taskPreamble for delegated single tasks
 		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
 			const request = data as any;
 			delegatedTask = request.task;
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-				...request,
-				messages: [{ role: "assistant", content: [{ type: "text", text: "Done." }] }],
-				isError: false,
-			});
+			emitStarted(pi, request);
+			emitCompleted(pi, request, "Done.");
 		});
 
 		await executeSubagentPromptStep({
@@ -967,45 +911,6 @@ test("executeSubagentPromptStep prepends taskPreamble for delegated single tasks
 	});
 });
 
-test("executeSubagentPromptStep prepends taskPreamble for every delegated parallel task", async () => {
-	await withDelegationBridge(async (root) => {
-		const pi = createPi();
-		const ctx = createCtx(root);
-		let delegatedTasks: string[] = [];
-
-		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
-			const request = data as any;
-			delegatedTasks = (request.tasks ?? []).map((task: { task: string }) => task.task);
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-				...request,
-				messages: [],
-				parallelResults: [
-					{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "A" }] }], isError: false },
-					{ agent: "reviewer", messages: [{ role: "assistant", content: [{ type: "text", text: "B" }] }], isError: false },
-				],
-				isError: false,
-			});
-		});
-
-		await executeSubagentPromptStep({
-			pi,
-			parallel: [
-				{ prompt, args: [] },
-				{ prompt: { ...prompt, name: "review", subagent: "reviewer" }, args: [] },
-			],
-			ctx,
-			currentModel: ctx.model,
-			taskPreamble: "[Previous chain steps]\n\nStep 1 — scan:\nOutcome: done",
-		});
-
-		assert.deepEqual(delegatedTasks, [
-			"[Previous chain steps]\n\nStep 1 — scan:\nOutcome: done\n\n---\n\ndo work",
-			"[Previous chain steps]\n\nStep 1 — scan:\nOutcome: done\n\n---\n\ndo work",
-		]);
-	});
-});
-
 test("executeSubagentPromptStep ignores taskPreamble when inheritContext is true", async () => {
 	await withDelegationBridge(async (root) => {
 		const pi = createPi();
@@ -1014,12 +919,8 @@ test("executeSubagentPromptStep ignores taskPreamble when inheritContext is true
 		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
 			const request = data as any;
 			delegatedTask = request.task;
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-				...request,
-				messages: [{ role: "assistant", content: [{ type: "text", text: "Done." }] }],
-				isError: false,
-			});
+			emitStarted(pi, request);
+			emitCompleted(pi, request, "Done.");
 		});
 
 		await executeSubagentPromptStep({
@@ -1043,12 +944,8 @@ test("executeSubagentPromptStep keeps task unchanged when taskPreamble is omitte
 		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
 			const request = data as any;
 			delegatedTask = request.task;
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-				...request,
-				messages: [{ role: "assistant", content: [{ type: "text", text: "Done." }] }],
-				isError: false,
-			});
+			emitStarted(pi, request);
+			emitCompleted(pi, request, "Done.");
 		});
 
 		await executeSubagentPromptStep({

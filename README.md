@@ -31,7 +31,7 @@ No more manually switching models, copying standard instructions between prompts
 - **Dry-run preview**: inspect the exact rendered prompt body, metadata, warnings, and optional skill content before execution.
 - **Pi-native TUI**: browse templates and inspect dry-run output interactively in Pi TUI mode without typing template names.
 - **Prompt budgets**: inspect approximate rendered-token cost, set warning thresholds, and fail closed above an explicit maximum.
-- **Execution control**: loops, model rotation, fresh context, boomerang collapse, delegated subagents, chains, and best-of-N compare prompts.
+- **Execution control**: loops, model rotation, fresh context, boomerang collapse, structured single-subagent delegation, and sequential chains.
 
 ## Differences from upstream
 
@@ -43,8 +43,7 @@ This package is an enhanced fork of [`pi-prompt-template-model`](https://github.
 - Multiple skill injection via `skills`, plus constrained wildcard skill selectors.
 - Dry-run previews and a Pi-native TUI picker/inspector for prompt templates.
 - Loop controls, model rotation, fresh context, and boomerang context collapse.
-- Chain templates, deterministic prompt steps, delegated subagents, and parallel delegation helpers.
-- Best-of-N compare prompts with reusable preset catalogs.
+- Chain templates, deterministic prompt steps, and structured single-subagent delegation.
 - Richer `/validate-prompts` diagnostics, include graphs, and source summaries.
 
 ### Behavior changes and stricter validation
@@ -52,15 +51,14 @@ This package is an enhanced fork of [`pi-prompt-template-model`](https://github.
 - Invalid prompt config is reported and skipped more consistently instead of running with silently degraded behavior.
 - Prompt-library commands have extra trust checks because they can come from project-local reusable libraries.
 - Duplicate prompt and prompt-library precedence is deterministic and reported with diagnostics.
-- Runtime flags are scoped to prompt types that support them; for example, `--preset` only affects compare prompts.
-- Project best-of-N presets require session approval and invalid project presets fail closed instead of falling back to same-named user presets.
+- Runtime flags are scoped to prompt types that support them. Removed `--worktree`, `--preset`, `--workers`, `--workers-append`, `--reviewers`, `--reviewers-append`, `--final-applier`, and `--keep-artifacts` controls fail before execution and dry-run instead of degrading silently. Quote a runtime-looking flag when it is prompt content.
+- Delegated execution accepts only a trusted session cwd or one of its child directories. The pi-subagents bridge loads child-local agent definitions and extensions from the delegated cwd. To delegate into another project root, start Pi in that root and approve project trust there.
 
 ### Breaking or migration notes
 
-- Compare prompt templates must use nested `bestOfN:` frontmatter. Top-level `workers`, `reviewers`, and `finalApplier` fields are rejected with migration diagnostics.
+- `pi-subagents` 0.44 removed its legacy parallel/task/worktree transport. This extension now supports only the structured single-delegation contract. Templates that use `parallel`, `worktree`, `bestOfN`, `workers`, `reviewers`, `finalApplier`, `commit`, or `preset` are rejected with `unsupported-legacy-delegation`.
 - `skills:` must be a list. Use `skill: name` for a single skill.
-- Some fields that upstream accepted loosely are now type-checked before registration, including prompt includes, chain declarations, loop values, cwd paths, compare lineups, and preset catalogs.
-- Best-of-N presets intentionally cannot set execution-policy fields such as `task`, `taskSuffix`, `cwd`, `finalApplier`, `worktree`, dirty/report/commit policy, or other prompt-owned behavior.
+- Some fields that upstream accepted loosely are now type-checked before registration, including prompt includes, chain declarations, loop values, cwd paths, and delegated skill selectors.
 
 ### Small tweaks
 
@@ -93,12 +91,9 @@ Alongside the default user (`~/.pi/agent/prompts`) and project (`<cwd>/.pi/promp
 
 | Command | Use it for |
 | --- | --- |
-| `/validate-prompts` | Reload and validate prompt templates, includes, skills, and compare presets referenced by prompt frontmatter before running anything expensive. Use `/compare-presets` to validate/list catalogs used only through runtime `--preset`. |
+| `/validate-prompts` | Reload and validate prompt templates, includes, skills, chains, models, and legacy-field diagnostics before execution. |
 | `/print-prompt <name> --plain ...` | Print the exact rendered prompt/preflight report without executing it. |
-| `/dry-run-prompt <name> --plain ...` | Same read-only preview path, with compare-specific verdict and execute guidance. |
-| `/compare-presets` | List available best-of-N presets, trust/source labels, lineups, and copyable use commands. |
-| `/compare-runs` | Browse recent compare run reports in the TUI. |
-| `/compare-runs --plain --id <run-id>` | Print one compare run report deterministically for logs/scripts. |
+| `/dry-run-prompt <name> --plain ...` | Same read-only preview path, with warnings and execute guidance. |
 
 For delegated subagent execution (`subagent` and `inheritContext` frontmatter), install [pi-subagents](https://github.com/nicobailon/pi-subagents/) separately:
 
@@ -110,7 +105,7 @@ pi-subagents is optional — everything else works without it. Using `subagent: 
 
 ## First successful use in 2 minutes
 
-Start with a skill-free prompt that inherits the current session model. This proves install, prompt loading, validation, preview, and execution before you try compare workflows.
+Start with a skill-free prompt that inherits the current session model. This proves install, prompt loading, validation, preview, and execution before you try larger workflows.
 
 ```bash
 pi install npm:pi-prompt-workflows
@@ -208,7 +203,7 @@ Review `${input.target}` at `${input.depth}` depth.
 <if-input name="run-tests" is="true">Run focused tests.<else>Do not run tests.</if-input>
 ```
 
-Invoke named values with `--name=value` or `--name value`; boolean inputs also accept `--no-name`. A quote-aware `--` boundary leaves everything after it as positional `$@` text. `${input.name}` and `<if-input>` affect Markdown body content only; static include paths and executable configuration remain fixed. Missing values open one compact form in interactive TUI mode. Plain, RPC, dry-run, and other headless paths never block for input: they apply defaults and report unresolved values with an actionable error. Input-enabled loops, chains, delegation, compare/best-of-N, and deterministic prompts are rejected in v1.
+Invoke named values with `--name=value` or `--name value`; boolean inputs also accept `--no-name`. A quote-aware `--` boundary leaves everything after it as positional `$@` text. `${input.name}` and `<if-input>` affect Markdown body content only; static include paths and executable configuration remain fixed. Missing values open one compact form in interactive TUI mode. Plain, RPC, dry-run, and other headless paths never block for input: they apply defaults and report unresolved values with an actionable error. Input-enabled loops, chains, delegation, and deterministic prompts are rejected. Compare/best-of-N execution has been removed entirely.
 
 See [`examples/interactive-inputs.md`](examples/interactive-inputs.md) for a complete safe review example.
 
@@ -269,11 +264,10 @@ Use `/print-prompt` or `/dry-run-prompt` to preview what a prompt template would
 /dry-run-prompt review --model=gpt-5.2 src/server.ts
 ```
 
-With `--plain`, or in contexts without Pi UI, these commands print a Markdown report to stdout. In non-TUI UI contexts, they show the same report as a notification. For compare prompts, the report is a read-only preflight that shows the selected preset, worker/reviewer lineup, call count and cap, compare cwd, policies, artifact expectations, and warnings before any worker runs. By default, full skill content is hidden; add `--show-skills` when you explicitly want the preview to include loaded skill bodies. For delegated prompts, skill content is still reported in the report's skills section rather than inlined into the prompt body preview; at runtime the resolved skill block is prepended to the child task text before delegation.
+With `--plain`, or in contexts without Pi UI, these commands print a Markdown report to stdout. In non-TUI UI contexts, they show the same report as a notification. By default, full skill content is hidden; add `--show-skills` when you explicitly want the preview to include loaded skill bodies. For delegated prompts, the preview reports the exact host-resolved skills. At runtime the host embeds those resolved `<skill>` blocks in the delegated task instead of sending names that the child could rebind to different files.
 
 ```text
 /print-prompt review --show-skills src/server.ts
-/dry-run-prompt best-of-n --preset quick --plain refactor the parser
 ```
 
 In Pi TUI mode, the commands open an interactive picker/inspector by default:
@@ -307,7 +301,7 @@ The extension scans the default prompt directories:
 - Project defaults: `<cwd>/.pi/prompts/`
 - Project prompt library: `<cwd>/.pi/prompt-library/`
 
-Project prompts override user prompts when names collide. Prompt-library files are command-capable only when they use extension metadata such as `model`, `skill`, `skills`, `include`, `includes`, `chain`, or `bestOfN`; plain prompt-library files stay available as include fragments instead of becoming slash commands.
+Project prompts override user prompts when names collide. Prompt-library files are command-capable only when they use extension metadata such as `model`, `skill`, `skills`, `include`, `includes`, or `chain`; plain prompt-library files stay available as include fragments instead of becoming slash commands.
 
 ## Frontmatter Reference
 
@@ -339,7 +333,6 @@ All fields are optional. Templates that don't use any extension features (no `mo
 | `fresh` | `false` | When looping, collapse the conversation between iterations to a brief summary instead of carrying the full context forward. Saves tokens on long loops. |
 | `converge` | `true` | When looping, stop early if an iteration makes no file changes. Set `false` to always run every iteration. |
 | `boomerang` | `false` | After a non-chain prompt finishes, collapse its execution context back to the branch point with a brief summary. Works with loops, including `fresh` loop summaries. Useful for review prompts like `/double-check`. |
-| `worktree` | `false` | When `true`, parallel delegated work runs in separate git worktrees. Valid on chain templates with `parallel()` steps, on delegated prompts with `parallel: N`, and on compare templates via `bestOfN.worktree`. |
 
 ### Delegation
 
@@ -347,14 +340,7 @@ All fields are optional. Templates that don't use any extension features (no `mo
 |-------|---------|--------------|
 | `subagent` | — | Delegate execution to a subagent instead of running in the current session. `true` uses the default `delegate` agent; a string value like `reviewer` targets that specific agent. Requires [pi-subagents](https://github.com/nicobailon/pi-subagents/). |
 | `inheritContext` | `false` | Only meaningful with `subagent`. When `true`, the subagent receives a fork of the current conversation context instead of starting fresh. |
-| `parallel` | — | Delegated prompts only. Repeats the same subagent in parallel `N` times. Each copy gets a slot header like `[Parallel subagent 2/3]` prepended to the task. Must be an integer greater than or equal to 2. |
-| `bestOfN` | — | Compare templates only. Nested compare authoring block with `workers`, `reviewers`, optional `preset`, optional `finalApplier`, optional `worktree`, and optional `commit: ask`. Top-level compare fields are not supported in templates. |
-| `bestOfN.preset` | — | Name of a best-of-N preset from `~/.pi/agent/best-of-n-presets.json` or `<compare-cwd>/.pi/best-of-n-presets.json`. Presets can supply worker/reviewer agents, models, counts, `defaultModel`, and `maxModelCalls`; prompt templates still own task text, `cwd`, final apply, dirty/report/commit policy, and other execution policy. `maxModelCalls` caps expanded workers + reviewers + an optional final applier. |
-| `bestOfN.workers` | — | Ordered worker lineup used for the worker phase. Each slot object supports optional `agent`/`subagent`, optional `model`, optional `task`, optional `taskSuffix`, optional `cwd`, and optional `count`. If both `agent` and `subagent` are omitted, the default agent is `delegate`. |
-| `bestOfN.reviewers` | — | Ordered reviewer lineup used after worker aggregation. Slot shape matches workers. If both `agent` and `subagent` are omitted, the default agent is `reviewer`. |
-| `bestOfN.finalApplier` | — | Optional single-slot final apply phase that edits the real branch after reviewers. Supports optional `agent`/`subagent`, optional `model`, optional `task`, and optional `taskSuffix`. If both `agent` and `subagent` are omitted, the default agent is `delegate`. `count` and `cwd` are not supported. Requires `bestOfN.worktree: true` at runtime. |
-| `bestOfN.commit` | — | Optional final-applier follow-up policy. `ask` does not commit automatically; after the final applier runs, a display-only approval block shows changed files, a diff summary, the report path, a suggested commit message, and safe `git -C <compare-cwd> ...` commands. Stage only intended tracked-file hunks with `git add --patch`; for intended new files shown as `??`, mark the path with `git add -N -- <path>` or explicitly stage it before committing. Requires `bestOfN.finalApplier`. |
-| `cwd` | — | Working directory for delegated subagent subprocesses. Must be an absolute path (`~/...` is expanded). Valid with `subagent`, on chain templates as the default cwd for delegated steps, and on compare prompts as the default repo cwd. Worker/reviewer slots can also set their own `cwd` inside `bestOfN.workers` / `bestOfN.reviewers`. |
+| `cwd` | — | Working directory for delegated subagent subprocesses. Must be an absolute path (`~/...` is expanded). Valid with `subagent` and on chain templates as the default cwd for delegated steps. |
 
 ## Model Format
 
@@ -457,7 +443,7 @@ Resolution order:
 4. `~/.pi/agent/skills/<name>/SKILL.md` or `~/.pi/agent/skills/<name>.md`
 5. `~/.agents/skills/<name>/SKILL.md` or `~/.agents/skills/<name>.md`
 
-Here `<cwd>` is the Pi session/project cwd used to register and execute the prompt command. Delegated prompts may also set frontmatter `cwd:` or receive runtime `--cwd`, but those values choose where the child agent runs; they do not change which skill library is searched. This keeps direct prompts, runtime `--subagent`, `--fork`, dry-run, and validation on one predictable skill lookup path.
+For direct prompts, `<cwd>` is the Pi session/project cwd. For delegated prompts, frontmatter `cwd:` or runtime `--cwd` selects both the child working directory and the skill-resolution root. Runtime execution, dry-run, and static validation use that same effective delegated cwd. Project skill roots are available only when the session is trusted and the effective delegated cwd resolves inside the real session subtree. Otherwise, only allowed global or registered skill content is embedded.
 
 ### Skill wildcards
 
@@ -483,9 +469,8 @@ Skill-to-skill references are not recursive in v1. Loaded skills are treated as 
 
 Chain wrapper templates ignore `skill` and `skills`; put skill frontmatter on the step templates instead. When a chain runs a step, that step uses its own skill configuration.
 
-Delegated prompts can combine `subagent:` with `skill` or `skills`. The resolved skill content is prepended to the delegated task before the prompt body, so the child agent receives the same resolved skill content instead of silently dropping it. Runtime `--subagent` uses the same behavior for direct prompts and chain steps; runtime `--fork` uses it for direct prompts, while chain steps use their own `inheritContext` frontmatter.
+Delegated prompts can combine `subagent:` with `skill` or `skills`. The host resolves and trust-checks each selector against the effective delegated cwd, includes the exact resolved content in budget checks, and embeds that content in the delegated task. It does not send skill names for the child to resolve again, because a same-name project skill could otherwise replace the content that the host approved. Runtime `--subagent` uses the same single-task behavior for direct prompts and chain steps; runtime `--fork` uses it for direct prompts, while chain steps use their own `inheritContext` frontmatter.
 
-Compare prompts (`bestOfN`) cannot combine with `skill` or `skills` in v1 because compare execution delegates worker/reviewer/final-applier tasks. Add required skill instructions to the compare prompt body instead.
 
 ## Prompt includes
 
@@ -719,22 +704,7 @@ Use url in the prompt to take screenshot: $@
 
 The subagent process runs with `/tmp/screenshots` as its working directory. Paths must be absolute (`~/...` is expanded). The directory is validated at execution time.
 
-To fan the same delegated prompt out to multiple copies in parallel, add `parallel: N`:
-
-```markdown
----
-model: anthropic/claude-sonnet-4-20250514
-subagent: simplifier
-inheritContext: true
-parallel: 3
-worktree: true
----
-Review changed code and fix any issues found.
-```
-
-This expands to three parallel `pi-subagents` tasks targeting the same agent. Each one receives the same rendered prompt plus an automatic slot header like `[Parallel subagent 1/3]`, `[Parallel subagent 2/3]`, and `[Parallel subagent 3/3]` so the body can assign different roles to each copy. `worktree: true` is optional here and gives each parallel run its own git worktree.
-
-During execution, a live progress widget appears above the editor showing elapsed time, tool count, token usage, and the current tool. When the run finishes, it's replaced by a completion card with the task preview, tool call history, output, and usage stats.
+During execution, a live progress widget appears above the editor showing elapsed time, tool count, token usage, and the current tool. When the run finishes, it's replaced by a completion card with the task preview, aggregate tool count, output, and usage stats.
 
 You can override delegation at runtime per invocation with `--subagent`, `--subagent=<name>`, `--subagent:<name>`, or `--cwd=<path>`. `--cwd=<path>` must be absolute after optional `~/...` expansion. Runtime flags take precedence for that invocation only.
 
@@ -749,26 +719,12 @@ Two additional runtime flags work for any prompt (not just delegated ones):
 /deslop --model=openai/gpt-5.4 --loop 3
 ```
 
-Compare templates also accept runtime lineup overrides:
-
-Prompt-template frontmatter authoring uses `bestOfN:`. Runtime overrides stay on the low-level flags below.
-
-- `--workers=<json-array>` / `--reviewers=<json-array>` replace the corresponding frontmatter lineup.
-- `--workers-append=<json-array>` / `--reviewers-append=<json-array>` append to the corresponding lineup.
-- `--final-applier=<json-object-or-one-element-array>` replaces the optional final apply slot.
-- `--preset=<name>` / `--preset <name>` selects a best-of-N preset for compare prompts only; it is ignored on non-compare prompts.
-- `--keep-artifacts` retains raw worker, reviewer, and final-applier outputs next to the generated run report.
-
-Each worker/reviewer JSON array entry must be an object with either `subagent` or `agent`, plus optional `model`, `task`, `taskSuffix`, `cwd`, and `count`. In worker slots, `"subagent": true` maps to `delegate`. In reviewer slots, `"subagent": true` maps to `reviewer`. `--final-applier=` accepts one slot object (or a one-element array) with `subagent`/`agent`, optional `model`, optional `task`, and optional `taskSuffix`; for this final slot, `"subagent": true` maps to `delegate`, and both `count` and `cwd` are not supported.
-
 ## Packaged prompt examples
 
-This repo ships copyable starter prompts under `examples/`. Start with the minimal current-model prompts before trying the advanced compare workflow:
+This repo ships copyable starter prompts under `examples/`:
 
 - `examples/hello.md` installs as `/hello` and uses the current session model with no skills.
 - `examples/review.md` installs as `/review` and gives a simple skill-free review checklist.
-- `examples/best-of-n-smoke.md` installs as `/best-of-n-smoke` and runs one worker plus one reviewer with no final applier, no apply step, and no commit handoff.
-- `examples/best-of-n.md` installs as `/best-of-n`, runs in the current repo, and shows mixed workers, mixed reviewers, worktrees, and an optional final apply phase.
 
 Installing these examples is optional. The first-run `hello.md` above works without copying packaged examples; copy these only when you want starter templates to edit.
 
@@ -779,8 +735,6 @@ REPO=/path/to/your/pi-prompt-workflows-checkout
 mkdir -p ~/.pi/agent/prompts
 cp "$REPO/examples/hello.md" ~/.pi/agent/prompts/hello.md
 cp "$REPO/examples/review.md" ~/.pi/agent/prompts/review.md
-cp "$REPO/examples/best-of-n-smoke.md" ~/.pi/agent/prompts/best-of-n-smoke.md
-cp "$REPO/examples/best-of-n.md" ~/.pi/agent/prompts/best-of-n.md
 ```
 
 Or copy from the published npm tarball without guessing where Pi installed the package:
@@ -792,8 +746,6 @@ tar -xzf "$TMPDIR"/pi-prompt-workflows-*.tgz -C "$TMPDIR"
 mkdir -p ~/.pi/agent/prompts
 cp "$TMPDIR/package/examples/hello.md" ~/.pi/agent/prompts/hello.md
 cp "$TMPDIR/package/examples/review.md" ~/.pi/agent/prompts/review.md
-cp "$TMPDIR/package/examples/best-of-n-smoke.md" ~/.pi/agent/prompts/best-of-n-smoke.md
-cp "$TMPDIR/package/examples/best-of-n.md" ~/.pi/agent/prompts/best-of-n.md
 ```
 
 After copying files, restart `pi` if it is already running. Check minimal prompts with a read-only preview before executing them:
@@ -803,215 +755,6 @@ After copying files, restart `pi` if it is already running. Check minimal prompt
 /hello
 /dry-run-prompt review --plain src/server.ts
 ```
-
-For compare prompts, use preflight first instead of starting with an expensive live run:
-
-```text
-/dry-run-prompt best-of-n-smoke --plain summarize this repository's test setup
-/best-of-n-smoke summarize this repository's test setup
-/dry-run-prompt best-of-n --preset quick --plain refactor the parser
-```
-
-## Best-of-N Compare Prompt
-
-The advanced `examples/best-of-n.md` prompt runs an explicit compare flow:
-
-Compare prompt templates are authored under `bestOfN:`. Top-level `workers`, `reviewers`, and `finalApplier` frontmatter fields are rejected with migration diagnostics.
-
-1. Worker phase: run the worker lineup in parallel (`context: fork`) so workers generate candidate implementations in temporary worktrees.
-2. Continue as long as at least one worker succeeds. Reviewer slots receive successful worker outputs plus worker/worktree summaries and produce findings only.
-3. Optional final apply phase: if `finalApplier` is configured, run one delegated apply step on the real compare repo (`compareCwd`) to pick a winner or synthesize/cherry-pick and apply the final patch.
-4. If all reviewers fail but `finalApplier` exists, the final apply step still runs with fallback context from workers plus reviewer failure summaries.
-5. Every successful compare run writes `.pi/runs/best-of-n/<timestamp>-<prompt>-<id>/report.md` plus `lineup.json`; pass `--keep-artifacts` to also retain raw worker/reviewer/final-applier outputs as separate Markdown files.
-6. If `bestOfN.commit: ask` is set, the apply completion adds a display-only manual commit approval block with changed files, diff summary, report path, suggested commit message, and copyable `git -C <compare-cwd> add --patch` / `git -C <compare-cwd> commit -m ...` commands. For intended new files shown as `??`, mark them with `git -C <compare-cwd> add -N -- <path>` or explicitly stage them before committing. The extension never commits for you.
-
-Worker/reviewer lineups are fully configurable from `bestOfN` frontmatter, presets, or runtime overrides, so there is no fixed three-model worker assumption. If a compare prompt omits `bestOfN.workers`, it falls back to one `delegate` worker using the current/main model. If it omits `bestOfN.reviewers`, it falls back to one `reviewer` slot. `bestOfN.finalApplier` is optional, and compare runs reject an effective final applier unless `bestOfN.worktree: true` is set.
-
-### Best-of-N presets
-
-Presets keep expensive lineup choices reusable without letting project config own prompt policy. Define them in either place:
-
-> Preset mental model: presets choose who participates and how many model calls are allowed; prompt templates choose what work is allowed. Keep task text, cwd, worktree/final-applier/commit policy, dirty handling, and report behavior in the prompt. Put only reusable lineups, models, counts, default model, and call caps in presets.
-
-- User presets: `~/.pi/agent/best-of-n-presets.json`, `.yaml`, or `.yml`
-- Project presets: `<compare-cwd>/.pi/best-of-n-presets.json`, `.yaml`, or `.yml`
-
-Only the first existing file in each location is loaded, in `json`, `yaml`, then `yml` order. Project presets override user presets of the same name. If a project preset with a name is invalid, that name fails closed instead of falling back to the user preset. Compare prompts that set `cwd`, runtime `--cwd`, or use `parallel-patch-compare-at-path` resolve project presets from the effective compare cwd. `/validate-prompts` mirrors prompt `cwd` where it can be known statically.
-
-```json
-{
-  "presets": {
-    "quick": {
-      "description": "Two cheap workers, one reviewer, optional final applier",
-      "defaultModel": "openai-codex/gpt-5.4-mini:low",
-      "maxModelCalls": 4,
-      "workers": [{ "agent": "delegate", "count": 2 }],
-      "reviewers": [{ "agent": "reviewer" }]
-    }
-  }
-}
-```
-
-Equivalent YAML:
-
-```yaml
-presets:
-  quick:
-    description: Two cheap workers, one reviewer, optional final applier
-    defaultModel: openai-codex/gpt-5.4-mini:low
-    maxModelCalls: 4
-    workers:
-      - agent: delegate
-        count: 2
-    reviewers:
-      - agent: reviewer
-```
-
-Use from a prompt:
-
-```yaml
-bestOfN:
-  preset: quick
-```
-
-Or at runtime:
-
-```bash
-/best-of-n --preset quick refactor the parser
-```
-
-That minimal runtime form is summary-only: it keeps the durable `report.md` and `lineup.json`, but not raw worker/reviewer/final-applier Markdown artifacts. Add `--keep-artifacts` when you expect to audit raw outputs, hand evidence to another reviewer, or debug reviewer disagreements.
-
-List available presets without approving or running them:
-
-```text
-/compare-presets
-/compare-presets --plain
-```
-
-`/compare-presets` reports each preset's source file, trust label, default model, `maxModelCalls`, expanded worker/reviewer counts, and diagnostics. The default UI path uses a notification/custom UI surface; `--plain` writes deterministic stdout for scripts.
-
-Preview the effective lineup before execution:
-
-```text
-/dry-run-prompt best-of-n --preset quick refactor the parser
-/print-prompt best-of-n --preset quick --plain refactor the parser
-```
-
-Dry-run and preset listing are read-only: they do not approve project presets, start subagents, write reports, or switch models. Running a compare prompt with a project preset asks for per-session approval first. User presets are trusted user config; project presets are treated as untrusted project input until approved for the session.
-
-### Compare workflow examples
-
-Use these as copyable starting points for the full compare workflow.
-
-**Evidence-retaining adversarial oracle review:** run a read-only tournament and retain raw worker/reviewer artifacts for later inspection.
-
-```text
-/compare-presets --plain
-/dry-run-prompt best-of-n --preset quick --plain review the auth refactor for security and regression risk
-/best-of-n --preset quick --keep-artifacts review the auth refactor for security and regression risk
-/compare-runs --plain --limit 5
-/compare-runs --plain --id <run-id>
-```
-
-**Evidence-retaining operator happy path:** discover presets, preflight the exact lineup, run with retained artifacts, then inspect the run id printed at completion.
-
-```text
-/compare-presets
-/dry-run-prompt best-of-n --preset quick --plain <task>
-/best-of-n --preset quick --keep-artifacts <task>
-/compare-runs --id <run-id>
-```
-
-**Summary-only compare, then inspect history:** preflight the effective lineup, execute the compare, then browse run history in Pi TUI mode or print one run deterministically. Omit `--keep-artifacts` intentionally when the durable summary report and lineup are enough, or when you want less disk usage/noise from exploratory or low-stakes runs.
-
-```text
-/compare-presets
-/print-prompt best-of-n --preset quick --plain refactor the parser
-/best-of-n --preset quick refactor the parser
-/compare-runs
-/compare-runs --plain --id <run-id>
-```
-
-In Pi TUI mode, `/compare-runs` opens a read-only picker/detail inspector. `--plain` forces stdout output for scripts and logs.
-
-**Safe final-applier with manual commit approval:** keep `worktree: true`, configure one `finalApplier`, and set `commit: ask` in the prompt so the extension shows a display-only commit handoff instead of committing automatically.
-
-```yaml
-bestOfN:
-  preset: quick
-  worktree: true
-  finalApplier:
-    agent: delegate
-    model: anthropic/claude-sonnet-4-20250514:high
-    taskSuffix: Apply the final patch on the current branch and report verification.
-  commit: ask
-```
-
-```text
-/dry-run-prompt best-of-n --preset quick --plain implement the parser cleanup
-/best-of-n --preset quick implement the parser cleanup
-```
-
-After the final applier finishes, review the reported diff and run only the suggested `git -C <compare-cwd> add --patch` / `git -C <compare-cwd> commit -m ...` commands you actually approve. For intended new files shown as `??`, use `git -C <compare-cwd> add -N -- <path>` before patch-staging.
-
-Preset slot fields are intentionally limited to `agent`/`subagent`, `model`, and `count`. Presets cannot set `task`, `taskSuffix`, `cwd`, `finalApplier`, `worktree`, dirty/report/commit behavior, or other execution policy. Invalid selected presets fail closed instead of falling back to same-named user presets, and `maxModelCalls` caps the expanded worker + reviewer calls + optional final applier before any subagents start.
-
-### Compare troubleshooting
-
-- Missing run id: use `/compare-runs` to browse recent runs from the same cwd, then copy the explicit `Run id`. If `/compare-runs --id <run-id>` cannot find it, the diagnostic prints the searched root/cwd; rerun the compare prompt from that same cwd or inspect the listed `.pi/runs/best-of-n/` root.
-- Artifacts `not retained`: the run completed without raw worker/reviewer/final-applier files. Rerun with `--keep-artifacts` when you need raw outputs; the report and `lineup.json` are still the durable default.
-- Artifacts `missing`: an expected artifact path from `lineup.json` no longer exists. Common causes are manual cleanup, partial copy, or moving a run directory without its files. Rerun with `--keep-artifacts` if the raw output matters.
-- Artifacts `rejected`: the history reader refused to read a path because it was unsafe for display, such as a symlink, non-regular file, or path escape outside the run directory. Treat this as a safety stop and inspect the filesystem manually before trusting the artifact.
-- Artifacts `truncated`: the preview hit the display limit. The detail view shows the preview limit and full file path so you can open the raw artifact locally if you retained it.
-- Malformed `lineup.json`: `/compare-runs` still shows the report when possible, but lineup/artifact inventory may be unavailable. Rerun the compare if you need trustworthy slot metadata.
-- Wrong cwd: project presets and run history are resolved from the effective compare cwd. If a preset or run is missing, re-run `/compare-presets --plain`, `/dry-run-prompt ... --plain`, or `/compare-runs` from the repo/cwd that originally launched the compare.
-- Failed before history: very early failures may happen before a run directory/report can be written. In that case there may be no run id to recover; fix the shown validation/preset/cwd error and rerun. Later terminal compare failures should print any available run id, report path, and inspect commands.
-
-For same-model best-of-N, use `count: N` on one worker slot:
-
-```yaml
-bestOfN:
-  workers:
-    - model: openai-codex/gpt-5.4:low
-      count: 4
-```
-
-You can also mix models and give each slot its own count:
-
-```yaml
-bestOfN:
-  workers:
-    - model: openai-codex/gpt-5.4:low
-      count: 3
-    - model: google/gemini-2.5-pro:medium
-      count: 2
-    - model: anthropic/claude-sonnet-4-20250514:high
-```
-
-Reviewer slots support the same lineup shape, and `bestOfN.finalApplier` is one optional single-slot final apply step:
-
-```yaml
-bestOfN:
-  reviewers:
-    - model: openai-codex/gpt-5.4:low
-      count: 2
-    - model: google/gemini-2.5-pro:medium
-      taskSuffix: Focus on regression risk.
-  finalApplier:
-    model: anthropic/claude-sonnet-4-20250514:high
-    taskSuffix: Apply the final patch on the current branch and report verification.
-  worktree: true
-  commit: ask
-```
-
-Within compare lineups, omitting both `agent` and `subagent` uses phase defaults: `delegate` in workers, `reviewer` in reviewers, and `delegate` in finalApplier. You can still set explicit `agent` or `subagent` when needed.
-
-Explicitly repeating the same slot still works, but `count: N` is the cleaner shorthand when the slot is identical.
-
-Within a compare lineup, use `task` for a full per-slot override and `taskSuffix` for a small per-slot append. `taskSuffix` is added after the shared worker task (or after the slot's `task` if you set one), which makes it the better fit for things like per-model output file names.
-
-When a compare prompt uses `bestOfN.worktree: true`, all worker slots must resolve to the same `cwd`. Mixed worker `cwd` values are only allowed when worktree isolation is off. Worktree isolation is for the worker phase only; `bestOfN.finalApplier` always applies on the real branch (`compareCwd`). `bestOfN.commit: ask` is only valid with a final applier; it reports what changed after that apply step but leaves the branch uncommitted until you approve and run the suggested git command yourself.
 
 ## Deterministic Steps
 
@@ -1267,7 +1010,7 @@ limits:
 
 Each list item sets exactly one of `prompt` or `run`. `id` is optional: when omitted, the trimmed target name is the stable generated ID. Use an explicit non-empty `id` when a target appears more than once, as above. IDs must be unique. `onSuccess`, `onFailure`, and `onBlocked` name step IDs; omitting the matching transition falls through to the next declared step, and falling through after the last step ends the chain. Gates are `always` (default), `changed`, `succeeded`, and `failed`. Outcomes are normalized by the runtime to `succeeded`, `failed`, `blocked`, or `skipped`; `blocked` is an explicit guardrail/refusal outcome, not text inferred from an answer. Gate-skipped steps execute nothing.
 
-`limits` is optional but always effective. Defaults are `maxSteps: 10` and `maxModelCalls: 5`; author values must be positive safe integers and cannot exceed the hard caps `maxSteps: 100` and `maxModelCalls: 50`. Every selected prompt consumes exactly one model call. Selected `run` actions and gate-skipped actions consume zero. Prompt targets that can expand into multiple top-level calls are rejected: nested/adaptive/parallel chains, loops, delegated/subagent or inherited-context prompts, `parallel`, boomerang, compare/final-applier modes, and deterministic handoffs. A `run` target must be deterministic with `handoff: never`; a `prompt` target must not be deterministic.
+`limits` is optional but always effective. Defaults are `maxSteps: 10` and `maxModelCalls: 5`; author values must be positive safe integers and cannot exceed the hard caps `maxSteps: 100` and `maxModelCalls: 50`. Every selected prompt consumes exactly one model call. Selected `run` actions and gate-skipped actions consume zero. Prompt targets that can expand into multiple top-level calls are rejected: nested or adaptive chains, loops, delegated/subagent or inherited-context prompts, boomerang prompts, and deterministic handoffs. A `run` target must be deterministic with `handoff: never`; a `prompt` target must not be deterministic.
 
 ### Verified changed-state semantics
 
@@ -1289,7 +1032,7 @@ Only one adaptive chain is allowed in flight for the extension. Cancellation is 
 
 Packaged starters are `examples/adaptive-fix-review.md` (plus its hidden companion targets) and `examples/adaptive-validation-review.md`. Copy the complete adaptive example set so target names resolve. Their deterministic checks are hardened read-only Git commands: the staged-only whitespace check `git --no-optional-locks -c core.fsmonitor=false --no-pager diff --cached --no-ext-diff --no-textconv --check`, plus status companions that combine `git --no-optional-locks -c core.fsmonitor=false ls-files --modified --deleted --others --exclude-standard` with `git --no-optional-locks -c core.fsmonitor=false --no-pager diff --cached --name-status --no-ext-diff --no-textconv --`. Thus staged additions, deletions, renames, and modifications are reported alongside worktree/untracked changes. The packaged whitespace check intentionally does not inspect unstaged content, because configured conversion filters can execute while Git prepares an unstaged diff. These commands disable configured external diff/textconv/pager helpers and fsmonitor/index-refresh side effects, never invoke package lifecycle/config hooks, and never hand off to another model. Prompt/model steps can edit by design: implementation and fix prompts may mutate the worktree, while the companion review prompt explicitly requests findings only.
 
-To migrate `chain: analyze -> fix -> review`, replace the scalar with a list of `{prompt: ...}` entries. With no gates/transitions, natural fallthrough preserves sequential intent, but adaptive limits and Git snapshot requirements still apply. Keep legacy string chains when you need their supported looping, delegation, parallel groups, shared arguments, or chain-context behavior; structured adaptive chains deliberately do not emulate those multi-call modes.
+To migrate `chain: analyze -> fix -> review`, replace the scalar with a list of `{prompt: ...}` entries. With no gates/transitions, natural fallthrough preserves sequential intent, but adaptive limits and Git snapshot requirements still apply. Keep legacy string chains when you need supported looping, single delegation, shared arguments, or chain-context behavior; structured adaptive chains deliberately do not emulate those multi-call modes.
 
 Common failures: `target missing` means copy/install the companion prompt; `kind mismatch` means use `run` only for deterministic `handoff: never` targets; `changed requires Git` means run from or set an effective cwd inside a Git worktree; `analysis inconclusive` means simplify branching; limit exhaustion means increase a configured limit within the hard cap or shorten the path. Project/user, hidden, duplicate, reserved-name, and prompt-library trust precedence is exactly the normal effective prompt catalog—hidden affects discovery, not target authority.
 
@@ -1324,30 +1067,9 @@ chain: double-check --loop 2 -> deslop --loop 2
 
 This registers the file's name as a command that runs `double-check` twice, then `deslop` twice. Per-step `--loop N` repeats that step before moving to the next, with per-step convergence (stops early if no changes, unless the step's template has `converge: false`).
 
-Chain declarations also support parallel groups with `parallel(...)`:
-
-```markdown
----
-chain: parallel(scan-frontend, scan-backend) -> consolidate
----
-```
-
-Each entry inside `parallel(...)` runs as a delegated subagent task concurrently. Parallel entries can include per-step args (for example `parallel(scan-frontend, scan-backend "auth")`), but per-step `--loop` is not supported inside parallel groups. Nested `parallel(...)` is rejected. Parallel entries must be delegated templates (`subagent: ...` or runtime `--subagent` override). All entries in the same parallel group must resolve to the same `inheritContext` mode. Mixed `cwd` values are allowed normally, but when `worktree: true` is enabled they must all resolve to the same `cwd`.
-
-Add `worktree: true` (or `--worktree` at runtime) so each parallel subagent runs in its own git worktree, avoiding file conflicts when agents edit concurrently:
-
-```markdown
----
-chain: parallel(scan-frontend, scan-backend) -> consolidate
-worktree: true
----
-```
-
-`worktree` requires a chain with at least one `parallel()` step. The flag is passed to pi-subagents, which handles worktree creation and cleanup.
-
 Steps with a `model` field use their own model. Steps without one inherit a snapshot of whatever model was active when the chain started — not the previous step's model. This keeps behavior deterministic regardless of what earlier steps do.
 
-Chain templates support `loop`, `fresh`, `converge`, `restore`, `worktree`, and `cwd` in their frontmatter for controlling the overall execution:
+Chain templates support `loop`, `fresh`, `converge`, `restore`, and `cwd` in their frontmatter for controlling the overall execution:
 
 ```markdown
 ---
@@ -1387,16 +1109,9 @@ To enable it for a single step, attach `--with-context` to that step name:
 
 Here only `reviewer` receives the summary of `analyze`. The `summarize` step does not.
 
-Steps using `inheritContext: true` already fork the full parent conversation and skip the summary preamble. `--with-context` is not supported inside `parallel(...)` groups. When a chain uses `loop`, summaries reset each iteration.
+Steps using `inheritContext: true` already fork the full parent conversation and skip the summary preamble. When a chain uses `loop`, summaries reset each iteration.
 
-### Parallel and looping from the CLI
-
-Parallel groups work in `/chain-prompts` too:
-
-```
-/chain-prompts parallel(scan-fe, scan-be) -> review
-/chain-prompts parallel(scan-fe, scan-be) -> review --worktree
-```
+### Looping from the CLI
 
 Looping applies to the entire chain:
 

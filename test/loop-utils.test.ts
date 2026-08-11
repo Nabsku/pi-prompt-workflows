@@ -23,11 +23,11 @@ const delegatedEntry = {
 	},
 } as any;
 
-const delegatedWorktreeEntry = {
+const delegatedChangedEntry = {
 	id: "delegated-2",
 	type: "custom_message",
 	customType: "prompt-template-subagent",
-	content: "2/2 succeeded\n\n=== Worktree Changes ===\n\n--- Task 1 (simplifier): 1 file changed, +1 -0 ---",
+	content: "Updated delegated files.",
 	display: true,
 	details: {
 		messages: [
@@ -36,17 +36,7 @@ const delegatedWorktreeEntry = {
 				content: [{ type: "text", text: "Done." }],
 			},
 		],
-		parallelResults: [
-			{
-				messages: [
-					{
-						role: "assistant",
-						content: [{ type: "text", text: "Done." }],
-					},
-				],
-			},
-		],
-		text: "2/2 succeeded\n\n=== Worktree Changes ===\n\n--- Task 1 (simplifier): 1 file changed, +1 -0 ---",
+		text: "Updated delegated files.",
 		changed: true,
 	},
 } as any;
@@ -128,19 +118,19 @@ test("generateChainStepSummary includes ordinary assistant actions", () => {
 });
 
 test("generateChainStepSummary includes delegated custom-message data", () => {
-	const summary = generateChainStepSummary([delegatedEntry], "parallel(scan-fe, scan-be)", 1);
-	assert.match(summary, /^Step 1 — parallel\(scan-fe, scan-be\):/);
+	const summary = generateChainStepSummary([delegatedEntry], "scan", 1);
+	assert.match(summary, /^Step 1 — scan:/);
 	assert.match(summary, /Actions: modified src\/a\.ts\./);
 	assert.match(summary, /Outcome: Updated file\./);
 });
 
-test("didIterationMakeChanges respects delegated changed flag for worktree-only results", () => {
-	assert.equal(didIterationMakeChanges([delegatedWorktreeEntry]), true);
+test("didIterationMakeChanges respects the delegated changed flag", () => {
+	assert.equal(didIterationMakeChanges([delegatedChangedEntry]), true);
 });
 
-test("generateIterationSummary uses delegated aggregate text when present", () => {
-	const summary = generateIterationSummary([delegatedWorktreeEntry], "simplify-parallel", 1, 2);
-	assert.match(summary, /Outcome: 2\/2 succeeded .*=== Worktree Changes ===/);
+test("generateIterationSummary uses delegated text when present", () => {
+	const summary = generateIterationSummary([delegatedChangedEntry], "simplify", 1, 2);
+	assert.match(summary, /Outcome: Updated delegated files\./);
 });
 
 test("generateChainStepSummary supports text-only steps without action lines", () => {

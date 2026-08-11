@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildSkillLoadedMessage, getRequestedSkills, resolvePromptSkills, type RuntimeSkillCommand } from "../prompt-skills.js";
+import { buildSkillLoadedMessage, canResolveProjectSkills, getDelegatedCwdTrustError, getRequestedSkills, resolvePromptSkills, type RuntimeSkillCommand } from "../prompt-skills.js";
 import type { PromptWithModel } from "../prompt-loader.js";
 
 function withTempHome(run: (root: string) => void) {
@@ -18,6 +18,45 @@ function withTempHome(run: (root: string) => void) {
 	}
 }
 
+test("project skill trust is bounded to the real session subtree", () => {
+	withTempHome((root) => {
+		const sessionCwd = join(root, "session");
+		const nestedCwd = join(sessionCwd, "packages", "app");
+		const externalCwd = join(root, "external");
+		mkdirSync(nestedCwd, { recursive: true });
+		mkdirSync(externalCwd, { recursive: true });
+		const escapedLink = join(sessionCwd, "escaped");
+		symlinkSync(externalCwd, escapedLink, "dir");
+
+		assert.equal(canResolveProjectSkills(sessionCwd, nestedCwd, true), true);
+		assert.equal(canResolveProjectSkills(sessionCwd, externalCwd, true), false);
+		assert.equal(canResolveProjectSkills(sessionCwd, escapedLink, true), false);
+		assert.equal(canResolveProjectSkills(sessionCwd, nestedCwd, false), false);
+	});
+});
+
+test("nested project markers require separate delegated-cwd approval", () => {
+	withTempHome((root) => {
+		const sessionCwd = join(root, "session");
+		mkdirSync(sessionCwd, { recursive: true });
+		for (const marker of [".pi", ".agents", ".git"] as const) {
+			const nestedCwd = join(sessionCwd, marker.slice(1));
+			mkdirSync(join(nestedCwd, marker), { recursive: true });
+			assert.match(getDelegatedCwdTrustError(sessionCwd, nestedCwd, true) ?? "", /separate approval.*nested project/i);
+		}
+
+		const packageCwd = join(sessionCwd, "package");
+		mkdirSync(packageCwd, { recursive: true });
+		writeFileSync(join(packageCwd, "package.json"), JSON.stringify({ pi: { subagents: { agents: ["./agent.md"] } } }));
+		assert.match(getDelegatedCwdTrustError(sessionCwd, packageCwd, true) ?? "", /separate approval.*nested project/i);
+
+		const plainPackageCwd = join(sessionCwd, "plain-package");
+		mkdirSync(plainPackageCwd, { recursive: true });
+		writeFileSync(join(plainPackageCwd, "package.json"), JSON.stringify({ name: "plain" }));
+		assert.equal(getDelegatedCwdTrustError(sessionCwd, plainPackageCwd, true), undefined);
+	});
+});
+
 function project(root: string): string {
 	const cwd = join(root, "project");
 	mkdirSync(join(cwd, ".pi", "skills"), { recursive: true });
@@ -26,6 +65,14 @@ function project(root: string): string {
 
 function writeProjectSkill(cwd: string, name: string, content: string): string {
 	const skillDir = join(cwd, ".pi", "skills", name);
+	mkdirSync(skillDir, { recursive: true });
+	const skillPath = join(skillDir, "SKILL.md");
+	writeFileSync(skillPath, content);
+	return skillPath;
+}
+
+function writeGlobalSkill(root: string, name: string, content: string): string {
+	const skillDir = join(root, ".pi", "agent", "skills", name);
 	mkdirSync(skillDir, { recursive: true });
 	const skillPath = join(skillDir, "SKILL.md");
 	writeFileSync(skillPath, content);
@@ -88,6 +135,25 @@ test("suffix wildcard expansion uses registered before filesystem", () => {
 
 		assert.deepEqual(skills.map((skill) => skill.skillName), ["golang-one", "golang-two"]);
 		assert.deepEqual(skills.map((skill) => skill.skillContent), ["registered one", "filesystem two"]);
+	});
+});
+
+test("untrusted skill resolution excludes project wildcard matches and keeps global matches", () => {
+	withTempHome((root) => {
+		const cwd = project(root);
+		writeProjectSkill(cwd, "review-project", "untrusted project content");
+		const globalPath = writeGlobalSkill(root, "review-global", "global content");
+
+		const skills = assertReady(resolvePromptSkills(
+			["review-*"],
+			cwd,
+			[],
+			{ includeProjectSkills: false },
+		));
+
+		assert.deepEqual(skills.map((skill) => skill.skillName), ["review-global"]);
+		assert.equal(skills[0]?.skillPath, globalPath);
+		assert.equal(skills[0]?.skillContent, "global content");
 	});
 });
 

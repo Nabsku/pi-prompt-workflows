@@ -1,6 +1,6 @@
 import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
 import { substituteArgs } from "./args.js";
-import { getResolvedModelRef, selectModelCandidate, type RegistryLike, type SelectedModelCandidate } from "./model-selection.js";
+import { getResolvedModelRef, selectModelCandidate, type ModelSelectionOptions, type RegistryLike, type SelectedModelCandidate } from "./model-selection.js";
 import type { PromptWithModel } from "./prompt-loader.js";
 import { evaluatePromptBudget } from "./prompt-budget.js";
 import { renderPromptInputValues } from "./prompt-inputs.js";
@@ -17,7 +17,7 @@ export interface EmptyPromptAbort {
 	warning?: string;
 }
 
-interface PromptExecutionOptions {
+interface PromptExecutionOptions extends ModelSelectionOptions {
 	inheritedModel?: Model<any>;
 }
 
@@ -160,7 +160,7 @@ export async function preparePromptExecution(
 					alreadyActive: sameModel(currentModel, inheritedModel),
 				};
 			})()
-			: await selectModelCandidate(prompt.models, currentModel, modelRegistry);
+			: await selectModelCandidate(prompt.models, currentModel, modelRegistry, options);
 	if (!selectedModel) return undefined;
 	if ("message" in selectedModel) return selectedModel;
 

@@ -1,14 +1,13 @@
 import { resolve as resolvePath } from "node:path";
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { loadBestOfNPresetCatalog, type ResolvedBestOfNPreset } from "./best-of-n-presets.js";
 import { substituteArgs } from "./args.js";
-import { parseChainDeclaration, type ChainStep, type ChainStepOrParallel } from "./chain-parser.js";
+import { parseChainDeclaration, type ChainStep } from "./chain-parser.js";
 import { evaluatePromptBudget, type PromptBudgetResult } from "./prompt-budget.js";
 import { collectPromptIncludeGraphs, type PromptIncludeGraph, type PromptIncludeGraphEdge, type PromptIncludeGraphNode } from "./prompt-includes.js";
 import { collectPromptSourceRecords, discoverFilesystemSkills, loadPromptsWithModel, readSkillContent, resolveSkillPath, type PromptLoaderDiagnostic, type PromptSource, type PromptSourceRecord, type PromptWithModel } from "./prompt-loader.js";
-import { buildSkillLoadedMessage, getRequestedSkills, resolvePromptSkills } from "./prompt-skills.js";
-import { renderPromptInputValues } from "./prompt-inputs.js";
+import { buildSkillLoadedMessage, canResolveProjectSkills, getDelegatedCwdTrustError, getRequestedSkills, resolvePromptSkills } from "./prompt-skills.js";
+import { renderPromptInputValues, validatePromptInputReferences, type ResolvedPromptInput } from "./prompt-inputs.js";
 import { minimumTemplateConditionalContent, renderTemplateConditionals, renderTemplateConditionalsWithInputs } from "./template-conditionals.js";
 import { createAdaptivePreflight, type AdaptivePreflight } from "./adaptive-preflight.js";
 import { createAdaptiveChainState, routeAdaptiveChain, type AdaptiveChainState, type ChainObservation } from "./adaptive-chain.js";
@@ -184,12 +183,12 @@ function validateRegisteredWildcardReference(registeredSkills: RegisteredSkillCa
 	return matches.size > 0;
 }
 
-function collectFilesystemSkillNames(cwd: string): Set<string> {
-	return new Set(discoverFilesystemSkills(cwd).map((skill) => skill.skillName));
+function collectFilesystemSkillNames(cwd: string, includeProjectSkills: boolean): Set<string> {
+	return new Set(discoverFilesystemSkills(cwd, { includeProjectSkills }).map((skill) => skill.skillName));
 }
 
-function validateFilesystemSkillReference(cwd: string, promptSource: PromptSource, skillName: string, result: PromptValidationResult): boolean {
-	const skillPath = resolveSkillPath(skillName, cwd);
+function validateFilesystemSkillReference(cwd: string, promptSource: PromptSource, skillName: string, result: PromptValidationResult, includeProjectSkills: boolean): boolean {
+	const skillPath = resolveSkillPath(skillName, cwd, { includeProjectSkills });
 	if (!skillPath) return false;
 	try {
 		readSkillContent(skillPath);
@@ -207,111 +206,19 @@ function validateFilesystemSkillReference(cwd: string, promptSource: PromptSourc
 	}
 }
 
-function flattenChainSteps(steps: ChainStepOrParallel[]): ChainStep[] {
-	const flattened: ChainStep[] = [];
-	for (const step of steps) {
-		if ("parallel" in step) {
-			flattened.push(...step.parallel);
-		} else {
-			flattened.push(step);
-		}
-	}
-	return flattened;
-}
-
-type LoadedPrompt = ReturnType<typeof loadPromptsWithModel>["prompts"] extends Map<string, infer P> ? P : never;
-
-function validateChainStepTarget(result: PromptValidationResult, prompt: LoadedPrompt, step: ChainStep, target: LoadedPrompt) {
-	if (target.chain) {
-		result.diagnostics.push(
-			createValidationDiagnostic(
-				"invalid-chain-step-target",
-				prompt.filePath,
-				prompt.source,
-				`Prompt template ${prompt.filePath} references chain step template ${JSON.stringify(step.name)}, but chain steps cannot target another chain template (${target.filePath}).`,
-			),
-		);
-	}
-}
-
-function validateParallelChainStepFlags(result: PromptValidationResult, prompt: LoadedPrompt, step: ChainStep) {
-	if (step.loopCount !== undefined) {
-		result.diagnostics.push(
-			createValidationDiagnostic(
-				"invalid-parallel-chain-step-flag",
-				prompt.filePath,
-				prompt.source,
-				`Prompt template ${prompt.filePath} references parallel chain step template ${JSON.stringify(step.name)}, but parallel() steps do not support per-task --loop.`,
-			),
-		);
-	}
-
-	if (step.withContext === true) {
-		result.diagnostics.push(
-			createValidationDiagnostic(
-				"invalid-parallel-chain-step-flag",
-				prompt.filePath,
-				prompt.source,
-				`Prompt template ${prompt.filePath} references parallel chain step template ${JSON.stringify(step.name)}, but parallel() steps do not support per-task --with-context.`,
-			),
-		);
-	}
-}
-
-function validateParallelRuntimeSettings(cwd: string, result: PromptValidationResult, prompts: ReturnType<typeof loadPromptsWithModel>["prompts"], prompt: LoadedPrompt, steps: ChainStep[]) {
-	const targets = steps
-		.map((step) => ({ step, target: prompts.get(step.name) }))
-		.filter((entry): entry is { step: ChainStep; target: LoadedPrompt } => entry.target !== undefined && !entry.target.chain);
-
-	const runtimeDelegatableTargets = targets;
-	if (targets.length < 2) return;
-
-	if (runtimeDelegatableTargets.length >= 2) {
-		const inheritModes = new Set(runtimeDelegatableTargets.map((entry) => entry.target.inheritContext === true ? "fork" : "fresh"));
-		if (inheritModes.size > 1) {
-			result.diagnostics.push(
-				createValidationDiagnostic(
-					"parallel-inherit-context-mismatch",
-					prompt.filePath,
-					prompt.source,
-					`Prompt template ${prompt.filePath} references parallel delegated chain steps with mixed inheritContext modes: ${runtimeDelegatableTargets.map((entry) => `${entry.step.name}=${entry.target.inheritContext === true ? "fork" : "fresh"}`).join(", ")}.`,
-				),
-			);
-		}
-	}
-
-	if (prompt.worktree === true) {
-		const effectiveCwds = new Set(targets.map((entry) => prompt.cwd ?? entry.target.cwd ?? cwd));
-		if (effectiveCwds.size > 1) {
-			result.diagnostics.push(
-				createValidationDiagnostic(
-					"parallel-worktree-mixed-cwd",
-					prompt.filePath,
-					prompt.source,
-					`Prompt template ${prompt.filePath} uses worktree: true, but parallel() step cwd values differ: ${Array.from(effectiveCwds).join(", ")}.`,
-				),
-			);
-		}
-	}
-}
-
-function validateParsedChainStepTargets(cwd: string, result: PromptValidationResult, prompts: ReturnType<typeof loadPromptsWithModel>["prompts"], prompt: LoadedPrompt, steps: ChainStepOrParallel[]) {
-	for (const step of steps) {
-		if ("parallel" in step) {
-			for (const parallelStep of step.parallel) {
-				validateParallelChainStepFlags(result, prompt, parallelStep);
-				const target = prompts.get(parallelStep.name);
-				if (!target) continue;
-				validateChainStepTarget(result, prompt, parallelStep, target);
-			}
-			validateParallelRuntimeSettings(cwd, result, prompts, prompt, step.parallel);
-			continue;
-		}
-
-		const target = prompts.get(step.name);
-		if (!target) continue;
-		validateChainStepTarget(result, prompt, step, target);
-	}
+function validateChainStepTarget(
+	result: PromptValidationResult,
+	prompt: PromptWithModel,
+	step: ChainStep,
+	target: PromptWithModel,
+): void {
+	if (!target.chain) return;
+	result.diagnostics.push(createValidationDiagnostic(
+		"invalid-chain-step-target",
+		prompt.filePath,
+		prompt.source,
+		`Prompt template ${prompt.filePath} references chain step template ${JSON.stringify(step.name)}, but chain steps cannot target another chain template (${target.filePath}).`,
+	));
 }
 
 function validatePromptChains(cwd: string, result: PromptValidationResult, prompts: ReturnType<typeof loadPromptsWithModel>["prompts"]) {
@@ -330,7 +237,7 @@ function validatePromptChains(cwd: string, result: PromptValidationResult, promp
 			continue;
 		}
 
-		const missingTemplates = flattenChainSteps(parsedChain.steps).filter((step) => !prompts.has(step.name));
+		const missingTemplates = parsedChain.steps.filter((step) => !prompts.has(step.name));
 		if (missingTemplates.length > 0) {
 			result.diagnostics.push(
 				createValidationDiagnostic(
@@ -342,84 +249,10 @@ function validatePromptChains(cwd: string, result: PromptValidationResult, promp
 			);
 		}
 
-		validateParsedChainStepTargets(cwd, result, prompts, prompt, parsedChain.steps);
-	}
-}
-
-function expandedSlotCount(slots: Array<{ count?: number }> | undefined): number {
-	return (slots ?? []).reduce((total, slot) => total + (slot.count ?? 1), 0);
-}
-
-function presetExpandedCallCount(preset: ResolvedBestOfNPreset, prompt: PromptWithModel): number {
-	const workerSlots = preset.workers ?? prompt.workers;
-	const reviewerSlots = preset.reviewers ?? prompt.reviewers;
-	return (workerSlots && workerSlots.length > 0 ? expandedSlotCount(workerSlots) : 1)
-		+ (reviewerSlots && reviewerSlots.length > 0 ? expandedSlotCount(reviewerSlots) : 1)
-		+ (prompt.finalApplier ? 1 : 0);
-}
-
-function validateComparePrompts(cwd: string, result: PromptValidationResult, prompts: ReturnType<typeof loadPromptsWithModel>["prompts"]) {
-	const catalogByCwd = new Map<string, ReturnType<typeof loadBestOfNPresetCatalog>>();
-	function catalogFor(catalogCwd: string) {
-		const key = resolvePath(catalogCwd);
-		let catalog = catalogByCwd.get(key);
-		if (!catalog) {
-			catalog = loadBestOfNPresetCatalog(catalogCwd);
-			catalogByCwd.set(key, catalog);
-			result.diagnostics.push(...catalog.diagnostics);
+		for (const step of parsedChain.steps) {
+			const target = prompts.get(step.name);
+			if (target) validateChainStepTarget(result, prompt, step, target);
 		}
-		return catalog;
-	}
-	for (const prompt of prompts.values()) {
-		if (prompt.preset) {
-			const presetCatalog = catalogFor(prompt.cwd ?? cwd);
-			const preset = presetCatalog.presets.get(prompt.preset);
-			if (!preset) {
-				result.diagnostics.push(
-					createValidationDiagnostic(
-						"best-of-n-preset-not-found",
-						prompt.filePath,
-						prompt.source,
-						`Prompt template ${prompt.filePath} references missing best-of-N preset ${JSON.stringify(prompt.preset)}.`,
-					),
-				);
-			} else if (preset.maxModelCalls !== undefined) {
-				const modelCalls = presetExpandedCallCount(preset, prompt);
-				if (modelCalls > preset.maxModelCalls) {
-					result.diagnostics.push(
-						createValidationDiagnostic(
-							"best-of-n-preset-cap-exceeded",
-							prompt.filePath,
-							prompt.source,
-							`Prompt template ${prompt.filePath} references best-of-N preset ${JSON.stringify(prompt.preset)}, but its expanded model calls (${modelCalls}) exceed maxModelCalls (${preset.maxModelCalls}).`,
-						),
-					);
-				}
-			}
-		}
-
-		if (prompt.finalApplier && prompt.worktree !== true) {
-			result.diagnostics.push(
-				createValidationDiagnostic(
-					"compare-final-applier-requires-worktree",
-					prompt.filePath,
-					prompt.source,
-					`Prompt template ${prompt.filePath} uses bestOfN.finalApplier, but finalApplier requires bestOfN.worktree: true.`,
-				),
-			);
-		}
-
-		if (prompt.worktree !== true || !prompt.workers || prompt.workers.length < 2) continue;
-		const workerCwds = new Set(prompt.workers.map((worker) => worker.cwd ?? prompt.cwd ?? cwd));
-		if (workerCwds.size <= 1) continue;
-		result.diagnostics.push(
-			createValidationDiagnostic(
-				"compare-worktree-mixed-worker-cwd",
-				prompt.filePath,
-				prompt.source,
-				`Prompt template ${prompt.filePath} uses bestOfN.worktree: true, but worker cwd values differ: ${Array.from(workerCwds).join(", ")}.`,
-			),
-		);
 	}
 }
 
@@ -487,7 +320,7 @@ export function collectChangedGatePredecessors(steps: readonly import("./chain-p
 	}
 }
 
-function effectiveAdaptiveActionCwd(wrapper: LoadedPrompt, step: import("./chain-parser.js").StructuredChainStep, prompts: ReturnType<typeof loadPromptsWithModel>["prompts"], cwd: string): string {
+function effectiveAdaptiveActionCwd(wrapper: PromptWithModel, step: import("./chain-parser.js").StructuredChainStep, prompts: ReturnType<typeof loadPromptsWithModel>["prompts"], cwd: string): string {
 	const target = prompts.get(step.target);
 	return step.kind === "run" ? target?.deterministic?.cwd ?? wrapper.cwd ?? cwd : cwd;
 }
@@ -514,11 +347,29 @@ function validateAdaptiveChains(cwd: string, result: PromptValidationResult, pro
 	}
 }
 
+function promptSkillResolutionCwd(prompt: PromptWithModel, cwd: string): string {
+	return prompt.subagent !== undefined ? (prompt.cwd ?? cwd) : cwd;
+}
+
 function validatePromptSkills(cwd: string, result: PromptValidationResult, prompts: ReturnType<typeof loadPromptsWithModel>["prompts"], options: PromptValidationOptions) {
 	const registeredSkills = collectRegisteredSkillCandidates(options.registeredSkills);
-	const filesystemSkillNames = collectFilesystemSkillNames(cwd);
 
 	for (const prompt of prompts.values()) {
+		const skillCwd = promptSkillResolutionCwd(prompt, cwd);
+		const delegatedCwdTrustError = prompt.subagent !== undefined
+			? getDelegatedCwdTrustError(cwd, skillCwd, options.projectTrusted !== false)
+			: undefined;
+		if (delegatedCwdTrustError) {
+			result.diagnostics.push(createValidationDiagnostic(
+				"delegated-cwd-trust",
+				prompt.filePath,
+				prompt.source,
+				`Prompt template ${prompt.filePath} cannot preflight its delegated cwd: ${delegatedCwdTrustError}`,
+			));
+			continue;
+		}
+		const includeProjectSkills = canResolveProjectSkills(cwd, skillCwd, options.projectTrusted !== false);
+		const filesystemSkillNames = collectFilesystemSkillNames(skillCwd, includeProjectSkills);
 		for (const skillName of uniqueSkillNames(prompt.skills)) {
 			if (isWildcardSelector(skillName)) {
 				const prefix = skillName.slice(0, -1);
@@ -538,7 +389,7 @@ function validatePromptSkills(cwd: string, result: PromptValidationResult, promp
 			}
 
 			if (validateRegisteredExactReference(registeredSkills, skillName, result)) continue;
-			if (validateFilesystemSkillReference(cwd, prompt.source, skillName, result)) continue;
+			if (validateFilesystemSkillReference(skillCwd, prompt.source, skillName, result, includeProjectSkills)) continue;
 
 			result.diagnostics.push(
 				createValidationDiagnostic(
@@ -590,14 +441,11 @@ function createEmptySourceSummary(): PromptValidationSourceSummary {
 }
 
 const SOURCE_SUMMARY_COMMAND_INTENT_DIAGNOSTIC_CODES = new Set([
-	"invalid-best-of-n",
 	"invalid-boomerang",
 	"invalid-boomerang-chain",
 	"invalid-chain",
 	"invalid-chain-context",
 	"invalid-chain-declaration",
-	"invalid-compare-frontmatter",
-	"invalid-compare-skills",
 	"invalid-converge",
 	"invalid-cwd",
 	"invalid-deterministic",
@@ -607,30 +455,24 @@ const SOURCE_SUMMARY_COMMAND_INTENT_DIAGNOSTIC_CODES = new Set([
 	"invalid-deterministic-loop",
 	"invalid-deterministic-mixed-shorthand",
 	"invalid-deterministic-non-interactive",
-	"invalid-deterministic-parallel",
 	"invalid-deterministic-run",
 	"invalid-deterministic-script",
 	"invalid-deterministic-subagent",
 	"invalid-deterministic-timeout",
-	"invalid-final-applier",
 	"invalid-fresh",
 	"invalid-inherit-context",
-	"invalid-lineup-chain",
-	"invalid-lineup-parallel",
-	"invalid-lineup-subagent",
 	"invalid-loop",
 	"duplicate-command-name",
 	"empty-chain",
 	"empty-model",
 	"invalid-model",
 	"invalid-model-spec",
-	"invalid-parallel",
 	"invalid-restore",
 	"invalid-rotate",
 	"invalid-skills",
 	"invalid-subagent",
 	"invalid-subagent-chain",
-	"invalid-worktree",
+	"unsupported-legacy-delegation",
 ]);
 
 function hasSourceSummaryCommandIntentDiagnostic(record: PromptSourceRecord, diagnostics: PromptLoaderDiagnostic[]): boolean {
@@ -686,7 +528,8 @@ export function validatePromptTemplates(cwd: string, options: PromptValidationOp
 		let skillPreamble: string | undefined;
 		if (prompt.subagent) {
 			const commands = (options.registeredSkills ?? []).map((skill) => ({ name: skill.skillName, source: "skill", sourceInfo: { path: skill.skillPath } }));
-			const resolved = resolvePromptSkills(getRequestedSkills(prompt), cwd, commands);
+			const skillCwd = promptSkillResolutionCwd(prompt, cwd);
+			const resolved = resolvePromptSkills(getRequestedSkills(prompt), skillCwd, commands, { includeProjectSkills: canResolveProjectSkills(cwd, skillCwd, options.projectTrusted !== false) });
 			if (resolved.kind === "ready" && resolved.skills.length > 0) {
 				skillPreamble = buildSkillLoadedMessage(resolved.skills).content;
 			}
@@ -703,7 +546,7 @@ export function validatePromptTemplates(cwd: string, options: PromptValidationOp
 				variants = variants.flatMap((variant) => choices.slice(0, 8).map((value) => ({ ...variant, [name]: value }))).slice(0, 64);
 			}
 			return variants.map((values) => {
-				const resolved = Object.fromEntries(Object.entries(values).map(([name, value]) => [name, { name, type: typeof value === "boolean" ? "boolean" : "string", value, source: "default" }]));
+				const resolved: Record<string, ResolvedPromptInput> = Object.fromEntries(Object.entries(values).map(([name, value]) => [name, { name, type: typeof value === "boolean" ? "boolean" : "string", value, source: "default" }]));
 				return renderTemplateConditionalsWithInputs(renderPromptInputValues(substitutedBody, resolved), { provider: "", id: "" }, values, prompt.name).content;
 			});
 		})() : undefined;
@@ -733,7 +576,6 @@ export function validatePromptTemplates(cwd: string, options: PromptValidationOp
 
 	validatePromptChains(cwd, result, loaded.prompts);
 	validateAdaptiveChains(cwd, result, loaded.prompts);
-	validateComparePrompts(cwd, result, loaded.prompts);
 	validatePromptSkills(cwd, result, loaded.prompts, options);
 	result.ok = result.diagnostics.length === 0;
 	return result;

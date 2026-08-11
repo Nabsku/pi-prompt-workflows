@@ -4,7 +4,6 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildPromptCommandDescription, collectPromptSourceRecords, loadPromptsWithModel, RESERVED_COMMAND_NAMES, resolveSkillPath, selectEffectivePromptSourceRecords } from "../prompt-loader.js";
-import { loadBestOfNPresetCatalog } from "../best-of-n-presets.js";
 
 function withTempHome(run: (root: string) => void) {
 	const root = mkdtempSync(join(tmpdir(), "pi-prompt-workflows-"));
@@ -821,15 +820,20 @@ test("prompt-library command marker matrix matches runtime and source inventory"
 			{ name: "converge-marker", frontmatter: `converge: false`, assertPrompt: (prompt) => assert.equal(prompt.converge, false) },
 			{ name: "boomerang-marker", frontmatter: `boomerang: true`, assertPrompt: (prompt) => assert.equal(prompt.boomerang, true) },
 			{ name: "subagent-marker", frontmatter: `subagent: true`, assertPrompt: (prompt) => assert.equal(prompt.subagent, true) },
-			{ name: "parallel-marker", frontmatter: `subagent: true\nparallel: 2`, assertPrompt: (prompt) => assert.equal(prompt.parallel, 2) },
 			{ name: "deterministic-marker", frontmatter: `deterministic:\n  run: echo hi`, assertPrompt: (prompt) => assert.equal(prompt.deterministic?.execution.command, "echo hi") },
 			{ name: "run-marker", frontmatter: `run: echo hi`, assertPrompt: (prompt) => assert.equal(prompt.deterministic?.execution.command, "echo hi") },
 			{ name: "script-marker", frontmatter: `script: ./script.sh`, assertPrompt: (prompt) => assert.equal(prompt.deterministic?.execution.path, "./script.sh") },
-			{ name: "best-of-n-marker", frontmatter: `bestOfN:\n  workers:\n    - model: claude-sonnet-4-20250514`, assertPrompt: (prompt) => assert.equal(prompt.workers?.length, 1) },
-			{ name: "worktree-marker", frontmatter: `subagent: true\nparallel: 2\nworktree: true`, assertPrompt: (prompt) => assert.equal(prompt.worktree, true) },
 		];
+		const legacyFixtures = [
+			{ name: "parallel-marker", frontmatter: `subagent: true\nparallel: 2` },
+			{ name: "best-of-n-marker", frontmatter: `bestOfN:\n  workers:\n    - model: claude-sonnet-4-20250514` },
+			{ name: "worktree-marker", frontmatter: `subagent: true\nworktree: true` },
+		] as const;
 
 		for (const fixture of fixtures) {
+			writeFileSync(join(projectLibrary, `${fixture.name}.md`), `---\n${fixture.frontmatter}\n---\nBody for ${fixture.name}`);
+		}
+		for (const fixture of legacyFixtures) {
 			writeFileSync(join(projectLibrary, `${fixture.name}.md`), `---\n${fixture.frontmatter}\n---\nBody for ${fixture.name}`);
 		}
 		writeFileSync(join(projectLibrary, "hidden-control.md"), "---\nhidden: true\ndescription: helper\n---\nHidden only");
@@ -845,6 +849,12 @@ test("prompt-library command marker matrix matches runtime and source inventory"
 			assert.equal(chainRuntime.prompts.has(fixture.name), true, `${fixture.name} should also load for chain resolution`);
 			assert.equal(sourceRecords.records.find((record) => record.promptName === fixture.name)?.promptCapable, true, `${fixture.name} should be command-capable in source inventory`);
 			fixture.assertPrompt?.(prompt);
+		}
+		for (const fixture of legacyFixtures) {
+			assert.equal(runtime.prompts.has(fixture.name), false);
+			assert.equal(chainRuntime.prompts.has(fixture.name), false);
+			assert.equal(runtime.diagnostics.some((diagnostic) => diagnostic.code === "unsupported-legacy-delegation" && diagnostic.filePath.endsWith(`${fixture.name}.md`)), true);
+			assert.equal(sourceRecords.records.find((record) => record.promptName === fixture.name)?.promptCapable, true);
 		}
 
 		for (const inert of ["hidden-control", "false-flags-control"]) {
@@ -1615,36 +1625,6 @@ test("loadPromptsWithModel accepts provider-qualified model specs with additiona
 	});
 });
 
-test("loadPromptsWithModel accepts nested provider-qualified model specs in bestOfN lineups", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(
-			join(cwd, ".pi", "prompts", "compare-nested-model.md"),
-			[
-				"---",
-				"bestOfN:",
-				"  workers:",
-				"    - model: openrouter/openai/gpt-5.4",
-				"  reviewers:",
-				"    - model: openrouter/openai/gpt-5.4",
-				"  finalApplier:",
-				"    model: openrouter/openai/gpt-5.4",
-				"---",
-				"$@",
-			].join("\n"),
-		);
-
-		const result = loadPromptsWithModel(cwd);
-		const prompt = result.prompts.get("compare-nested-model");
-		assert.ok(prompt);
-		assert.equal(prompt.workers?.[0]?.model, "openrouter/openai/gpt-5.4");
-		assert.equal(prompt.reviewers?.[0]?.model, "openrouter/openai/gpt-5.4");
-		assert.equal(prompt.finalApplier?.model, "openrouter/openai/gpt-5.4");
-		assert.equal(result.diagnostics.length, 0);
-	});
-});
-
 test("loadPromptsWithModel rejects model declarations with internal whitespace", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
@@ -2125,17 +2105,6 @@ test("loadPromptsWithModel rejects invalid parallel() chain declarations in fron
 	});
 });
 
-test("loadPromptsWithModel accepts single-item parallel() declarations", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "parallel-single.md"), '---\nchain: "parallel(scan-fe)"\n---\nignored');
-
-		const result = loadPromptsWithModel(cwd);
-		assert.equal(result.prompts.get("parallel-single")?.chain, "parallel(scan-fe)");
-	});
-});
-
 test("buildPromptCommandDescription includes loop metadata", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
@@ -2321,6 +2290,23 @@ test("resolveSkillPath searches project .pi, ancestor .agents, then global skill
 	});
 });
 
+test("resolveSkillPath can exclude project skills for untrusted sessions", () => {
+	withTempHome((root) => {
+		const repoRoot = join(root, "repo");
+		const cwd = join(repoRoot, "apps", "web");
+		mkdirSync(join(repoRoot, ".git"), { recursive: true });
+		mkdirSync(join(repoRoot, ".agents", "skills", "shadowed"), { recursive: true });
+		mkdirSync(join(root, ".pi", "agent", "skills"), { recursive: true });
+		writeFileSync(join(repoRoot, ".agents", "skills", "shadowed", "SKILL.md"), "project skill");
+		writeFileSync(join(root, ".pi", "agent", "skills", "shadowed.md"), "global skill");
+
+		assert.equal(
+			resolveSkillPath("shadowed", cwd, { includeProjectSkills: false }),
+			join(root, ".pi", "agent", "skills", "shadowed.md"),
+		);
+	});
+});
+
 test("resolveSkillPath falls back to ~/.agents/skills", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
@@ -2332,576 +2318,11 @@ test("resolveSkillPath falls back to ~/.agents/skills", () => {
 	});
 });
 
-test("loadPromptsWithModel validates parallel/worktree frontmatter combinations", () => {
-	withTempHome((root) => {
-		const cases = [
-			{
-				name: "parallel-review",
-				content: '---\nmodel: claude-sonnet-4-20250514\nsubagent: simplifier\ninheritContext: true\nparallel: 3\n---\nbody',
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					const prompt = result.prompts.get("parallel-review");
-					assert.ok(prompt);
-					assert.equal(prompt.parallel, 3);
-					assert.equal(prompt.subagent, "simplifier");
-					assert.equal(prompt.inheritContext, true);
-					assert.equal(result.diagnostics.filter((d) => d.message.includes("parallel")).length, 0);
-				},
-			},
-			{
-				name: "bad-parallel",
-				content: '---\nmodel: claude-sonnet-4-20250514\nsubagent: simplifier\nparallel: 1\n---\nbody',
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					const prompt = result.prompts.get("bad-parallel");
-					assert.ok(prompt);
-					assert.equal(prompt.parallel, undefined);
-					assert.ok(result.diagnostics.some((d) => d.message.includes("parallel") && d.message.includes("greater than or equal to 2")));
-				},
-			},
-			{
-				name: "plain-parallel",
-				content: '---\nmodel: claude-sonnet-4-20250514\nparallel: 3\n---\nbody',
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					const prompt = result.prompts.get("plain-parallel");
-					assert.ok(prompt);
-					assert.equal(prompt.parallel, undefined);
-					assert.ok(result.diagnostics.some((d) => d.message.includes("parallel") && d.message.includes('requires "subagent"')));
-				},
-			},
-			{
-				name: "chain-parallel-field",
-				content: '---\nchain: "review -> fix"\nparallel: 3\n---\nignored',
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					const prompt = result.prompts.get("chain-parallel-field");
-					assert.ok(prompt);
-					assert.equal(prompt.parallel, undefined);
-					assert.ok(result.diagnostics.some((d) => d.message.includes("parallel") && d.message.includes('cannot be combined with "chain"')));
-				},
-			},
-			{
-				name: "parallel-worktree",
-				content: '---\nmodel: claude-sonnet-4-20250514\nsubagent: simplifier\nparallel: 3\nworktree: true\n---\nbody',
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					const prompt = result.prompts.get("parallel-worktree");
-					assert.ok(prompt);
-					assert.equal(prompt.parallel, 3);
-					assert.equal(prompt.worktree, true);
-					assert.equal(result.diagnostics.filter((d) => d.message.includes("worktree")).length, 0);
-				},
-			},
-			{
-				name: "parallel-desc",
-				content: '---\ndescription: "Parallel simplify"\nmodel: claude-sonnet-4-20250514\nsubagent: simplifier\nparallel: 3\nworktree: true\n---\nbody',
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					const prompt = result.prompts.get("parallel-desc");
-					assert.ok(prompt);
-					const desc = buildPromptCommandDescription(prompt);
-					assert.match(desc, /parallel:3/);
-					assert.match(desc, /subagent:simplifier/);
-					assert.match(desc, /worktree/);
-				},
-			},
-			{
-				name: "wt-pipeline",
-				content: '---\nchain: "parallel(scan-fe, scan-be) -> review"\nworktree: true\n---\nignored',
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					const prompt = result.prompts.get("wt-pipeline");
-					assert.ok(prompt);
-					assert.equal(prompt.worktree, true);
-					assert.equal(result.diagnostics.filter((d) => d.message.includes("worktree")).length, 0);
-				},
-			},
-			{
-				name: "plain",
-				content: '---\nmodel: claude-sonnet-4-20250514\nworktree: true\n---\nbody',
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					const prompt = result.prompts.get("plain");
-					assert.ok(prompt);
-					assert.equal(prompt.worktree, undefined);
-					assert.ok(result.diagnostics.some((d) => d.message.includes("worktree") && d.message.includes("requires")));
-				},
-			},
-			{
-				name: "seq-chain",
-				content: '---\nchain: "analyze -> fix"\nworktree: true\n---\nignored',
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					const prompt = result.prompts.get("seq-chain");
-					assert.ok(prompt);
-					assert.equal(prompt.worktree, undefined);
-					assert.ok(result.diagnostics.some((d) => d.message.includes("worktree") && d.message.includes("parallel")));
-				},
-			},
-			{
-				name: "bad-wt",
-				content: '---\nchain: "parallel(a, b) -> c"\nworktree: 42\n---\nignored',
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					const prompt = result.prompts.get("bad-wt");
-					assert.ok(prompt);
-					assert.equal(prompt.worktree, undefined);
-					assert.ok(result.diagnostics.some((d) => d.message.includes("worktree") && d.message.includes("must be true or false")));
-				},
-			},
-			{
-				name: "wt-only",
-				content: '---\nchain: "parallel(a, b)"\nworktree: true\n---\nignored',
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					assert.ok(result.prompts.has("wt-only"));
-				},
-			},
-			{
-				name: "wt-desc",
-				content: '---\nchain: "parallel(scan-fe, scan-be) -> review"\nworktree: true\ndescription: "Parallel scan"\n---\nignored',
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					const prompt = result.prompts.get("wt-desc");
-					assert.ok(prompt);
-					const desc = buildPromptCommandDescription(prompt);
-					assert.match(desc, /worktree/);
-					assert.match(desc, /\[chain:.*worktree\]/);
-				},
-			},
-		] as const;
-
-		for (const testCase of cases) {
-			const cwd = join(root, testCase.name);
-			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-			writeFileSync(join(cwd, ".pi", "prompts", `${testCase.name}.md`), testCase.content);
-			testCase.check(loadPromptsWithModel(cwd));
-		}
-	});
-});
-
-test("loadPromptsWithModel parses the shipped best-of-n example", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "best-of-n.md"), readFileSync(new URL("../examples/best-of-n.md", import.meta.url), "utf8"));
-
-		const result = loadPromptsWithModel(cwd);
-		const prompt = result.prompts.get("best-of-n");
-		assert.ok(prompt);
-		assert.equal(prompt.description, "Best-of-N code task with parallel workers using different models in separate worktrees, parallel reviewers, and a final apply step that picks or synthesizes the final patch.");
-		assert.equal(prompt.worktree, true);
-		assert.equal(prompt.workers?.length, 2);
-		assert.deepEqual(
-			prompt.workers?.map((slot) => ({ agent: slot.agent, model: slot.model, count: slot.count, taskSuffix: slot.taskSuffix })),
-			[
-				{ agent: "delegate", model: "openai-codex/gpt-5.3-codex-spark:low", count: 3, taskSuffix: undefined },
-				{ agent: "delegate", model: "openai-codex/gpt-5.4-mini:high", count: 2, taskSuffix: undefined },
-			],
-		);
-		assert.equal(prompt.reviewers?.length, 2);
-		assert.deepEqual(
-			prompt.reviewers?.map((slot) => ({ agent: slot.agent, model: slot.model, count: slot.count, taskSuffix: slot.taskSuffix })),
-			[
-				{ agent: "reviewer", model: "openai-codex/gpt-5.3-codex-spark:medium", count: 2, taskSuffix: undefined },
-				{ agent: "reviewer", model: "openai-codex/gpt-5.4-mini:high", count: undefined, taskSuffix: "Focus extra attention on regression risk and missing edge cases." },
-			],
-		);
-		assert.deepEqual(prompt.finalApplier, {
-			agent: "delegate",
-			model: "openai-codex/gpt-5.4-mini:xhigh",
-			taskSuffix: "Apply the final patch directly on the current branch, run best-effort relevant verification, and report changed files plus verification run.",
-		});
-		assert.equal(prompt.content, "$@");
-		assert.match(buildPromptCommandDescription(prompt), /workers:5/);
-		assert.match(buildPromptCommandDescription(prompt), /reviewers:3/);
-		assert.match(buildPromptCommandDescription(prompt), /final-applier/);
-		assert.equal(result.diagnostics.length, 0);
-	});
-});
-
-test("loadPromptsWithModel accepts bestOfN preset-only commands and preset catalog precedence", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(root, ".pi", "agent"), { recursive: true });
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		mkdirSync(join(cwd, ".pi"), { recursive: true });
-		writeFileSync(
-			join(root, ".pi", "agent", "best-of-n-presets.json"),
-			JSON.stringify({
-				presets: {
-					quick: {
-						defaultModel: "openai/gpt-5.4-mini",
-						workers: [{ agent: "delegate", count: 2 }],
-						reviewers: [{ subagent: true }],
-					},
-				},
-			}),
-		);
-		writeFileSync(
-			join(cwd, ".pi", "best-of-n-presets.json"),
-			JSON.stringify({
-				presets: {
-					quick: {
-						description: "project override",
-						defaultModel: "anthropic/claude-sonnet-4-20250514",
-						workers: [{ agent: "delegate" }],
-					},
-					deep: {
-						workers: [{ agent: "delegate", model: "openai/gpt-5.4", count: 3 }],
-						reviewers: [{ agent: "reviewer", count: 2 }],
-						maxModelCalls: 6,
-					},
-				},
-			}),
-		);
-		writeFileSync(join(cwd, ".pi", "prompts", "compare.md"), "---\nbestOfN:\n  preset: quick\n---\n$@");
-
-		const promptResult = loadPromptsWithModel(cwd);
-		const prompt = promptResult.prompts.get("compare");
-		assert.ok(prompt);
-		assert.equal(prompt.preset, "quick");
-		assert.equal(prompt.workers, undefined);
-		assert.equal(prompt.reviewers, undefined);
-		assert.equal(promptResult.diagnostics.length, 0);
-
-		const catalog = loadBestOfNPresetCatalog(cwd);
-		assert.equal(catalog.diagnostics.length, 0);
-		assert.equal(catalog.presets.get("quick")?.source, "project");
-		assert.equal(catalog.presets.get("quick")?.description, "project override");
-		assert.equal(catalog.presets.get("quick")?.workers?.[0]?.model, undefined);
-		assert.equal(catalog.presets.get("deep")?.workers?.[0]?.count, 3);
-		assert.equal(catalog.presets.get("deep")?.reviewers?.[0]?.count, 2);
-		assert.equal(catalog.presets.get("deep")?.maxModelCalls, 6);
-	});
-});
-
-test("loadBestOfNPresetCatalog rejects invalid preset files and presets", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(root, ".pi", "agent"), { recursive: true });
-		mkdirSync(join(cwd, ".pi"), { recursive: true });
-		writeFileSync(
-			join(root, ".pi", "agent", "best-of-n-presets.json"),
-			JSON.stringify({ presets: { badEmpty: { workers: [{ agent: "delegate" }] }, badPartial: { workers: [{ agent: "delegate" }] } } }),
-		);
-		writeFileSync(
-			join(cwd, ".pi", "best-of-n-presets.json"),
-			JSON.stringify({
-				presets: {
-					badEmpty: { workers: [] },
-					badPartial: { workers: [], reviewers: [{ agent: "reviewer" }] },
-					badPolicy: { workers: [{ agent: "delegate", taskSuffix: "do more", cwd: "/tmp/repo" }] },
-					badTopLevel: { workers: [{ agent: "delegate" }], commit: "auto" },
-					badModel: { workers: [{ model: "bad model" }] },
-					badCap: { workers: [{ agent: "delegate" }], maxModelCalls: 0 },
-					good: { workers: [{ subagent: true, count: "2" }] },
-				},
-			}),
-		);
-
-		const catalog = loadBestOfNPresetCatalog(cwd);
-		assert.deepEqual([...catalog.presets.keys()], ["good"]);
-		assert.deepEqual([...catalog.invalidPresetNames].sort(), ["badCap", "badEmpty", "badModel", "badPartial", "badPolicy", "badTopLevel"]);
-		assert.equal(catalog.presets.get("good")?.workers?.[0]?.agent, "delegate");
-		assert.equal(catalog.presets.get("good")?.workers?.[0]?.count, 2);
-		assert.equal(catalog.diagnostics.filter((diagnostic) => diagnostic.code === "invalid-best-of-n-preset").length, 6);
-		assert.match(catalog.diagnostics.map((diagnostic) => diagnostic.message).join("\n"), /unsupported field\(s\): taskSuffix, cwd/);
-		assert.match(catalog.diagnostics.map((diagnostic) => diagnostic.message).join("\n"), /unsupported field\(s\): commit/);
-	});
-});
-
-test("loadBestOfNPresetCatalog fails closed when project preset file is invalid", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(root, ".pi", "agent"), { recursive: true });
-		mkdirSync(join(cwd, ".pi"), { recursive: true });
-		writeFileSync(join(root, ".pi", "agent", "best-of-n-presets.json"), JSON.stringify({ presets: { quick: { workers: [{ agent: "delegate" }] } } }));
-		writeFileSync(join(cwd, ".pi", "best-of-n-presets.json"), "{ not json");
-
-		const catalog = loadBestOfNPresetCatalog(cwd);
-
-		assert.equal(catalog.projectFileInvalid, true);
-		assert.equal(catalog.presets.has("quick"), false);
-		assert.equal(catalog.diagnostics.some((diagnostic) => diagnostic.code === "invalid-best-of-n-presets-file"), true);
-	});
-});
-
-test("loadPromptsWithModel validates bestOfN compare lineups and cutover diagnostics", () => {
-	withTempHome((root) => {
-		const cases = [
-			{
-				name: "compare",
-				content: [
-					"---",
-					"description: Compare",
-					"bestOfN:",
-					"  workers:",
-					"    - model: openai/gpt-5.4",
-					"      taskSuffix: Save findings to notes/a.md",
-					"      count: 3",
-					"    - subagent: delegate",
-					"  reviewers:",
-					"    - taskSuffix: Prefer findings files over prose summaries.",
-					"      cwd: /tmp/repo",
-					"      count: 2",
-					"  finalApplier:",
-					"    model: openai-codex/gpt-5.4:low",
-					"    taskSuffix: Prefer merge plans over narrow wins when the diffs justify it.",
-					"  commit: ask",
-					"  worktree: true",
-					"---",
-					"$@",
-				].join("\n"),
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					const prompt = result.prompts.get("compare");
-					assert.ok(prompt);
-					assert.equal(prompt.workers?.length, 2);
-					assert.equal(prompt.workers?.[0]?.agent, "delegate");
-					assert.equal(prompt.workers?.[0]?.model, "openai/gpt-5.4");
-					assert.equal(prompt.workers?.[0]?.taskSuffix, "Save findings to notes/a.md");
-					assert.equal(prompt.workers?.[0]?.count, 3);
-					assert.equal(prompt.workers?.[1]?.agent, "delegate");
-					assert.equal(prompt.reviewers?.length, 1);
-					assert.equal(prompt.reviewers?.[0]?.agent, "reviewer");
-					assert.equal(prompt.reviewers?.[0]?.taskSuffix, "Prefer findings files over prose summaries.");
-					assert.equal(prompt.reviewers?.[0]?.cwd, "/tmp/repo");
-					assert.equal(prompt.reviewers?.[0]?.count, 2);
-					assert.equal(prompt.finalApplier?.agent, "delegate");
-					assert.equal(prompt.finalApplier?.model, "openai-codex/gpt-5.4:low");
-					assert.equal(prompt.finalApplier?.taskSuffix, "Prefer merge plans over narrow wins when the diffs justify it.");
-					assert.equal(prompt.commit, "ask");
-					assert.equal(prompt.worktree, true);
-					assert.match(buildPromptCommandDescription(prompt), /workers:4/);
-					assert.match(buildPromptCommandDescription(prompt), /reviewers:2/);
-					assert.match(buildPromptCommandDescription(prompt), /final-applier/);
-					assert.match(buildPromptCommandDescription(prompt), /commit:ask/);
-				},
-			},
-			{
-				name: "compare-with-skills",
-				content: [
-					"---",
-					"skills: [tmux]",
-					"bestOfN:",
-					"  workers:",
-					"    - model: openai/gpt-5.4",
-					"---",
-					"$@",
-				].join("\n"),
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					assert.equal(result.prompts.has("compare-with-skills"), false);
-					assert.ok(result.diagnostics.some((d) => d.code === "invalid-compare-skills" && d.message.includes('cannot be combined with "skill" or "skills"')));
-				},
-			},
-			{
-				name: "legacy-workers",
-				content: [
-					"---",
-					"model: claude-sonnet-4-20250514",
-					"workers:",
-					"  - agent: delegate",
-					"---",
-					"$@",
-				].join("\n"),
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					assert.equal(result.prompts.has("legacy-workers"), false);
-					assert.ok(result.diagnostics.some((d) => d.message.includes("bestOfN.workers")));
-					assert.ok(result.diagnostics.some((d) => d.message.includes('compare template authoring moved under "bestOfN:"')));
-				},
-			},
-			{
-				name: "legacy-reviewers",
-				content: [
-					"---",
-					"model: claude-sonnet-4-20250514",
-					"reviewers:",
-					"  - agent: reviewer",
-					"---",
-					"$@",
-				].join("\n"),
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					assert.equal(result.prompts.has("legacy-reviewers"), false);
-					assert.ok(result.diagnostics.some((d) => d.message.includes("bestOfN.reviewers")));
-					assert.ok(result.diagnostics.some((d) => d.message.includes('compare template authoring moved under "bestOfN:"')));
-				},
-			},
-			{
-				name: "legacy-final-applier",
-				content: [
-					"---",
-					"model: claude-sonnet-4-20250514",
-					"finalApplier:",
-					"  agent: reviewer",
-					"---",
-					"$@",
-				].join("\n"),
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					assert.equal(result.prompts.has("legacy-final-applier"), false);
-					assert.ok(result.diagnostics.some((d) => d.message.includes("bestOfN.finalApplier")));
-					assert.ok(result.diagnostics.some((d) => d.message.includes('compare template authoring moved under "bestOfN:"')));
-				},
-			},
-			{
-				name: "mixed-top-level-and-bestofn",
-				content: [
-					"---",
-					"workers:",
-					"  - agent: reviewer",
-					"bestOfN:",
-					"  workers:",
-					"    - model: openai/gpt-5.4",
-					"---",
-					"$@",
-				].join("\n"),
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					const prompt = result.prompts.get("mixed-top-level-and-bestofn");
-					assert.ok(prompt);
-					assert.equal(prompt.workers?.length, 1);
-					assert.equal(prompt.workers?.[0]?.agent, "delegate");
-					assert.equal(prompt.workers?.[0]?.model, "openai/gpt-5.4");
-					assert.ok(result.diagnostics.some((d) => d.message.includes("bestOfN.workers")));
-				},
-			},
-			{
-				name: "top-level-worktree-with-bestofn",
-				content: [
-					"---",
-					"worktree: false",
-					"bestOfN:",
-					"  workers:",
-					"    - model: openai/gpt-5.4",
-					"  worktree: true",
-					"---",
-					"$@",
-				].join("\n"),
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					const prompt = result.prompts.get("top-level-worktree-with-bestofn");
-					assert.ok(prompt);
-					assert.equal(prompt.worktree, true);
-					assert.ok(result.diagnostics.some((d) => d.message.includes("bestOfN.worktree")));
-				},
-			},
-			{
-				name: "bad-final-cwd",
-				content: [
-					"---",
-					"bestOfN:",
-					"  workers:",
-					"    - model: openai/gpt-5.4",
-					"  finalApplier:",
-					"    cwd: /tmp/other-repo",
-					"---",
-					"$@",
-				].join("\n"),
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					const prompt = result.prompts.get("bad-final-cwd");
-					assert.ok(prompt);
-					assert.equal(prompt.finalApplier, undefined);
-					assert.ok(result.diagnostics.some((d) => d.message.includes("finalApplier") && d.message.includes("cwd") && d.message.includes("not supported")));
-				},
-			},
-			{
-				name: "bad-final-count",
-				content: [
-					"---",
-					"bestOfN:",
-					"  workers:",
-					"    - model: openai/gpt-5.4",
-					"  finalApplier:",
-					"    count: 2",
-					"---",
-					"$@",
-				].join("\n"),
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					const prompt = result.prompts.get("bad-final-count");
-					assert.ok(prompt);
-					assert.equal(prompt.finalApplier, undefined);
-					assert.ok(result.diagnostics.some((d) => d.message.includes("finalApplier") && d.message.includes("count") && d.message.includes("not supported")));
-				},
-			},
-			{
-				name: "bad-commit-without-final-applier",
-				content: [
-					"---",
-					"bestOfN:",
-					"  workers:",
-					"    - model: openai/gpt-5.4",
-					"  commit: ask",
-					"---",
-					"$@",
-				].join("\n"),
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					const prompt = result.prompts.get("bad-commit-without-final-applier");
-					assert.ok(prompt);
-					assert.equal(prompt.commit, undefined);
-					assert.ok(result.diagnostics.some((d) => d.code === "invalid-best-of-n-commit" && d.message.includes("requires bestOfN.finalApplier")));
-				},
-			},
-			{
-				name: "bad-commit-value",
-				content: [
-					"---",
-					"bestOfN:",
-					"  workers:",
-					"    - model: openai/gpt-5.4",
-					"  finalApplier:",
-					"    model: openai/gpt-5.4",
-					"  commit: auto",
-					"---",
-					"$@",
-				].join("\n"),
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					const prompt = result.prompts.get("bad-commit-value");
-					assert.ok(prompt);
-					assert.equal(prompt.commit, undefined);
-					assert.ok(result.diagnostics.some((d) => d.code === "invalid-best-of-n-commit" && d.message.includes('expected "ask"')));
-				},
-			},
-			{
-				name: "bad-bestofn-root",
-				content: [
-					"---",
-					"model: claude-sonnet-4-20250514",
-					"bestOfN: true",
-					"---",
-					"$@",
-				].join("\n"),
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					assert.equal(result.prompts.has("bad-bestofn-root"), false);
-					assert.ok(result.diagnostics.some((d) => d.message.includes('"bestOfN" must be an object')));
-					assert.ok(result.diagnostics.some((d) => d.message.includes('"bestOfN" did not produce a valid compare configuration')));
-				},
-			},
-			{
-				name: "compare-subagent",
-				content: [
-					"---",
-					"model: claude-sonnet-4-20250514",
-					"subagent: true",
-					"bestOfN:",
-					"  workers:",
-					"    - model: openai/gpt-5.4",
-					"  finalApplier:",
-					"    model: openai/gpt-5.4:low",
-					"---",
-					"$@",
-				].join("\n"),
-				check(result: ReturnType<typeof loadPromptsWithModel>) {
-					assert.equal(result.prompts.has("compare-subagent"), false);
-					assert.ok(result.diagnostics.some((d) => d.message.includes("finalApplier") && d.message.includes("subagent")));
-					assert.ok(result.diagnostics.some((d) => d.message.includes('"bestOfN" did not produce a valid compare configuration')));
-				},
-			},
-		] as const;
-
-		for (const testCase of cases) {
-			const cwd = join(root, testCase.name);
-			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-			writeFileSync(join(cwd, ".pi", "prompts", `${testCase.name}.md`), testCase.content);
-			testCase.check(loadPromptsWithModel(cwd));
-		}
-	});
-});
-
 test("reserved built-in command mirror is explicit", () => {
 	assert.deepEqual([...RESERVED_COMMAND_NAMES].sort(), [
-		"best-of-n-presets",
-		"best-of-n-runs",
 		"chain-prompts",
 		"changelog",
 		"compact",
-		"compare-presets",
-		"compare-runs",
 		"copy",
 		"dry-run-prompt",
 		"export",

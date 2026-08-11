@@ -1,10 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import promptModelExtension from "../index.ts";
 import {
+	PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT,
+	PROMPT_TEMPLATE_PROMPT_INVOKE_ACK_EVENT,
+	PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION,
+	PROMPT_TEMPLATE_PROMPT_INVOKE_REQUEST_EVENT,
+	PROMPT_TEMPLATE_PROMPT_STARTED_EVENT,
+	PROMPT_TEMPLATE_PROMPT_PROTOCOL_VERSION,
 	PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT,
 	PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT,
 	PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT,
@@ -28,6 +34,7 @@ class FakePi {
 	tools = new Map<string, FakeTool>();
 	hooks = new Map<string, Array<(event: any, ctx: any) => Promise<any> | any>>();
 	bus = new Map<string, Array<(data: unknown) => void>>();
+
 	events = {
 		emit: (channel: string, data: unknown) => {
 			for (const handler of this.bus.get(channel) ?? []) {
@@ -109,6 +116,46 @@ class FakePi {
 	sendMessage(_message?: any) {}
 }
 
+function emitSubagentStarted(pi: FakePi, request: any): void {
+	pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, {
+		requestId: request.requestId,
+		ownerRunId: request.ownerRunId,
+		nodeId: request.nodeId,
+	});
+}
+
+function emitSubagentCompleted(pi: FakePi, request: any, text: string, toolCalls = 0): void {
+	pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+		requestId: request.requestId,
+		ownerRunId: request.ownerRunId,
+		nodeId: request.nodeId,
+		status: "completed",
+		agent: request.agent,
+		model: request.model,
+		result: { kind: "text", text },
+		usage: {
+			input: 120,
+			output: 34,
+			cacheRead: 5,
+			cacheWrite: 6,
+			cost: 0.1234,
+			turns: 3,
+			toolCalls,
+			durationMs: 1500,
+		},
+	});
+}
+
+function emitSubagentFailed(pi: FakePi, request: any, error: string): void {
+	pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+		requestId: request.requestId,
+		ownerRunId: request.ownerRunId,
+		nodeId: request.nodeId,
+		status: "failed",
+		error,
+	});
+}
+
 function stripLoopPrefix(msg: string): string {
 	return msg.replace(/^\[.*?\]\n\n/, "");
 }
@@ -129,9 +176,15 @@ function createContext(
 	cwd: string,
 	pi: FakePi,
 	models: Array<{ provider: string; id: string }> = [ACTIVE_MODEL],
-	options?: { branchEntries?: () => any[]; waitForIdle?: () => Promise<void> },
+	options?: { branchEntries?: () => any[]; isIdle?: () => boolean; waitForIdle?: () => Promise<void> },
 ) {
 	let navigateCount = 0;
+	let idle = options?.isIdle?.() ?? true;
+	const originalSendUserMessage = pi.sendUserMessage.bind(pi);
+	pi.sendUserMessage = (content: string) => {
+		idle = false;
+		originalSendUserMessage(content);
+	};
 	const notifications: string[] = [];
 	const modelRegistry = {
 		find(provider: string, modelId: string) {
@@ -173,12 +226,13 @@ function createContext(
 			},
 		},
 		isIdle() {
-			return false;
+			return idle;
 		},
 		async waitForIdle() {
 			if (options?.waitForIdle) {
 				await options.waitForIdle();
 			}
+			idle = true;
 		},
 		sessionManager: {
 			getLeafId() {
@@ -229,6 +283,1006 @@ test("initializes prompt commands from session cwd, not process cwd", async () =
 	});
 });
 
+test("emits one defensive lifecycle pair for a direct prompt run", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "inline.md"), `---\nmodel: ${MODEL_ID}\n---\ninline task`);
+
+		const pi = new FakePi();
+		const lifecycle: Array<{ channel: string; data: any }> = [];
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_STARTED_EVENT, (data) => lifecycle.push({ channel: PROMPT_TEMPLATE_PROMPT_STARTED_EVENT, data }));
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, (data) => lifecycle.push({ channel: PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, data }));
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_STARTED_EVENT, () => { throw new Error("observer failure"); });
+		promptModelExtension(pi as never);
+		const { ctx, getNotifications } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("inline")!.handler("", ctx);
+
+		assert.equal(lifecycle.length, 2);
+		assert.equal(lifecycle[0]!.channel, PROMPT_TEMPLATE_PROMPT_STARTED_EVENT);
+		assert.equal(lifecycle[1]!.channel, PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT);
+		assert.equal(lifecycle[0]!.data.protocolVersion, PROMPT_TEMPLATE_PROMPT_PROTOCOL_VERSION);
+		assert.equal(lifecycle[1]!.data.protocolVersion, PROMPT_TEMPLATE_PROMPT_PROTOCOL_VERSION);
+		assert.equal(lifecycle[0]!.data.name, "inline");
+		assert.equal(lifecycle[1]!.data.name, "inline");
+		assert.equal(lifecycle[0]!.data.runId, lifecycle[1]!.data.runId);
+		assert.equal(lifecycle[1]!.data.status, "completed");
+		assert.equal(lifecycle[1]!.data.changed, false);
+		assert.deepEqual(getNotifications(), ["Prompt lifecycle observer failed: observer failure"]);
+	});
+});
+
+test("a finished observer can synchronously invoke the next prompt", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "first.md"), `---\nmodel: ${MODEL_ID}\n---\nfirst task`);
+		writeFileSync(join(cwd, ".pi", "prompts", "second.md"), `---\nmodel: ${MODEL_ID}\n---\nsecond task`);
+
+		const pi = new FakePi();
+		const acknowledgements: any[] = [];
+		let invokedSecond = false;
+		let resolveSecondFinished!: (payload: any) => void;
+		const secondFinished = new Promise<any>((resolve) => { resolveSecondFinished = resolve; });
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_INVOKE_ACK_EVENT, (payload) => acknowledgements.push(payload));
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, (payload: any) => {
+			if (payload.name === "first" && !invokedSecond) {
+				invokedSecond = true;
+				pi.events.emit(PROMPT_TEMPLATE_PROMPT_INVOKE_REQUEST_EVENT, {
+					protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION,
+					requestId: "finished-observer-next",
+					name: "second",
+				});
+			}
+			if (payload.name === "second") resolveSecondFinished(payload);
+		});
+		promptModelExtension(pi as never);
+		const { ctx } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("first")!.handler("", ctx);
+		const payload = await Promise.race([
+			secondFinished,
+			new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 100)),
+		]);
+
+		assert.equal(acknowledgements.length, 1);
+		assert.equal(acknowledgements[0].accepted, true);
+		assert.equal(payload?.status, "completed");
+		assert.deepEqual(pi.userMessages, ["first task", "second task"]);
+	});
+});
+
+test("a direct ordinary prompt reports an assistant error stop as failed", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "error.md"), `---\nmodel: ${MODEL_ID}\n---\nerror task`);
+
+		const pi = new FakePi();
+		let finishedPayload: any;
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, (payload) => { finishedPayload = payload; });
+		promptModelExtension(pi as never);
+		const entries = () => pi.userMessages.length === 0 ? [] : [{
+			id: "error-terminal",
+			type: "message",
+			message: { role: "assistant", stopReason: "error", content: [], errorMessage: "provider failed" },
+		}];
+		const { ctx } = createContext(cwd, pi, [ACTIVE_MODEL], { branchEntries: entries });
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("error")!.handler("", ctx);
+
+		assert.equal(finishedPayload.status, "failed");
+		assert.deepEqual(pi.userMessages, ["error task"]);
+	});
+});
+
+test("chain template validation failure emits failed lifecycle status", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), "---\nchain: missing\n---\nignored");
+
+		const pi = new FakePi();
+		const lifecycle: Array<{ channel: string; data: any }> = [];
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_STARTED_EVENT, (data) => lifecycle.push({ channel: PROMPT_TEMPLATE_PROMPT_STARTED_EVENT, data }));
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, (data) => lifecycle.push({ channel: PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, data }));
+		promptModelExtension(pi as never);
+		const { ctx, getNotifications } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("pipeline")!.handler("", ctx);
+
+		assert.match(getNotifications().join("\n"), /Templates not found: missing/);
+		assert.equal(lifecycle.length, 2);
+		assert.equal(lifecycle[0]!.channel, PROMPT_TEMPLATE_PROMPT_STARTED_EVENT);
+		assert.equal(lifecycle[1]!.channel, PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT);
+		assert.equal(lifecycle[0]!.data.runId, lifecycle[1]!.data.runId);
+		assert.equal(lifecycle[1]!.data.name, "pipeline");
+		assert.equal(lifecycle[1]!.data.status, "failed");
+	});
+});
+
+test("accepts prompt invocation requests and correlates lifecycle events", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "invoke.md"), `---\nmodel: ${MODEL_ID}\n---\ninvoked $@`);
+
+		const pi = new FakePi();
+		const acknowledgements: any[] = [];
+		const lifecycle: any[] = [];
+		let resolveFinished!: (payload: any) => void;
+		const finished = new Promise<any>((resolve) => { resolveFinished = resolve; });
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_INVOKE_ACK_EVENT, (payload) => acknowledgements.push(payload));
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_INVOKE_ACK_EVENT, () => { throw new Error("ack observer failure"); });
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_STARTED_EVENT, (payload) => lifecycle.push(payload));
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, (payload) => {
+			lifecycle.push(payload);
+			resolveFinished(payload);
+		});
+		promptModelExtension(pi as never);
+		const { ctx, getNotifications } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+
+		pi.events.emit(PROMPT_TEMPLATE_PROMPT_INVOKE_REQUEST_EVENT, {
+			protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION,
+			requestId: "graph-1",
+			name: "invoke",
+			args: "hello world",
+		});
+
+		const finishedPayload = await finished;
+		assert.equal(acknowledgements.length, 1);
+		assert.equal(acknowledgements[0].accepted, true);
+		assert.equal(acknowledgements[0].protocolVersion, PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION);
+		assert.equal(acknowledgements[0].requestId, "graph-1");
+		assert.equal(acknowledgements[0].name, "invoke");
+		assert.equal(acknowledgements[0].runId, lifecycle[0].runId);
+		assert.equal(finishedPayload.runId, acknowledgements[0].runId);
+		assert.equal(lifecycle.length, 2);
+		assert.equal(finishedPayload.name, "invoke");
+		assert.equal(finishedPayload.status, "completed");
+		assert.equal(pi.userMessages.at(-1), "invoked hello world");
+		assert.deepEqual(getNotifications(), ["Prompt invocation observer failed: ack observer failure"]);
+	});
+});
+
+test("accepted prompt invocation waits when an acknowledgement observer starts compaction", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "invoke.md"), `---\nmodel: ${MODEL_ID}\n---\ninvoked`);
+
+		const pi = new FakePi();
+		let ctx: ReturnType<typeof createContext>["ctx"];
+		let compactionStarted: Promise<void> | undefined;
+		let resolveFinished!: (payload: any) => void;
+		const finished = new Promise<any>((resolve) => { resolveFinished = resolve; });
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_INVOKE_ACK_EVENT, (payload: any) => {
+			if (payload.accepted) compactionStarted = pi.emit("session_before_compact", { signal: new AbortController().signal }, ctx);
+		});
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, resolveFinished);
+		promptModelExtension(pi as never);
+		({ ctx } = createContext(cwd, pi));
+		await pi.emit("session_start", {}, ctx);
+
+		pi.events.emit(PROMPT_TEMPLATE_PROMPT_INVOKE_REQUEST_EVENT, {
+			protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION,
+			requestId: "compaction-after-ack",
+			name: "invoke",
+		});
+		await compactionStarted;
+		await new Promise((resolve) => setImmediate(resolve));
+		const messagesBeforeCompactionFinished = [...pi.userMessages];
+		await pi.emit("session_compact", {}, ctx);
+		const payload = await finished;
+
+		assert.deepEqual(messagesBeforeCompactionFinished, []);
+		assert.deepEqual(pi.userMessages, ["invoked"]);
+		assert.equal(payload.status, "completed");
+	});
+});
+
+test("accepted invocation follows the original host send when compaction fails without a terminal event", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "invoke.md"), `---\nmodel: ${MODEL_ID}\n---\ninvoked`);
+
+		const pi = new FakePi();
+		let resolveFinished!: (payload: any) => void;
+		const finished = new Promise<any>((resolve) => { resolveFinished = resolve; });
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, resolveFinished);
+		promptModelExtension(pi as never);
+		const { ctx } = createContext(cwd, pi);
+		const acceptedSend = pi.sendUserMessage.bind(pi);
+		let sendCalls = 0;
+		let resolveCompactionStarted!: () => void;
+		const compactionStarted = new Promise<void>((resolve) => { resolveCompactionStarted = resolve; });
+		pi.sendUserMessage = () => {
+			sendCalls++;
+			setTimeout(() => {
+				void pi.emit("session_before_compact", { signal: new AbortController().signal }, ctx)
+					.then(resolveCompactionStarted);
+			}, 0);
+		};
+		await pi.emit("session_start", {}, ctx);
+
+		pi.events.emit(PROMPT_TEMPLATE_PROMPT_INVOKE_REQUEST_EVENT, {
+			protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION,
+			requestId: "pre-hook-compaction-failed",
+			name: "invoke",
+		});
+		await compactionStarted;
+		await pi.emit("before_agent_start", { prompt: "invoked", systemPrompt: "BASE" }, ctx);
+		acceptedSend("invoked");
+		const settled = await Promise.race([
+			finished.then(() => true),
+			new Promise<false>((resolve) => setTimeout(() => resolve(false), 100)),
+		]);
+		if (!settled) await pi.emit("session_shutdown", {}, ctx);
+		const payload = await finished;
+
+		assert.equal(settled, true);
+		assert.equal(payload.status, "completed");
+		assert.equal(sendCalls, 1);
+		assert.deepEqual(pi.userMessages, ["invoked"]);
+
+		pi.sendUserMessage = acceptedSend;
+		const secondRun = pi.commands.get("invoke")!.handler("", ctx);
+		const secondSettled = await Promise.race([
+			secondRun.then(() => true),
+			new Promise<false>((resolve) => setTimeout(() => resolve(false), 100)),
+		]);
+		if (!secondSettled) await pi.emit("session_shutdown", {}, ctx);
+		await secondRun;
+		assert.equal(secondSettled, true);
+		assert.deepEqual(pi.userMessages, ["invoked", "invoked"]);
+		await pi.emit("session_shutdown", {}, ctx);
+	});
+});
+
+test("session replacement cancels an invocation whose owned send is waiting for a missing compaction terminal", async () => {
+	await withTempHome(async (root) => {
+		const oldCwd = join(root, "old-project");
+		const newCwd = join(root, "new-project");
+		mkdirSync(join(oldCwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(newCwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(oldCwd, ".pi", "prompts", "invoke.md"), `---\nmodel: ${MODEL_ID}\n---\nold task`);
+		writeFileSync(join(newCwd, ".pi", "prompts", "invoke.md"), `---\nmodel: ${MODEL_ID}\n---\nnew task`);
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const oldContext = createContext(oldCwd, pi).ctx;
+		const newContext = createContext(newCwd, pi).ctx;
+		const acceptedSend = pi.sendUserMessage.bind(pi);
+		let sendCalls = 0;
+		let resolveCompactionStarted!: () => void;
+		const compactionStarted = new Promise<void>((resolve) => { resolveCompactionStarted = resolve; });
+		pi.sendUserMessage = () => {
+			sendCalls++;
+			void pi.emit("session_before_compact", { signal: new AbortController().signal }, oldContext)
+				.then(resolveCompactionStarted);
+		};
+		let resolveFinished!: (payload: any) => void;
+		const finished = new Promise<any>((resolve) => { resolveFinished = resolve; });
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, resolveFinished);
+		await pi.emit("session_start", {}, oldContext);
+
+		pi.events.emit(PROMPT_TEMPLATE_PROMPT_INVOKE_REQUEST_EVENT, {
+			protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION,
+			requestId: "replace-owned-send",
+			name: "invoke",
+		});
+		await compactionStarted;
+		await pi.emit("session_start", {}, newContext);
+		const payload = await Promise.race([
+			finished,
+			new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 100)),
+		]);
+
+		assert.ok(payload);
+		assert.equal(payload.status, "cancelled");
+		assert.equal(sendCalls, 1);
+		assert.deepEqual(pi.userMessages, []);
+
+		pi.sendUserMessage = acceptedSend;
+		await pi.commands.get("invoke")!.handler("", newContext);
+		assert.equal(sendCalls, 1);
+		assert.deepEqual(pi.userMessages, ["new task"]);
+	});
+});
+
+test("session shutdown cancels an invocation whose owned send is waiting for a missing compaction terminal", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "invoke.md"), `---\nmodel: ${MODEL_ID}\n---\ninvoked`);
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const { ctx } = createContext(cwd, pi);
+		const acceptedSend = pi.sendUserMessage.bind(pi);
+		let sendCalls = 0;
+		let resolveCompactionStarted!: () => void;
+		const compactionStarted = new Promise<void>((resolve) => { resolveCompactionStarted = resolve; });
+		pi.sendUserMessage = () => {
+			sendCalls++;
+			void pi.emit("session_before_compact", { signal: new AbortController().signal }, ctx)
+				.then(resolveCompactionStarted);
+		};
+		let resolveFinished!: (payload: any) => void;
+		const finished = new Promise<any>((resolve) => { resolveFinished = resolve; });
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, resolveFinished);
+		await pi.emit("session_start", {}, ctx);
+
+		pi.events.emit(PROMPT_TEMPLATE_PROMPT_INVOKE_REQUEST_EVENT, {
+			protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION,
+			requestId: "shutdown-owned-send",
+			name: "invoke",
+		});
+		await compactionStarted;
+		await pi.emit("session_shutdown", { reason: "reload" }, ctx);
+		const payload = await Promise.race([
+			finished,
+			new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 100)),
+		]);
+
+		assert.ok(payload);
+		assert.equal(payload.status, "cancelled");
+		assert.equal(sendCalls, 1);
+		assert.deepEqual(pi.userMessages, []);
+
+		pi.sendUserMessage = acceptedSend;
+		await pi.emit("session_start", {}, ctx);
+		await pi.commands.get("invoke")!.handler("", ctx);
+		assert.equal(sendCalls, 1);
+		assert.deepEqual(pi.userMessages, ["invoked"]);
+	});
+});
+
+test("accepted invocation preserves a live auto-compaction send without duplicating it", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "invoke.md"), `---\nmodel: ${MODEL_ID}\n---\ninvoked`);
+
+		const pi = new FakePi();
+		let resolveFinished!: (payload: any) => void;
+		const finished = new Promise<any>((resolve) => { resolveFinished = resolve; });
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, resolveFinished);
+		promptModelExtension(pi as never);
+		const { ctx } = createContext(cwd, pi);
+		const startTurn = pi.sendUserMessage.bind(pi);
+		let sendCalls = 0;
+		let pendingContent: string | undefined;
+		let resolveCompactionStarted!: () => void;
+		const compactionStarted = new Promise<void>((resolve) => { resolveCompactionStarted = resolve; });
+		pi.sendUserMessage = (content: string) => {
+			sendCalls++;
+			pendingContent = content;
+			void pi.emit("session_before_compact", { signal: new AbortController().signal }, ctx)
+				.then(resolveCompactionStarted);
+		};
+		pi.on("session_compact", async () => {
+			if (!pendingContent) return;
+			const content = pendingContent;
+			pendingContent = undefined;
+			startTurn(content);
+			await pi.emit("before_agent_start", { prompt: content, systemPrompt: "" }, ctx);
+		});
+		await pi.emit("session_start", {}, ctx);
+
+		pi.events.emit(PROMPT_TEMPLATE_PROMPT_INVOKE_REQUEST_EVENT, {
+			protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION,
+			requestId: "auto-compaction",
+			name: "invoke",
+		});
+		await compactionStarted;
+		await pi.emit("session_compact", {}, ctx);
+		const payload = await finished;
+
+		assert.equal(payload.status, "completed");
+		assert.equal(sendCalls, 1);
+		assert.deepEqual(pi.userMessages, ["invoked"]);
+	});
+});
+
+test("accepted invocation stays owned when automatic compaction exceeds the barrier fallback budget", async (t) => {
+	t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "invoke.md"), `---\nmodel: ${MODEL_ID}\n---\ninvoked`);
+
+		const pi = new FakePi();
+		let finishedPayload: any;
+		let resolveFinished!: (payload: any) => void;
+		const finished = new Promise<any>((resolve) => { resolveFinished = resolve; });
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, (payload) => {
+			finishedPayload = payload;
+			resolveFinished(payload);
+		});
+		promptModelExtension(pi as never);
+		const { ctx, getNotifications } = createContext(cwd, pi);
+		const startTurn = pi.sendUserMessage.bind(pi);
+		let pendingContent: string | undefined;
+		let resolveCompactionStarted!: () => void;
+		const compactionStarted = new Promise<void>((resolve) => { resolveCompactionStarted = resolve; });
+		pi.sendUserMessage = (content: string) => {
+			pendingContent = content;
+			void pi.emit("session_before_compact", { signal: new AbortController().signal }, ctx)
+				.then(resolveCompactionStarted);
+		};
+		pi.on("session_compact", async () => {
+			if (!pendingContent) return;
+			const content = pendingContent;
+			pendingContent = undefined;
+			startTurn(content);
+			await pi.emit("before_agent_start", { prompt: content, systemPrompt: "" }, ctx);
+		});
+		await pi.emit("session_start", {}, ctx);
+
+		pi.events.emit(PROMPT_TEMPLATE_PROMPT_INVOKE_REQUEST_EVENT, {
+			protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION,
+			requestId: "long-auto-compaction",
+			name: "invoke",
+		});
+		await compactionStarted;
+		t.mock.timers.tick(5 * 60 * 1000 + 1);
+		await Promise.resolve();
+		const stayedOwned = finishedPayload === undefined;
+		const warning = getNotifications().join("\n");
+
+		await pi.emit("session_compact", {}, ctx);
+		const payload = await finished;
+		await pi.emit("session_shutdown", {}, ctx);
+		assert.equal(stayedOwned, true);
+		assert.match(warning, /host send remains owned.*budget 300000ms.*configured 300000ms.*observed 30000\dms/i);
+		assert.equal(payload.status, "completed");
+		assert.deepEqual(pi.userMessages, ["invoked"]);
+	});
+});
+
+test("aborting a base-context prompt invocation releases its bounded idle wait", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "invoke.md"), `---\nmodel: ${MODEL_ID}\n---\ninvoked`);
+
+		const pi = new FakePi();
+		let resolveFinished!: (payload: any) => void;
+		const finished = new Promise<any>((resolve) => { resolveFinished = resolve; });
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, resolveFinished);
+		promptModelExtension(pi as never);
+		const { ctx } = createContext(cwd, pi);
+		const releaseIdle = ctx.waitForIdle.bind(ctx);
+		const invocationAbort = new AbortController();
+		delete (ctx as any).waitForIdle;
+		delete (ctx as any).navigateTree;
+		(ctx as any).signal = invocationAbort.signal;
+		await pi.emit("session_start", {}, ctx);
+
+		pi.events.emit(PROMPT_TEMPLATE_PROMPT_INVOKE_REQUEST_EVENT, {
+			protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION,
+			requestId: "abort-idle-wait",
+			name: "invoke",
+		});
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		invocationAbort.abort();
+
+		const settledAfterAbort = await Promise.race([
+			finished.then(() => true),
+			new Promise<false>((resolve) => setTimeout(() => resolve(false), 50)),
+		]);
+		if (!settledAfterAbort) await releaseIdle();
+		const payload = await finished;
+
+		assert.equal(settledAfterAbort, true);
+		assert.equal(payload.status, "cancelled");
+	});
+});
+
+test("refuses invalid, unknown, busy, and workflow prompt invocation requests", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "plain.md"), `---\nmodel: ${MODEL_ID}\n---\nplain`);
+		writeFileSync(join(cwd, ".pi", "prompts", "chain.md"), "---\nchain: plain\n---\nignored");
+		writeFileSync(join(cwd, ".pi", "prompts", "loop.md"), `---\nmodel: ${MODEL_ID}\nloop: 2\n---\nloop`);
+		writeFileSync(join(cwd, ".pi", "prompts", "hidden.md"), `---\nmodel: ${MODEL_ID}\nhidden: true\n---\nhidden`);
+
+		const pi = new FakePi();
+		const acknowledgements: any[] = [];
+		const lifecycle: any[] = [];
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_INVOKE_ACK_EVENT, (payload) => acknowledgements.push(payload));
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_STARTED_EVENT, (payload) => lifecycle.push(payload));
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, (payload) => lifecycle.push(payload));
+		promptModelExtension(pi as never);
+		const { ctx } = createContext(cwd, pi);
+
+		pi.events.emit(PROMPT_TEMPLATE_PROMPT_INVOKE_REQUEST_EVENT, {
+			protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION,
+			requestId: "not-ready",
+			name: "plain",
+		});
+		await pi.emit("session_start", {}, ctx);
+		for (const request of [
+			{ protocolVersion: 999, requestId: "invalid", name: "plain" },
+			{ protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION, requestId: "missing", name: "missing" },
+			{ protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION, requestId: "hidden", name: "hidden" },
+			{ protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION, requestId: "chain", name: "chain" },
+			{ protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION, requestId: "loop", name: "loop" },
+		]) pi.events.emit(PROMPT_TEMPLATE_PROMPT_INVOKE_REQUEST_EVENT, request);
+
+		const idle = ctx.isIdle;
+		ctx.isIdle = () => false;
+		pi.events.emit(PROMPT_TEMPLATE_PROMPT_INVOKE_REQUEST_EVENT, {
+			protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION,
+			requestId: "busy",
+			name: "plain",
+		});
+		ctx.isIdle = idle;
+
+		await pi.emit("session_before_compact", { signal: new AbortController().signal }, ctx);
+		pi.events.emit(PROMPT_TEMPLATE_PROMPT_INVOKE_REQUEST_EVENT, {
+			protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION,
+			requestId: "compacting",
+			name: "plain",
+		});
+		await pi.emit("session_compact", {}, ctx);
+
+		assert.deepEqual(acknowledgements.map((ack) => [ack.requestId, ack.accepted, ack.reason]), [
+			["not-ready", false, "not-ready"],
+			["invalid", false, "invalid-request"],
+			["missing", false, "unknown-template"],
+			["hidden", false, "unknown-template"],
+			["chain", false, "chain-template"],
+			["loop", false, "unsupported-context"],
+			["busy", false, "busy"],
+			["compacting", false, "busy"],
+		]);
+		assert.deepEqual(lifecycle, []);
+	});
+});
+
+test("direct prompt command waits for tracked compaction before sending a user message", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "deslop.md"), `---\nmodel: ${MODEL_ID}\n---\ndeslop task`);
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const { ctx } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+		await pi.emit("session_before_compact", { signal: new AbortController().signal }, ctx);
+
+		const commandRun = pi.commands.get("deslop")!.handler("", ctx);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		assert.equal(pi.userMessages.length, 0);
+
+		await pi.emit("session_compact", {}, ctx);
+		await commandRun;
+		assert.deepEqual(pi.userMessages, ["deslop task"]);
+	});
+});
+
+test("a second compaction is refused without releasing the active generation", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "deslop.md"), `---\nmodel: ${MODEL_ID}\n---\ndeslop task`);
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const { ctx } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+		const first = new AbortController();
+		const second = new AbortController();
+		await pi.emitWithResult("session_before_compact", { signal: first.signal }, ctx);
+		const secondResult = await pi.emitWithResult("session_before_compact", { signal: second.signal }, ctx);
+
+		const commandRun = pi.commands.get("deslop")!.handler("", ctx);
+		second.abort();
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		const messagesBeforeFirstCompleted = [...pi.userMessages];
+		await pi.emit("session_compact", {}, ctx);
+		await commandRun;
+
+		assert.deepEqual(secondResult, { cancel: true });
+		assert.deepEqual(messagesBeforeFirstCompleted, []);
+		assert.deepEqual(pi.userMessages, ["deslop task"]);
+	});
+});
+
+test("aborted compaction releases waiting prompt commands", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "deslop.md"), `---\nmodel: ${MODEL_ID}\n---\ndeslop task`);
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const { ctx } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+		const compaction = new AbortController();
+		await pi.emit("session_before_compact", { signal: compaction.signal }, ctx);
+
+		const commandRun = pi.commands.get("deslop")!.handler("", ctx);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		assert.equal(pi.userMessages.length, 0);
+
+		compaction.abort();
+		let settled = false;
+		void commandRun.then(() => { settled = true; });
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		try {
+			assert.equal(settled, true);
+			assert.deepEqual(pi.userMessages, ["deslop task"]);
+		} finally {
+			await pi.emit("session_compact", {}, ctx);
+			await commandRun;
+		}
+	});
+});
+
+test("compaction fallback cancels blocked commands and reports its wait budget", async (t) => {
+	t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "deslop.md"), `---\nmodel: ${MODEL_ID}\n---\ndeslop task`);
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const { ctx, getNotifications } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+		await pi.emit("session_before_compact", { signal: new AbortController().signal }, ctx);
+
+		const commandRun = pi.commands.get("deslop")!.handler("", ctx);
+		await Promise.resolve();
+		t.mock.timers.tick(5 * 60 * 1000);
+		const settledAtFallback = await Promise.race([
+			commandRun.then(() => true),
+			new Promise<false>((resolve) => setImmediate(() => resolve(false))),
+		]);
+		const fallbackNotifications = getNotifications().filter((message) => message.includes("Compaction barrier fallback"));
+
+		if (!settledAtFallback) await pi.emit("session_shutdown", {}, ctx);
+		await commandRun;
+		assert.equal(settledAtFallback, true);
+		assert.deepEqual(pi.userMessages, []);
+		assert.equal(fallbackNotifications.length, 1);
+		assert.match(fallbackNotifications[0]!, /budget 300000ms.*configured 300000ms.*observed 300000ms/i);
+		assert.match(fallbackNotifications[0]!, /accepts another prompt or this extension reloads/i);
+		assert.match(fallbackNotifications[0]!, /inspect the compaction hooks/i);
+
+		const nextCompaction = new AbortController();
+		const nextResult = await pi.emitWithResult("session_before_compact", { signal: nextCompaction.signal }, ctx);
+		assert.equal(nextResult, undefined, "fallback must close the active generation so a later compaction can start");
+		const nextCommandRun = pi.commands.get("deslop")!.handler("", ctx);
+		const nextCommandReleasedEarly = await Promise.race([
+			nextCommandRun.then(() => true),
+			new Promise<false>((resolve) => setImmediate(() => resolve(false))),
+		]);
+		assert.equal(nextCommandReleasedEarly, false);
+		nextCompaction.abort();
+		await nextCommandRun;
+		assert.deepEqual(pi.userMessages, ["deslop task"]);
+	});
+});
+
+test("terminal correlation stays fail-closed after a fallback when the stale terminal arrives first", async (t) => {
+	t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "deslop.md"), `---\nmodel: ${MODEL_ID}\n---\ndeslop task`);
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const { ctx, getNotifications } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.emit("session_before_compact", { signal: new AbortController().signal }, ctx);
+		t.mock.timers.tick(5 * 60 * 1000);
+		await Promise.resolve();
+
+		const nextCompaction = new AbortController();
+		await pi.emit("session_before_compact", { signal: nextCompaction.signal }, ctx);
+		const commandRun = pi.commands.get("deslop")!.handler("", ctx);
+		await Promise.resolve();
+		await pi.emit("session_compact", {}, ctx);
+		const releasedByLateTerminal = await Promise.race([
+			commandRun.then(() => true),
+			new Promise<false>((resolve) => setImmediate(() => resolve(false))),
+		]);
+
+		assert.equal(releasedByLateTerminal, false);
+		const ignoredTerminalNotifications = getNotifications().filter((message) => message.includes("Ignored an uncorrelated session_compact"));
+		assert.equal(ignoredTerminalNotifications.length, 1);
+		assert.match(ignoredTerminalNotifications[0]!, /fallback budget 300000ms.*configured 300000ms/i);
+		assert.match(ignoredTerminalNotifications[0]!, /accept another prompt or reload/i);
+		await pi.emit("session_compact", {}, ctx);
+		const releasedByCurrentTerminal = await Promise.race([
+			commandRun.then(() => true),
+			new Promise<false>((resolve) => setImmediate(() => resolve(false))),
+		]);
+		assert.equal(releasedByCurrentTerminal, false);
+		nextCompaction.abort();
+		await commandRun;
+		assert.deepEqual(pi.userMessages, ["deslop task"]);
+	});
+});
+
+test("terminal correlation stays fail-closed after a fallback when the current terminal arrives first", async (t) => {
+	t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "deslop.md"), `---\nmodel: ${MODEL_ID}\n---\ndeslop task`);
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const { ctx } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.emit("session_before_compact", { signal: new AbortController().signal }, ctx);
+		t.mock.timers.tick(5 * 60 * 1000);
+		await Promise.resolve();
+
+		const nextCompaction = new AbortController();
+		await pi.emit("session_before_compact", { signal: nextCompaction.signal }, ctx);
+		const commandRun = pi.commands.get("deslop")!.handler("", ctx);
+		await Promise.resolve();
+
+		await pi.emit("session_compact", {}, ctx);
+		const releasedByCurrentTerminal = await Promise.race([
+			commandRun.then(() => true),
+			new Promise<false>((resolve) => setImmediate(() => resolve(false))),
+		]);
+		assert.equal(releasedByCurrentTerminal, false);
+
+		await pi.emit("session_compact", {}, ctx);
+		const releasedByLateTerminal = await Promise.race([
+			commandRun.then(() => true),
+			new Promise<false>((resolve) => setImmediate(() => resolve(false))),
+		]);
+		assert.equal(releasedByLateTerminal, false);
+
+		nextCompaction.abort();
+		await commandRun;
+		assert.deepEqual(pi.userMessages, ["deslop task"]);
+	});
+});
+
+test("session shutdown cancels waiting prompt commands without sending stale work", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "deslop.md"), `---\nmodel: ${MODEL_ID}\n---\ndeslop task`);
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const { ctx } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+		await pi.emit("session_before_compact", { signal: new AbortController().signal }, ctx);
+
+		const commandRun = pi.commands.get("deslop")!.handler("", ctx);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		assert.equal(pi.userMessages.length, 0);
+
+		await pi.emit("session_shutdown", { reason: "reload" }, ctx);
+		await commandRun;
+		assert.deepEqual(pi.userMessages, []);
+	});
+});
+
+test("a replacement session fences continuations that waited in the previous session", async () => {
+	await withTempHome(async (root) => {
+		const oldCwd = join(root, "old-project");
+		const newCwd = join(root, "new-project");
+		mkdirSync(join(oldCwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(newCwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(oldCwd, ".pi", "prompts", "deslop.md"), `---\nmodel: ${MODEL_ID}\n---\nold task`);
+		writeFileSync(join(newCwd, ".pi", "prompts", "deslop.md"), `---\nmodel: ${MODEL_ID}\n---\nnew task`);
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const oldContext = createContext(oldCwd, pi).ctx;
+		await pi.emit("session_start", {}, oldContext);
+		await pi.emit("session_before_compact", { signal: new AbortController().signal }, oldContext);
+		const oldRun = pi.commands.get("deslop")!.handler("", oldContext);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+
+		const newContext = createContext(newCwd, pi).ctx;
+		await pi.emit("session_start", {}, newContext);
+		await oldRun;
+		await pi.commands.get("deslop")!.handler("", newContext);
+
+		assert.deepEqual(pi.userMessages, ["new task"]);
+	});
+});
+
+test("an acknowledgement observer cannot move an accepted invocation into a replacement session", async () => {
+	await withTempHome(async (root) => {
+		const oldCwd = join(root, "old-project");
+		const newCwd = join(root, "new-project");
+		mkdirSync(join(oldCwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(newCwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(oldCwd, ".pi", "prompts", "invoke.md"), `---\nmodel: ${MODEL_ID}\n---\nold task`);
+		writeFileSync(join(newCwd, ".pi", "prompts", "invoke.md"), `---\nmodel: ${MODEL_ID}\n---\nnew task`);
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const oldContext = createContext(oldCwd, pi).ctx;
+		const newContext = createContext(newCwd, pi).ctx;
+		let replacement: Promise<void> | undefined;
+		let resolveFinished!: (payload: any) => void;
+		const finished = new Promise<any>((resolve) => { resolveFinished = resolve; });
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_INVOKE_ACK_EVENT, (payload: any) => {
+			if (payload.accepted) replacement = pi.emit("session_start", {}, newContext);
+		});
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, resolveFinished);
+		await pi.emit("session_start", {}, oldContext);
+
+		pi.events.emit(PROMPT_TEMPLATE_PROMPT_INVOKE_REQUEST_EVENT, {
+			protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION,
+			requestId: "replace-after-ack",
+			name: "invoke",
+		});
+		await replacement;
+		const payload = await finished;
+
+		assert.deepEqual(pi.userMessages, []);
+		assert.equal(payload.status, "cancelled");
+	});
+});
+
+test("a started observer cannot move a direct prompt into a replacement session", async () => {
+	await withTempHome(async (root) => {
+		const oldCwd = join(root, "old-project");
+		const newCwd = join(root, "new-project");
+		mkdirSync(join(oldCwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(newCwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(oldCwd, ".pi", "prompts", "direct.md"), `---\nmodel: ${MODEL_ID}\n---\nold task`);
+		writeFileSync(join(newCwd, ".pi", "prompts", "direct.md"), `---\nmodel: ${MODEL_ID}\n---\nnew task`);
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const oldContext = createContext(oldCwd, pi).ctx;
+		const newContext = createContext(newCwd, pi).ctx;
+		let replacement: Promise<void> | undefined;
+		let finishedPayload: any;
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_STARTED_EVENT, () => {
+			if (!replacement) replacement = pi.emit("session_start", {}, newContext);
+		});
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, (payload) => { finishedPayload = payload; });
+		await pi.emit("session_start", {}, oldContext);
+
+		await pi.commands.get("direct")!.handler("", oldContext);
+		await replacement;
+
+		assert.deepEqual(pi.userMessages, []);
+		assert.equal(finishedPayload.status, "cancelled");
+	});
+});
+
+test("direct prompt command rechecks compaction after waiting for the active turn", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "deslop.md"), `---\nmodel: ${MODEL_ID}\n---\ndeslop task`);
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		let ctx: ReturnType<typeof createContext>["ctx"];
+		let idleWaits = 0;
+		const created = createContext(cwd, pi, [ACTIVE_MODEL], {
+			isIdle: () => false,
+			async waitForIdle() {
+				idleWaits++;
+				if (idleWaits === 1) await pi.emit("session_before_compact", { signal: new AbortController().signal }, ctx);
+			},
+		});
+		ctx = created.ctx;
+		await pi.emit("session_start", {}, ctx);
+
+		const commandRun = pi.commands.get("deslop")!.handler("", ctx);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		assert.equal(pi.userMessages.length, 0);
+
+		await pi.emit("session_compact", {}, ctx);
+		await commandRun;
+		assert.deepEqual(pi.userMessages, ["deslop task"]);
+	});
+});
+
+test("adaptive prompt command waits for tracked compaction before starting", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "step.md"), `---\nmodel: ${MODEL_ID}\n---\nadaptive task`);
+		writeFileSync(join(cwd, ".pi", "prompts", "flow.md"), `---\nchain:\n  - prompt: step\nlimits:\n  maxSteps: 1\n  maxModelCalls: 1\n---\nignored`);
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const { ctx } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+		await pi.emit("session_before_compact", { signal: new AbortController().signal }, ctx);
+
+		const commandRun = pi.commands.get("flow")!.handler("", ctx);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		assert.equal(pi.userMessages.length, 0);
+
+		await pi.emit("session_compact", {}, ctx);
+		await commandRun;
+		assert.deepEqual(pi.userMessages, ["adaptive task"]);
+	});
+});
+
+test("adaptive prompt command emits one correlated lifecycle pair", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "step.md"), `---\nmodel: ${MODEL_ID}\n---\nadaptive task`);
+		writeFileSync(join(cwd, ".pi", "prompts", "flow.md"), `---\nchain:\n  - prompt: step\nlimits:\n  maxSteps: 1\n  maxModelCalls: 1\n---\nignored`);
+
+		const pi = new FakePi();
+		const lifecycle: Array<{ channel: string; data: any }> = [];
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_STARTED_EVENT, (data) => lifecycle.push({ channel: PROMPT_TEMPLATE_PROMPT_STARTED_EVENT, data }));
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, (data) => lifecycle.push({ channel: PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, data }));
+		promptModelExtension(pi as never);
+		const { ctx } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("flow")!.handler("", ctx);
+
+		assert.equal(lifecycle.length, 2);
+		assert.equal(lifecycle[0]!.channel, PROMPT_TEMPLATE_PROMPT_STARTED_EVENT);
+		assert.equal(lifecycle[1]!.channel, PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT);
+		assert.equal(lifecycle[0]!.data.name, "flow");
+		assert.equal(lifecycle[1]!.data.name, "flow");
+		assert.equal(lifecycle[0]!.data.runId, lifecycle[1]!.data.runId);
+		assert.equal(lifecycle[1]!.data.status, "completed");
+	});
+});
+
+test("a started observer cannot move an adaptive prompt into a replacement session", async () => {
+	await withTempHome(async (root) => {
+		const oldCwd = join(root, "old-project");
+		const newCwd = join(root, "new-project");
+		for (const cwd of [oldCwd, newCwd]) mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(oldCwd, ".pi", "prompts", "step.md"), `---\nmodel: ${MODEL_ID}\n---\nold adaptive task`);
+		writeFileSync(join(oldCwd, ".pi", "prompts", "flow.md"), `---\nchain:\n  - prompt: step\nlimits:\n  maxSteps: 1\n  maxModelCalls: 1\n---\nignored`);
+		writeFileSync(join(newCwd, ".pi", "prompts", "step.md"), `---\nmodel: ${MODEL_ID}\n---\nnew adaptive task`);
+		writeFileSync(join(newCwd, ".pi", "prompts", "flow.md"), `---\nchain:\n  - prompt: step\nlimits:\n  maxSteps: 1\n  maxModelCalls: 1\n---\nignored`);
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const oldContext = createContext(oldCwd, pi).ctx;
+		const newContext = createContext(newCwd, pi).ctx;
+		let replacement: Promise<void> | undefined;
+		let finishedPayload: any;
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_STARTED_EVENT, () => {
+			if (!replacement) replacement = pi.emit("session_start", {}, newContext);
+		});
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, (payload) => { finishedPayload = payload; });
+		await pi.emit("session_start", {}, oldContext);
+
+		await pi.commands.get("flow")!.handler("", oldContext);
+		await replacement;
+
+		assert.deepEqual(pi.userMessages, []);
+		assert.equal(finishedPayload.status, "cancelled");
+	});
+});
+
 function createBranchingContext(
 	cwd: string,
 	pi: FakePi,
@@ -240,6 +1294,7 @@ function createBranchingContext(
 	let navigateCount = 0;
 	let entryCounter = 0;
 	const queuedAssistantEntries: Array<Array<{ type: string; [key: string]: unknown }>> = [];
+	let idle = true;
 	const nextId = (prefix: string) => `${prefix}-${++entryCounter}`;
 
 	const modelRegistry = {
@@ -261,6 +1316,7 @@ function createBranchingContext(
 	};
 
 	pi.sendUserMessage = (content: string) => {
+		idle = false;
 		pi.userMessages.push(content);
 		branch.push({
 			id: nextId("user"),
@@ -302,10 +1358,11 @@ function createBranchingContext(
 			},
 		},
 		isIdle() {
-			return false;
+			return idle;
 		},
 		async waitForIdle() {
 			const nextAssistant = queuedAssistantEntries.shift();
+			idle = true;
 			if (!nextAssistant) return;
 			branch.push({
 				id: nextId("assistant"),
@@ -402,13 +1459,40 @@ test("cancelled ordinary loop does not count or continue the aborted iteration",
 		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
 		writeFileSync(join(cwd, ".pi", "prompts", "cancel-loop.md"), `---\nmodel: ${MODEL_ID}\nloop: 3\nconverge: false\n---\nCANCEL`);
 		const pi = new FakePi();
+		let finishedPayload: any;
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, (payload) => { finishedPayload = payload; });
 		promptModelExtension(pi as never);
 		const entries = () => pi.userMessages.length === 0 ? [] : [{ id: "aborted", type: "message", message: { role: "assistant", stopReason: "aborted", content: [] } }];
 		const { ctx, getNotifications } = createContext(cwd, pi, [ACTIVE_MODEL], { branchEntries: entries });
 		await pi.emit("session_start", {}, ctx);
 		await pi.commands.get("cancel-loop")!.handler("", ctx);
 		assert.equal(pi.userMessages.length, 1);
+		assert.equal(finishedPayload.status, "cancelled");
 		assert.doesNotMatch(getNotifications().join("\n"), /completed 1 iteration/i);
+	});
+});
+
+test("ordinary loop stops and fails on an assistant error terminal", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "error-loop.md"), `---\nmodel: ${MODEL_ID}\nloop: 3\nconverge: false\n---\nERROR`);
+		const pi = new FakePi();
+		let finishedPayload: any;
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, (payload) => { finishedPayload = payload; });
+		promptModelExtension(pi as never);
+		const entries = () => pi.userMessages.length === 0 ? [] : [{
+			id: "error",
+			type: "message",
+			message: { role: "assistant", stopReason: "error", content: [], errorMessage: "provider failed" },
+		}];
+		const { ctx } = createContext(cwd, pi, [ACTIVE_MODEL], { branchEntries: entries });
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("error-loop")!.handler("", ctx);
+
+		assert.equal(pi.userMessages.length, 1);
+		assert.equal(finishedPayload.status, "failed");
 	});
 });
 
@@ -813,6 +1897,7 @@ test("queued run-prompt applies bare --loop semantics", async () => {
 		await runPromptTool.execute("tool-call-loop", { command: "deslop task --loop" });
 
 		await pi.emit("agent_end", {}, ctx);
+		await pi.emit("agent_settled", {}, ctx);
 		assert.deepEqual(pi.userMessages.map(stripLoopPrefix), ["ARGS:task"]);
 		assert.match(getNotifications().join("\n"), /Loop converged at 1 \(no changes\)/);
 	});
@@ -900,26 +1985,37 @@ test("chain templates honor per-step --loop counts", async () => {
 	});
 });
 
-test("parallel chain steps reject per-task --loop values", async () => {
-	await withTempHome(async (root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "parallel(scan-fe --loop 2)"\n---\nignored');
-		writeFileSync(join(cwd, ".pi", "prompts", "scan-fe.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nscan`);
+for (const { stopReason, expectedStatus } of [
+	{ stopReason: "error", expectedStatus: "failed" },
+	{ stopReason: "aborted", expectedStatus: "cancelled" },
+] as const) {
+	test(`ordinary sequential chain stops with ${expectedStatus} lifecycle on assistant ${stopReason}`, async () => {
+		await withTempHome(async (root) => {
+			const cwd = join(root, "project");
+			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), "---\nchain: first -> second\n---\nignored");
+			writeFileSync(join(cwd, ".pi", "prompts", "first.md"), `---\nmodel: ${MODEL_ID}\n---\nfirst`);
+			writeFileSync(join(cwd, ".pi", "prompts", "second.md"), `---\nmodel: ${MODEL_ID}\n---\nsecond`);
 
-		const pi = new FakePi();
-		promptModelExtension(pi as never);
-		const { ctx, getNotifications } = createContext(cwd, pi);
-		await pi.emit("session_start", {}, ctx);
+			const pi = new FakePi();
+			let finishedPayload: any;
+			pi.events.on(PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, (payload) => { finishedPayload = payload; });
+			promptModelExtension(pi as never);
+			const entries = () => pi.userMessages.length === 0 ? [] : [{
+				id: `${stopReason}-terminal`,
+				type: "message",
+				message: { role: "assistant", stopReason, content: [], ...(stopReason === "error" ? { errorMessage: "provider failed" } : {}) },
+			}];
+			const { ctx } = createContext(cwd, pi, [ACTIVE_MODEL], { branchEntries: entries });
+			await pi.emit("session_start", {}, ctx);
 
-		const pipeline = pi.commands.get("pipeline");
-		assert.ok(pipeline);
-		await pipeline.handler("", ctx);
+			await pi.commands.get("pipeline")!.handler("", ctx);
 
-		assert.equal(pi.userMessages.length, 0);
-		assert.match(getNotifications().join("\n"), /does not support per-task --loop/i);
+			assert.deepEqual(pi.userMessages, ["first"]);
+			assert.equal(finishedPayload.status, expectedStatus);
+		});
 	});
-});
+}
 
 test("chain templates treat quoted --loop step args as literals", async () => {
 	await withTempHome(async (root) => {
@@ -1144,7 +2240,86 @@ test("queued run-prompt executes chain templates through runPromptCommand routin
 		await runPromptTool.execute("tool-call-chain", { command: "pipeline task --loop 2 --no-converge" });
 
 		await pi.emit("agent_end", {}, ctx);
+		await pi.emit("agent_settled", {}, ctx);
 		assert.deepEqual(pi.userMessages, ["worker:task", "worker:task"]);
+	});
+});
+
+test("queued prompt waits for agent_settled instead of deadlocking the awaited agent_end hook", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "queued.md"), `---\nmodel: ${MODEL_ID}\n---\nqueued`);
+
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		let releaseIdle!: () => void;
+		const idleGate = new Promise<void>((resolve) => { releaseIdle = resolve; });
+		const { ctx } = createContext(cwd, pi, [ACTIVE_MODEL], {
+			isIdle: () => false,
+			waitForIdle: () => idleGate,
+		});
+		await pi.emit("session_start", {}, ctx);
+		await pi.commands.get("prompt-tool")!.handler("on", ctx);
+		await pi.tools.get("run-prompt")!.execute("queued-call", { command: "queued" });
+
+		const agentEndRun = pi.emit("agent_end", {}, ctx);
+		const agentEndReturned = await Promise.race([
+			agentEndRun.then(() => true),
+			new Promise<false>((resolve) => setImmediate(() => resolve(false))),
+		]);
+
+		if (!agentEndReturned) releaseIdle();
+		await agentEndRun;
+		if (agentEndReturned) {
+			assert.deepEqual(pi.userMessages, []);
+			const settledRun = pi.emit("agent_settled", {}, ctx);
+			await new Promise((resolve) => setImmediate(resolve));
+			assert.deepEqual(pi.userMessages, []);
+			releaseIdle();
+			await settledRun;
+		}
+
+		assert.equal(agentEndReturned, true);
+		assert.deepEqual(pi.userMessages, ["queued"]);
+	});
+});
+
+test("post-turn compaction fallback cancels the queued run-prompt instead of executing stale work", async (t) => {
+	t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "first.md"), "---\nmodel: anthropic/turn-model\nthinking: high\nrestore: true\n---\nfirst");
+		writeFileSync(join(cwd, ".pi", "prompts", "queued.md"), `---\nmodel: ${MODEL_ID}\n---\nqueued`);
+
+		const baseModel = { provider: "anthropic", id: "base-model" };
+		const turnModel = { provider: "anthropic", id: "turn-model" };
+		const pi = new FakePi();
+		pi.currentModel = baseModel;
+		promptModelExtension(pi as never);
+		const { ctx, getNotifications } = createContext(cwd, pi, [baseModel, turnModel, ACTIVE_MODEL]);
+		await pi.emit("session_start", {}, ctx);
+		await pi.commands.get("first")!.handler("", ctx);
+		assert.equal(pi.currentModel, turnModel);
+		assert.equal(pi.getThinkingLevel(), "high");
+		await pi.commands.get("prompt-tool")!.handler("on", ctx);
+		await pi.tools.get("run-prompt")!.execute("queued-call", { command: "queued" });
+
+		await pi.emit("agent_end", {}, ctx);
+		await pi.emit("session_before_compact", { signal: new AbortController().signal }, ctx);
+		const settledRun = pi.emit("agent_settled", {}, ctx);
+		await Promise.resolve();
+		t.mock.timers.tick(5 * 60 * 1000);
+		await settledRun;
+
+		assert.deepEqual(pi.userMessages, ["first"]);
+		assert.equal(pi.currentModel, baseModel);
+		assert.equal(pi.getThinkingLevel(), "medium");
+		assert.deepEqual(pi.setModelCalls, ["anthropic/turn-model", "anthropic/base-model"]);
+		assert.deepEqual(pi.thinkingCalls, ["high", "medium"]);
+		assert.match(getNotifications().join("\n"), /queued prompt command.*cancelled.*compaction.*fallback/i);
+		await pi.tools.get("run-prompt")!.execute("replacement-call", { command: "queued" });
 	});
 });
 
@@ -1180,7 +2355,61 @@ test("queued run-prompt restores pending session state before executing queued c
 		await runPromptTool.execute("tool-call-1", { command: "second" });
 
 		await pi.emit("agent_end", {}, ctx);
+		await pi.emit("agent_settled", {}, ctx);
 		assert.deepEqual(pi.setModelCalls, ["anthropic/loop-first", "anthropic/base-model", "anthropic/loop-second"]);
+	});
+});
+
+test("compaction release serializes queued restoration before a waiting direct prompt", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "first.md"), "---\nmodel: anthropic/loop-first\nrestore: true\n---\nfirst");
+		writeFileSync(join(cwd, ".pi", "prompts", "queued.md"), "---\nmodel: anthropic/loop-second\nrestore: false\n---\nqueued");
+		writeFileSync(join(cwd, ".pi", "prompts", "direct.md"), "---\nmodel: anthropic/loop-third\nrestore: false\n---\ndirect");
+
+		const baseModel = { provider: "anthropic", id: "base-model" };
+		const firstModel = { provider: "anthropic", id: "loop-first" };
+		const secondModel = { provider: "anthropic", id: "loop-second" };
+		const thirdModel = { provider: "anthropic", id: "loop-third" };
+		const models = [baseModel, firstModel, secondModel, thirdModel];
+
+		const pi = new FakePi();
+		pi.currentModel = baseModel;
+		promptModelExtension(pi as never);
+		const { ctx } = createContext(cwd, pi, models);
+		await pi.emit("session_start", {}, ctx);
+		await pi.commands.get("first")!.handler("", ctx);
+
+		await pi.commands.get("prompt-tool")!.handler("on", ctx);
+		await pi.tools.get("run-prompt")!.execute("queued-call", { command: "queued" });
+
+		let resolveRestoreStarted!: () => void;
+		const restoreStarted = new Promise<void>((resolve) => { resolveRestoreStarted = resolve; });
+		let releaseRestore!: () => void;
+		const restoreGate = new Promise<void>((resolve) => { releaseRestore = resolve; });
+		const originalSetModel = pi.setModel.bind(pi);
+		pi.setModel = async (model) => {
+			if (model.id === baseModel.id) {
+				resolveRestoreStarted();
+				await restoreGate;
+			}
+			return await originalSetModel(model);
+		};
+
+		await pi.emit("session_before_compact", { signal: new AbortController().signal }, ctx);
+		const agentEndRun = pi.emit("agent_end", {}, ctx);
+		const directRun = pi.commands.get("direct")!.handler("", ctx);
+		await pi.emit("session_compact", {}, ctx);
+		await agentEndRun;
+		const agentSettledRun = pi.emit("agent_settled", {}, ctx);
+		await restoreStarted;
+		await new Promise((resolve) => setTimeout(resolve, 10));
+
+		assert.deepEqual(pi.userMessages, ["first"]);
+		releaseRestore();
+		await Promise.all([agentSettledRun, directRun]);
+		assert.deepEqual(pi.userMessages, ["first", "queued", "direct"]);
 	});
 });
 
@@ -1708,6 +2937,7 @@ test("queued model-less prompt uses agent-end runtime model when stored command 
 
 		pi.currentModel = targetModel;
 		await pi.emit("agent_end", {}, ctx);
+		await pi.emit("agent_settled", {}, ctx);
 
 		assert.deepEqual(pi.userMessages, ["TARGET"]);
 		assert.deepEqual(pi.setModelCalls, []);
@@ -2220,12 +3450,8 @@ test("chain template chainContext summary prepends previous-step summary to seco
 			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
 				const request = payload as any;
 				tasks.push(request.task);
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-					...request,
-					messages: [{ role: "assistant", content: [{ type: "text", text: `done ${tasks.length}` }] }],
-					isError: false,
-				});
+				emitSubagentStarted(pi, request);
+				emitSubagentCompleted(pi, request, `done ${tasks.length}`);
 			});
 
 			await pi.commands.get("pipeline")!.handler("", ctx);
@@ -2252,12 +3478,8 @@ test("chain-prompts --chain-context prepends previous-step summary to second del
 			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
 				const request = payload as any;
 				tasks.push(request.task);
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-					...request,
-					messages: [{ role: "assistant", content: [{ type: "text", text: `done ${tasks.length}` }] }],
-					isError: false,
-				});
+				emitSubagentStarted(pi, request);
+				emitSubagentCompleted(pi, request, `done ${tasks.length}`);
 			});
 
 			await pi.commands.get("chain-prompts")!.handler("analyze -> fix --chain-context", ctx);
@@ -2285,12 +3507,8 @@ test("per-step --with-context only affects that delegated step", async () => {
 			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
 				const request = payload as any;
 				tasks.push(request.task);
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-					...request,
-					messages: [{ role: "assistant", content: [{ type: "text", text: `done ${tasks.length}` }] }],
-					isError: false,
-				});
+				emitSubagentStarted(pi, request);
+				emitSubagentCompleted(pi, request, `done ${tasks.length}`);
 			});
 
 			await pi.commands.get("chain-prompts")!.handler("one -> two --with-context -> three", ctx);
@@ -2318,12 +3536,8 @@ test("first delegated chain step never receives a summary preamble", async () =>
 			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
 				const request = payload as any;
 				tasks.push(request.task);
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-					...request,
-					messages: [{ role: "assistant", content: [{ type: "text", text: `done ${tasks.length}` }] }],
-					isError: false,
-				});
+				emitSubagentStarted(pi, request);
+				emitSubagentCompleted(pi, request, `done ${tasks.length}`);
 			});
 
 			await pi.commands.get("chain-prompts")!.handler("analyze -> fix --chain-context", ctx);
@@ -2348,12 +3562,8 @@ test("non-delegated steps do not receive summary preambles with chain context en
 			queueAssistantText("review done");
 			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
 				const request = payload as any;
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-					...request,
-					messages: [{ role: "assistant", content: [{ type: "text", text: "scan done" }] }],
-					isError: false,
-				});
+				emitSubagentStarted(pi, request);
+				emitSubagentCompleted(pi, request, "scan done");
 			});
 
 			await pi.commands.get("chain-prompts")!.handler("scan -> review --chain-context", ctx);
@@ -2382,12 +3592,8 @@ test("delegated inheritContext chain steps skip summary preambles", async () => 
 			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
 				const request = payload as any;
 				tasks.push(request.task);
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-					...request,
-					messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
-					isError: false,
-				});
+				emitSubagentStarted(pi, request);
+				emitSubagentCompleted(pi, request, "done");
 			});
 
 			await pi.commands.get("chain-prompts")!.handler("scan -> fix --chain-context", ctx);
@@ -2416,23 +3622,13 @@ test("per-step loops contribute one combined step summary to the next step", asy
 				const request = payload as any;
 				delegatedCount++;
 				tasks.push(request.task);
-				const messages = delegatedCount <= 2
-					? [
-						{
-							role: "assistant",
-							content: [
-								{ type: "toolCall", id: "w", name: "write", arguments: { path: `file-${delegatedCount}.ts` } },
-								{ type: "text", text: `worker ${delegatedCount}` },
-							],
-						},
-					]
-					: [{ role: "assistant", content: [{ type: "text", text: "follow" }] }];
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-					...request,
-					messages,
-					isError: false,
-				});
+				emitSubagentStarted(pi, request);
+				emitSubagentCompleted(
+					pi,
+					request,
+					delegatedCount <= 2 ? `worker ${delegatedCount}` : "follow",
+					delegatedCount <= 2 ? 1 : 0,
+				);
 			});
 
 			await pi.commands.get("pipeline")!.handler("", ctx);
@@ -2465,12 +3661,8 @@ test("outer chain loop iterations reset summary scope", async () => {
 			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
 				const request = payload as any;
 				tasks.push(request.task);
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-					...request,
-					messages: [{ role: "assistant", content: [{ type: "text", text: `done ${tasks.length}` }] }],
-					isError: false,
-				});
+				emitSubagentStarted(pi, request);
+				emitSubagentCompleted(pi, request, `done ${tasks.length}`);
 			});
 
 			await pi.commands.get("pipeline")!.handler("", ctx);
@@ -2480,24 +3672,6 @@ test("outer chain loop iterations reset summary scope", async () => {
 			assert.doesNotMatch(tasks[2] ?? "", /^\[Previous chain steps\]/);
 			assert.match(tasks[3] ?? "", /^\[Previous chain steps\]/);
 		});
-	});
-});
-
-test("parallel(scan-fe --with-context) is rejected by chain validation", async () => {
-	await withTempHome(async (root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "parallel(scan-fe --with-context) -> review"\n---\nignored');
-		writeFileSync(join(cwd, ".pi", "prompts", "scan-fe.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nscan`);
-		writeFileSync(join(cwd, ".pi", "prompts", "review.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nreview`);
-
-		const pi = new FakePi();
-		promptModelExtension(pi as never);
-		const { ctx, getNotifications } = createContext(cwd, pi);
-		await pi.emit("session_start", {}, ctx);
-
-		await pi.commands.get("pipeline")!.handler("", ctx);
-		assert.match(getNotifications().join("\n"), /Step "scan-fe" in parallel\(\) does not support per-task --with-context\./);
 	});
 });
 
@@ -2546,7 +3720,7 @@ test("--model flag overrides prompt model in loop iterations", async () => {
 	});
 });
 
-test("runtime subagent override injects prompt skills into delegated task", async () => {
+test("runtime subagent override embeds prompt skills in the delegated task", async () => {
 	await withTempHome(async (root) => {
 		await withSubagentRuntime(root, async () => {
 			const cwd = join(root, "project");
@@ -2561,68 +3735,27 @@ test("runtime subagent override injects prompt skills into delegated task", asyn
 			await pi.emit("session_start", {}, ctx);
 
 			let delegatedTask = "";
+			let delegatedSkills: string[] | undefined;
 			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
 				const request = payload as any;
 				delegatedTask = request.task;
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-					...request,
-					messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
-					isError: false,
-				});
+				delegatedSkills = request.skill;
+				emitSubagentStarted(pi, request);
+				emitSubagentCompleted(pi, request, "done");
 			});
 
 			await pi.commands.get("check")!.handler("--subagent", ctx);
 
 			assert.deepEqual(pi.userMessages, ["[Delegated result: check]\n\ndone"]);
+			assert.equal(delegatedSkills, undefined);
 			assert.match(delegatedTask, /<skill name="tmux">\ntmux content\n<\/skill>/);
-			assert.match(delegatedTask, /---\n\ncheck code/);
+			assert.match(delegatedTask, /check code$/);
 			assert.equal(await pi.emitWithResult("before_agent_start", { systemPrompt: "BASE" }, ctx), undefined);
 		});
 	});
 });
 
-test("parallel chain runtime subagent override injects step skills into delegated task", async () => {
-	await withTempHome(async (root) => {
-		await withSubagentRuntime(root, async () => {
-			const cwd = join(root, "project");
-			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-			mkdirSync(join(cwd, ".pi", "skills", "tmux"), { recursive: true });
-			writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "parallel(check-a, check-b)"\n---\nignored');
-			writeFileSync(join(cwd, ".pi", "prompts", "check-a.md"), `---\nmodel: ${MODEL_ID}\nskill: tmux\n---\nCHECK-A`);
-			writeFileSync(join(cwd, ".pi", "prompts", "check-b.md"), `---\nmodel: ${MODEL_ID}\n---\nCHECK-B`);
-			writeFileSync(join(cwd, ".pi", "skills", "tmux", "SKILL.md"), "tmux content");
-
-			const pi = new FakePi();
-			const delegatedTasks: string[] = [];
-			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
-				const request = payload as any;
-				delegatedTasks.push(...request.tasks.map((task: any) => task.task));
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-					...request,
-					messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
-					parallelResults: request.tasks.map((task: any) => ({ agent: task.agent, messages: [{ role: "assistant", content: [{ type: "text", text: `done ${task.task}` }] }], isError: false })),
-					isError: false,
-				});
-			});
-			promptModelExtension(pi as never);
-			const { ctx } = createBranchingContext(cwd, pi);
-			await pi.emit("session_start", {}, ctx);
-
-			await pi.commands.get("pipeline")!.handler("--subagent", ctx);
-
-			assert.equal(delegatedTasks.length, 2);
-			assert.match(delegatedTasks[0] ?? "", /<skill name="tmux">\ntmux content\n<\/skill>/);
-			assert.match(delegatedTasks[0] ?? "", /CHECK-A/);
-			assert.doesNotMatch(delegatedTasks[1] ?? "", /<skill name="tmux">/);
-			assert.match(delegatedTasks[1] ?? "", /CHECK-B/);
-		});
-	});
-});
-
-
-test("frontmatter subagent injects prompt skills into delegated task", async () => {
+test("frontmatter subagent embeds prompt skills in the delegated task", async () => {
 	await withTempHome(async (root) => {
 		await withSubagentRuntime(root, async () => {
 			const cwd = join(root, "project");
@@ -2639,15 +3772,13 @@ check body`);
 
 			const pi = new FakePi();
 			let delegatedTask = "";
+			let delegatedSkills: string[] | undefined;
 			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
 				const request = payload as any;
 				delegatedTask = request.task;
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-					...request,
-					messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
-					isError: false,
-				});
+				delegatedSkills = request.skill;
+				emitSubagentStarted(pi, request);
+				emitSubagentCompleted(pi, request, "done");
 			});
 			promptModelExtension(pi as never);
 			const { ctx } = createBranchingContext(cwd, pi);
@@ -2655,13 +3786,15 @@ check body`);
 
 			await pi.commands.get("check")!.handler("", ctx);
 
-			assert.match(delegatedTask, /^<skill name="review">\nreview skill content\n<\/skill>\n\n---\n\ncheck body$/);
+			assert.equal(delegatedSkills, undefined);
+			assert.match(delegatedTask, /<skill name="review">\nreview skill content\n<\/skill>/);
+			assert.match(delegatedTask, /check body$/);
 			assert.equal(await pi.emitWithResult("before_agent_start", { systemPrompt: "BASE" }, ctx), undefined);
 		});
 	});
 });
 
-test("runtime fork injects prompt skills into inherited delegated task", async () => {
+test("runtime fork embeds prompt skills in inherited delegation", async () => {
 	await withTempHome(async (root) => {
 		await withSubagentRuntime(root, async () => {
 			const cwd = join(root, "project");
@@ -2677,16 +3810,14 @@ check body`);
 			const pi = new FakePi();
 			let requestContext = "";
 			let delegatedTask = "";
+			let delegatedSkills: string[] | undefined;
 			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
 				const request = payload as any;
 				requestContext = request.context;
 				delegatedTask = request.task;
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-					...request,
-					messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
-					isError: false,
-				});
+				delegatedSkills = request.skill;
+				emitSubagentStarted(pi, request);
+				emitSubagentCompleted(pi, request, "done");
 			});
 			promptModelExtension(pi as never);
 			const { ctx } = createBranchingContext(cwd, pi);
@@ -2695,18 +3826,19 @@ check body`);
 			await pi.commands.get("check")!.handler("--fork", ctx);
 
 			assert.equal(requestContext, "fork");
-			assert.match(delegatedTask, /^<skill name="review">\nreview skill content\n<\/skill>\n\n---\n\ncheck body$/);
+			assert.equal(delegatedSkills, undefined);
+			assert.match(delegatedTask, /<skill name="review">\nreview skill content\n<\/skill>/);
+			assert.match(delegatedTask, /check body$/);
 		});
 	});
 });
 
-test("delegated prompt skills resolve from session cwd even when prompt cwd differs", async () => {
+test("delegated prompt skills are resolved from the delegated cwd and embedded", async () => {
 	await withTempHome(async (root) => {
 		await withSubagentRuntime(root, async () => {
 			const sessionCwd = join(root, "session-project");
-			const delegatedCwd = join(root, "delegated-project");
+			const delegatedCwd = join(sessionCwd, "delegated-project");
 			mkdirSync(join(sessionCwd, ".pi", "prompts"), { recursive: true });
-			mkdirSync(join(sessionCwd, ".pi", "skills", "shared"), { recursive: true });
 			mkdirSync(join(delegatedCwd, ".pi", "skills", "shared"), { recursive: true });
 			writeFileSync(join(sessionCwd, ".pi", "prompts", "check.md"), `---
 model: ${MODEL_ID}
@@ -2715,32 +3847,38 @@ cwd: ${delegatedCwd}
 skill: shared
 ---
 check body`);
-			writeFileSync(join(sessionCwd, ".pi", "skills", "shared", "SKILL.md"), "session skill content");
 			writeFileSync(join(delegatedCwd, ".pi", "skills", "shared", "SKILL.md"), "delegated cwd skill content");
 
 			const pi = new FakePi();
 			let requestCwd = "";
 			let delegatedTask = "";
+			let delegatedSkills: string[] | undefined;
 			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
 				const request = payload as any;
 				requestCwd = request.cwd;
 				delegatedTask = request.task;
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-					...request,
-					messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
-					isError: false,
-				});
+				delegatedSkills = request.skill;
+				emitSubagentStarted(pi, request);
+				emitSubagentCompleted(pi, request, "done");
 			});
 			promptModelExtension(pi as never);
 			const { ctx } = createBranchingContext(sessionCwd, pi);
+			let approvals = 0;
+			(ctx as any).hasUI = true;
+			(ctx.ui as any).confirm = async () => {
+				approvals++;
+				return true;
+			};
+			(ctx.ui as any).setWorkingMessage = () => {};
 			await pi.emit("session_start", {}, ctx);
 
 			await pi.commands.get("check")!.handler("", ctx);
 
-			assert.equal(requestCwd, delegatedCwd);
-			assert.match(delegatedTask, /session skill content/);
-			assert.doesNotMatch(delegatedTask, /delegated cwd skill content/);
+			assert.equal(approvals, 1);
+			assert.equal(requestCwd, realpathSync(delegatedCwd));
+			assert.equal(delegatedSkills, undefined);
+			assert.match(delegatedTask, /<skill name="shared">\ndelegated cwd skill content\n<\/skill>/);
+			assert.match(delegatedTask, /check body$/);
 		});
 	});
 });
@@ -2810,12 +3948,8 @@ test("delegated single run injects result as user message", async () => {
 
 			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
 				const request = payload as any;
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-					...request,
-					messages: [{ role: "assistant", content: [{ type: "text", text: "single delegated result" }] }],
-					isError: false,
-				});
+				emitSubagentStarted(pi, request);
+				emitSubagentCompleted(pi, request, "single delegated result");
 			});
 
 			await pi.commands.get("simplify")!.handler("", ctx);
@@ -2841,12 +3975,8 @@ test("delegated loop injects last iteration result as user message", async () =>
 			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
 				const request = payload as any;
 				delegatedCall++;
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-					...request,
-					messages: [{ role: "assistant", content: [{ type: "text", text: `delegated loop ${delegatedCall}` }] }],
-					isError: false,
-				});
+				emitSubagentStarted(pi, request);
+				emitSubagentCompleted(pi, request, `delegated loop ${delegatedCall}`);
 			});
 
 			await pi.commands.get("simplify")!.handler("--loop 3 --no-converge", ctx);
@@ -2879,12 +4009,8 @@ test("delegated loop and chain abort do not inject follow-up user messages", asy
 
 			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
 				const request = payload as any;
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-					...request,
-					messages: [{ role: "assistant", content: [{ type: "text", text: "delegated aborted path" }] }],
-					isError: false,
-				});
+				emitSubagentStarted(pi, request);
+				emitSubagentCompleted(pi, request, "delegated aborted path");
 			});
 
 			await pi.commands.get("loop-abort")!.handler("--loop 3 --fresh --no-converge", ctx);
@@ -2935,27 +4061,21 @@ test("delegated loop error after prior success does not inject stale delegated t
 			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
 				const request = payload as any;
 				delegatedCall++;
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				emitSubagentStarted(pi, request);
 				if (delegatedCall === 1) {
-					pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-						...request,
-						messages: [{ role: "assistant", content: [{ type: "text", text: "loop delegated success" }] }],
-						isError: false,
-					});
+					emitSubagentCompleted(pi, request, "loop delegated success");
 					return;
 				}
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-					...request,
-					messages: [],
-					isError: true,
-					errorText: "delegated loop failure",
-				});
+				emitSubagentFailed(pi, request, "delegated loop failure");
 			});
 
-			await pi.commands.get("loop-error")!.handler("--loop 2 --no-converge", ctx);
+			const lifecycle: any[] = [];
+			pi.events.on(PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, (payload) => lifecycle.push(payload));
+			await pi.commands.get("loop-error")!.handler("--loop 3 --no-converge", ctx);
 
 			assert.equal(delegatedCall, 2);
 			assert.equal(pi.userMessages.length, 0);
+			assert.equal(lifecycle.at(-1)?.status, "failed");
 		});
 	});
 });
@@ -2965,8 +4085,10 @@ test("delegated chain error after prior success does not inject stale delegated 
 		await withSubagentBridge(root, async () => {
 			const cwd = join(root, "project");
 			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+			writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), "---\nchain: first -> second -> third\n---\nignored");
 			writeFileSync(join(cwd, ".pi", "prompts", "first.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nFIRST`);
 			writeFileSync(join(cwd, ".pi", "prompts", "second.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSECOND`);
+			writeFileSync(join(cwd, ".pi", "prompts", "third.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nTHIRD`);
 
 			const pi = new FakePi();
 			promptModelExtension(pi as never);
@@ -2977,27 +4099,21 @@ test("delegated chain error after prior success does not inject stale delegated 
 			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
 				const request = payload as any;
 				delegatedCall++;
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
+				emitSubagentStarted(pi, request);
 				if (delegatedCall === 1) {
-					pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-						...request,
-						messages: [{ role: "assistant", content: [{ type: "text", text: "chain delegated success" }] }],
-						isError: false,
-					});
+					emitSubagentCompleted(pi, request, "chain delegated success");
 					return;
 				}
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-					...request,
-					messages: [],
-					isError: true,
-					errorText: "delegated chain failure",
-				});
+				emitSubagentFailed(pi, request, "delegated chain failure");
 			});
 
-			await pi.commands.get("chain-prompts")!.handler("first -> second", ctx);
+			const lifecycle: any[] = [];
+			pi.events.on(PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, (payload) => lifecycle.push(payload));
+			await pi.commands.get("pipeline")!.handler("", ctx);
 
 			assert.equal(delegatedCall, 2);
 			assert.equal(pi.userMessages.length, 0);
+			assert.equal(lifecycle.at(-1)?.status, "failed");
 		});
 	});
 });
@@ -3020,15 +4136,12 @@ test("mixed delegated/inline chain injects only the last delegated text", async 
 			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
 				const request = payload as any;
 				delegatedCall++;
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-					...request,
-					messages: [{
-						role: "assistant",
-						content: [{ type: "text", text: delegatedCall === 1 ? "scan delegated result" : "final delegated result" }],
-					}],
-					isError: false,
-				});
+				emitSubagentStarted(pi, request);
+				emitSubagentCompleted(
+					pi,
+					request,
+					delegatedCall === 1 ? "scan delegated result" : "final delegated result",
+				);
 			});
 
 			await pi.commands.get("chain-prompts")!.handler("scan -> review -> finalize", ctx);
@@ -3058,12 +4171,8 @@ test("delegated loop convergence still triggers and injects after convergence ev
 			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
 				const request = payload as any;
 				delegatedCall++;
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-					...request,
-					messages: [{ role: "assistant", content: [{ type: "text", text: "stable delegated result" }] }],
-					isError: false,
-				});
+				emitSubagentStarted(pi, request);
+				emitSubagentCompleted(pi, request, "stable delegated result");
 			});
 
 			await pi.commands.get("simplify")!.handler("--loop 5", ctx);
@@ -3073,176 +4182,6 @@ test("delegated loop convergence still triggers and injects after convergence ev
 				pi.userMessages,
 				["[Delegated loop converged after 1 iteration(s): simplify]\n\nstable delegated result"],
 			);
-		});
-	});
-});
-
-function parallelResponse(request: any) {
-	const tasks = request.tasks ?? [{ agent: request.agent }];
-	return {
-		...request,
-		parallelResults: tasks.map((t: any) => ({
-			agent: t.agent ?? "delegate",
-			messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
-			isError: false,
-		})),
-		isError: false,
-	};
-}
-
-function singleResponse(request: any) {
-	return {
-		...request,
-		messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }],
-		isError: false,
-	};
-}
-
-test("chain template worktree: true passes worktree flag to parallel subagent request", async () => {
-	await withTempHome(async (root) => {
-		await withSubagentBridge(root, async () => {
-			const cwd = join(root, "project");
-			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-			writeFileSync(join(cwd, ".pi", "prompts", "wt-pipeline.md"), '---\nchain: "parallel(scan-fe, scan-be) -> review"\nworktree: true\n---\nignored');
-			writeFileSync(join(cwd, ".pi", "prompts", "scan-fe.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSCAN-FE`);
-			writeFileSync(join(cwd, ".pi", "prompts", "scan-be.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSCAN-BE`);
-			writeFileSync(join(cwd, ".pi", "prompts", "review.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nREVIEW`);
-
-			const pi = new FakePi();
-			const { ctx } = createBranchingContext(cwd, pi);
-			promptModelExtension(pi as never);
-			await pi.emit("session_start", {}, ctx);
-
-			const requests: any[] = [];
-			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
-				const request = payload as any;
-				requests.push(request);
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-				const response = request.tasks ? parallelResponse(request) : singleResponse(request);
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, response);
-			});
-
-			await pi.commands.get("wt-pipeline")!.handler("", ctx);
-			assert.equal(requests.length, 2);
-			assert.equal(requests[0].worktree, true, "parallel step should have worktree: true");
-			assert.equal(requests[1].worktree, undefined, "sequential step should not have worktree");
-		});
-	});
-});
-
-test("chain-prompts --worktree passes worktree flag to parallel subagent request", async () => {
-	await withTempHome(async (root) => {
-		await withSubagentBridge(root, async () => {
-			const cwd = join(root, "project");
-			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-			writeFileSync(join(cwd, ".pi", "prompts", "scan-fe.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSCAN-FE`);
-			writeFileSync(join(cwd, ".pi", "prompts", "scan-be.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSCAN-BE`);
-			writeFileSync(join(cwd, ".pi", "prompts", "review.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nREVIEW`);
-
-			const pi = new FakePi();
-			const { ctx } = createBranchingContext(cwd, pi);
-			promptModelExtension(pi as never);
-			await pi.emit("session_start", {}, ctx);
-
-			const requests: any[] = [];
-			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
-				const request = payload as any;
-				requests.push(request);
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-				const response = request.tasks ? parallelResponse(request) : singleResponse(request);
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, response);
-			});
-
-			await pi.commands.get("chain-prompts")!.handler("parallel(scan-fe, scan-be) -> review --worktree", ctx);
-			assert.equal(requests.length, 2);
-			assert.equal(requests[0].worktree, true, "parallel step should have worktree: true");
-			assert.equal(requests[1].worktree, undefined, "sequential step should not have worktree");
-		});
-	});
-});
-
-test("chain template CLI --worktree overrides missing frontmatter worktree", async () => {
-	await withTempHome(async (root) => {
-		await withSubagentBridge(root, async () => {
-			const cwd = join(root, "project");
-			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-			writeFileSync(join(cwd, ".pi", "prompts", "no-wt.md"), '---\nchain: "parallel(scan-fe, scan-be)"\n---\nignored');
-			writeFileSync(join(cwd, ".pi", "prompts", "scan-fe.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSCAN-FE`);
-			writeFileSync(join(cwd, ".pi", "prompts", "scan-be.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSCAN-BE`);
-
-			const pi = new FakePi();
-			const { ctx } = createBranchingContext(cwd, pi);
-			promptModelExtension(pi as never);
-			await pi.emit("session_start", {}, ctx);
-
-			const requests: any[] = [];
-			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
-				const request = payload as any;
-				requests.push(request);
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, parallelResponse(request));
-			});
-
-			await pi.commands.get("no-wt")!.handler("--worktree", ctx);
-			assert.equal(requests.length, 1);
-			assert.equal(requests[0].worktree, true);
-		});
-	});
-});
-
-test("chain-prompts --worktree warns when chain has no parallel steps", async () => {
-	await withTempHome(async (root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "analyze.md"), `---\nmodel: ${MODEL_ID}\n---\nANALYZE`);
-		writeFileSync(join(cwd, ".pi", "prompts", "fix.md"), `---\nmodel: ${MODEL_ID}\n---\nFIX`);
-
-		const pi = new FakePi();
-		promptModelExtension(pi as never);
-		const { ctx, getNotifications } = createContext(cwd, pi);
-		await pi.emit("session_start", {}, ctx);
-
-		await pi.commands.get("chain-prompts")!.handler("analyze -> fix --worktree", ctx);
-		assert.ok(getNotifications().some((n) => n.includes("--worktree ignored")));
-	});
-});
-
-test("parallel chain loops treat delegated worktree diffs as changes", async () => {
-	await withTempHome(async (root) => {
-		await withSubagentBridge(root, async () => {
-			const cwd = join(root, "project");
-			mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-			writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "parallel(scan-fe, scan-be)"\n---\nignored');
-			writeFileSync(join(cwd, ".pi", "prompts", "scan-fe.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSCAN-FE`);
-			writeFileSync(join(cwd, ".pi", "prompts", "scan-be.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\nSCAN-BE`);
-
-			const pi = new FakePi();
-			const { ctx } = createBranchingContext(cwd, pi);
-			promptModelExtension(pi as never);
-			await pi.emit("session_start", {}, ctx);
-
-			let requestCount = 0;
-			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
-				const request = payload as any;
-				requestCount++;
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, { requestId: request.requestId });
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
-					...request,
-					messages: [],
-					parallelResults: [
-						{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "frontend done" }] }], isError: false },
-						{ agent: "delegate", messages: [{ role: "assistant", content: [{ type: "text", text: "backend done" }] }], isError: false },
-					],
-					contentText:
-						requestCount === 1
-							? "2/2 succeeded\n\n=== Parallel Task 1 (delegate) ===\nfrontend done\n\n=== Parallel Task 2 (delegate) ===\nbackend done\n\n=== Worktree Changes ===\n\n--- Task 1 (delegate): 1 file changed, +1 -0 ---"
-							: "2/2 succeeded\n\n=== Parallel Task 1 (delegate) ===\nfrontend done\n\n=== Parallel Task 2 (delegate) ===\nbackend done",
-					isError: false,
-				});
-			});
-
-			await pi.commands.get("pipeline")!.handler("--loop 2", ctx);
-			assert.equal(requestCount, 2);
 		});
 	});
 });
@@ -3481,6 +4420,7 @@ test("queued run-prompt enforces project prompt-library approval before command 
 		await pi.tools.get("run-prompt")!.execute("tool-call-library", { command: "review-lib src/server.ts" });
 
 		await pi.emit("agent_end", {}, ctx);
+		await pi.emit("agent_settled", {}, ctx);
 
 		assert.equal(confirmCalls, 1);
 		assert.equal(pi.userMessages.length, 0);
@@ -3507,6 +4447,7 @@ test("queued run-prompt rejects hidden prompt-library commands without approval"
 		await pi.tools.get("run-prompt")!.execute("tool-call-hidden", { command: "hidden-lib src/server.ts" });
 
 		await pi.emit("agent_end", {}, ctx);
+		await pi.emit("agent_settled", {}, ctx);
 
 		assert.equal(confirmCalls, 0);
 		assert.equal(pi.userMessages.length, 0);
@@ -3535,6 +4476,7 @@ test("queued chain-prompts preflights hidden project prompt-library steps before
 		await pi.tools.get("run-prompt")!.execute("tool-call-chain-hidden", { command: "chain-prompts first -> hidden-second task" });
 
 		await pi.emit("agent_end", {}, ctx);
+		await pi.emit("agent_settled", {}, ctx);
 
 		assert.equal(confirmCalls, 1);
 		assert.equal(pi.userMessages.length, 0);
