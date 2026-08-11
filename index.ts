@@ -208,6 +208,10 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		workflowOwner = null;
 		return true;
 	}
+
+	function ownsWorkflowSession(generation: number, owner?: symbol): boolean {
+		return sessionGeneration === generation && (owner === undefined || workflowOwner === owner);
+	}
 	let loopState: LoopState | null = null;
 	let freshCollapse: FreshCollapse | null = null;
 	let boomerangCollapse: BoomerangCollapse | null = null;
@@ -218,6 +222,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	let sessionGeneration = 0;
 	let sessionActive = false;
 	let sessionAbortController = new AbortController();
+	const activeSessionRestorations = new Set<Promise<unknown>>();
 	const commandExecutionScope = new AsyncLocalStorage<CommandExecutionScope>();
 	let pendingCompaction: Promise<void> | null = null;
 	let resolvePendingCompaction: (() => void) | null = null;
@@ -838,7 +843,12 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		// has passed the nested-project approval boundary.
 		const skillResolution = delegatedPrompt
 			? { kind: "none" as const }
-			: resolvePromptSkills(requestedSkills, ctx.cwd, pi.getCommands() as RuntimeSkillCommand[]);
+			: resolvePromptSkills(
+				requestedSkills,
+				ctx.cwd,
+				pi.getCommands() as RuntimeSkillCommand[],
+				{ includeProjectSkills: projectIsTrusted(ctx) },
+			);
 		if (skillResolution.kind === "error") {
 			notify(ctx, skillResolution.error, "error");
 			adaptiveAbortStatus?.("blocked");
@@ -1018,33 +1028,50 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		return result;
 	}
 
+	async function trackSessionRestoration<T>(operation: () => Promise<T>): Promise<T> {
+		const pending = operation();
+		activeSessionRestorations.add(pending);
+		try {
+			return await pending;
+		} finally {
+			activeSessionRestorations.delete(pending);
+		}
+	}
+
 	async function restoreSessionState(
 		ctx: ExtensionContext,
 		originalModel: Model<any> | undefined,
 		originalThinking: ThinkingLevel | undefined,
 		currentModel?: Model<any>,
 		currentThinking?: ThinkingLevel,
-	) {
-		const restoredParts: string[] = [];
-		const shouldRestoreThinking =
-			originalThinking !== undefined && (currentThinking === undefined || currentThinking !== originalThinking);
+		isCurrent: () => boolean = () => true,
+	): Promise<boolean> {
+		return trackSessionRestoration(async () => {
+			if (!isCurrent()) return false;
+			const restoredParts: string[] = [];
+			const shouldRestoreThinking =
+				originalThinking !== undefined && (currentThinking === undefined || currentThinking !== originalThinking);
 
-		if (originalModel && !sameModel(originalModel, currentModel)) {
-			const restoredModel = await pi.setModel(originalModel);
-			if (restoredModel) {
-				runtimeModel = originalModel;
-				restoredParts.push(originalModel.id);
-			} else {
-				notify(ctx, `Failed to restore model ${originalModel.provider}/${originalModel.id}`, "error");
+			if (originalModel && !sameModel(originalModel, currentModel)) {
+				const restoredModel = await pi.setModel(originalModel);
+				if (!isCurrent()) return false;
+				if (restoredModel) {
+					runtimeModel = originalModel;
+					restoredParts.push(originalModel.id);
+				} else {
+					notify(ctx, `Failed to restore model ${originalModel.provider}/${originalModel.id}`, "error");
+				}
 			}
-		}
-		if (shouldRestoreThinking) {
-			restoredParts.push(`thinking:${originalThinking}`);
-			pi.setThinkingLevel(originalThinking);
-		}
-		if (restoredParts.length > 0) {
-			notify(ctx, `Restored to ${restoredParts.join(", ")}`, "info");
-		}
+			if (!isCurrent()) return false;
+			if (shouldRestoreThinking) {
+				restoredParts.push(`thinking:${originalThinking}`);
+				pi.setThinkingLevel(originalThinking);
+			}
+			if (restoredParts.length > 0) {
+				notify(ctx, `Restored to ${restoredParts.join(", ")}`, "info");
+			}
+			return true;
+		});
 	}
 
 	async function restoreAfterExecution(
@@ -1056,12 +1083,14 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		currentThinking: ThinkingLevel | undefined,
 		errorState: ExecutionErrorState,
 		phase: "loop" | "chain",
+		isCurrent: () => boolean,
 	): Promise<ExecutionErrorState> {
 		if (!shouldRestore) return errorState;
 
 		try {
-			await restoreSessionState(ctx, originalModel, originalThinking, currentModel, currentThinking);
+			await restoreSessionState(ctx, originalModel, originalThinking, currentModel, currentThinking, isCurrent);
 		} catch (error) {
+			if (!isCurrent()) return errorState;
 			if (errorState.hasError) {
 				notify(
 					ctx,
@@ -1118,6 +1147,17 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 	}
 
+	function clearWorkflowPresentationState(ctx: ExtensionContext): void {
+		pendingSkillMessage = undefined;
+		loopState = null;
+		freshCollapse = null;
+		boomerangCollapse = null;
+		(globalThis as typeof globalThis & { __boomerangCollapseInProgress?: boolean }).__boomerangCollapseInProgress = false;
+		accumulatedSummaries = [];
+		updateLoopStatus(ctx);
+		if (ctx.hasUI) ctx.ui.setStatus("prompt-chain", undefined);
+	}
+
 	async function executeToolCommand(command: string, ctx: ExtensionCommandContext, source?: "queue") {
 		const stripped = command.startsWith("/") ? command.slice(1) : command;
 		const spaceIdx = stripped.indexOf(" ");
@@ -1155,14 +1195,20 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			return;
 		}
 
-		boomerangCollapse = { targetId, task: name, previousSummaries };
+		const workflowGeneration = sessionGeneration;
+		const collapse = { targetId, task: name, previousSummaries };
+		boomerangCollapse = collapse;
 		try {
 			(globalThis as typeof globalThis & { __boomerangCollapseInProgress?: boolean }).__boomerangCollapseInProgress = true;
 			const result = await ctx.navigateTree(targetId, { summarize: true });
-			if (result.cancelled) notify(ctx, `Boomerang cancelled for prompt \`${name}\``, "warning");
+			if (ownsWorkflowSession(workflowGeneration) && boomerangCollapse === collapse && result.cancelled) {
+				notify(ctx, `Boomerang cancelled for prompt \`${name}\``, "warning");
+			}
 		} finally {
-			(globalThis as typeof globalThis & { __boomerangCollapseInProgress?: boolean }).__boomerangCollapseInProgress = false;
-			boomerangCollapse = null;
+			if (boomerangCollapse === collapse) {
+				(globalThis as typeof globalThis & { __boomerangCollapseInProgress?: boolean }).__boomerangCollapseInProgress = false;
+				boomerangCollapse = null;
+			}
 		}
 	}
 
@@ -1177,6 +1223,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		cwdOverride?: string,
 		promptOverrides?: Partial<Pick<PromptWithModel, "models" | "inheritContext">>,
 	): Promise<PromptTemplatePromptStatus> {
+		const workflowGeneration = sessionGeneration;
 		refreshPrompts(ctx.cwd, ctx);
 		const initialPrompt = prompts.get(name);
 		if (!initialPrompt) {
@@ -1283,9 +1330,15 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				}
 
 				if (useFresh && anchorId && i < effectiveMax - 1) {
-					freshCollapse = { targetId: anchorId, task: name, iteration: i + 1, totalIterations };
+					const collapse = { targetId: anchorId, task: name, iteration: i + 1, totalIterations };
+					freshCollapse = collapse;
 					const result = await ctx.navigateTree(anchorId, { summarize: true });
-					freshCollapse = null;
+					if (freshCollapse === collapse) freshCollapse = null;
+					if (!ownsWorkflowSession(workflowGeneration)) {
+						runStatus = "cancelled";
+						loopAborted = true;
+						break;
+					}
 					if (result.cancelled) {
 						runStatus = "cancelled";
 						loopAborted = true;
@@ -1298,29 +1351,32 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			runStatus = isCommandAborted(ctx) ? "cancelled" : "failed";
 			loopErrorState = { hasError: true, error };
 		} finally {
-			loopErrorState = await restoreAfterExecution(
-				ctx,
-				shouldRestore,
-				savedModel,
-				savedThinking,
-				getCurrentModel(ctx),
-				pi.getThinkingLevel(),
-				loopErrorState,
-				"loop",
-			);
+			if (ownsWorkflowSession(workflowGeneration)) {
+				const isCurrent = () => ownsWorkflowSession(workflowGeneration);
+				loopErrorState = await restoreAfterExecution(
+					ctx,
+					shouldRestore,
+					savedModel,
+					savedThinking,
+					getCurrentModel(ctx),
+					pi.getThinkingLevel(),
+					loopErrorState,
+					"loop",
+					isCurrent,
+				);
 
-			boomerangPreviousSummaries = accumulatedSummaries;
-			loopState = null;
-			pendingSkillMessage = undefined;
-			freshCollapse = null;
-			boomerangCollapse = null;
-			accumulatedSummaries = [];
-			updateLoopStatus(ctx);
+				if (isCurrent()) {
+					boomerangPreviousSummaries = accumulatedSummaries;
+					clearWorkflowPresentationState(ctx);
 
-			if (!loopErrorState.hasError) {
-				notifyLoopCompletion(ctx, completedIterations, totalIterations, effectiveMax, converged, false);
+					if (!loopErrorState.hasError) {
+						notifyLoopCompletion(ctx, completedIterations, totalIterations, effectiveMax, converged, false);
+					}
+				}
 			}
 		}
+		if (loopErrorState.hasError) throw loopErrorState.error;
+		if (!ownsWorkflowSession(workflowGeneration)) return "cancelled";
 
 		if (lastDelegatedText && !loopErrorState.hasError && !loopAborted) {
 			const label = converged
@@ -1333,9 +1389,6 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			await collapseBoomerangPrompt(ctx, name, anchorId, boomerangPreviousSummaries);
 		}
 
-		if (loopErrorState.hasError) {
-			throw loopErrorState.error;
-		}
 		return runStatus;
 	}
 
@@ -1352,6 +1405,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		chainContextEnabled = false,
 		owner?: symbol,
 	): Promise<PromptTemplatePromptStatus> {
+		const workflowGeneration = sessionGeneration;
 		if (owner !== undefined && workflowOwner !== owner) throw new Error("Prompt workflow ownership was lost before chain execution");
 		const validateChainSteps = (): boolean => {
 			const missingTemplates = steps.filter((step) => !chainPrompts.has(step.name));
@@ -1528,7 +1582,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 							}
 						}
 					} finally {
-						if (isStepLooping) {
+						if (isStepLooping && ownsWorkflowSession(workflowGeneration, owner)) {
 							loopState = outerLoopState ? { ...outerLoopState } : null;
 							updateLoopStatus(ctx);
 						}
@@ -1552,10 +1606,17 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				}
 
 				if (anchorId && iteration < effectiveMax - 1) {
-					freshCollapse = { targetId: anchorId, task: chainStepNames, iteration: iteration + 1, totalIterations };
+					const collapse = { targetId: anchorId, task: chainStepNames, iteration: iteration + 1, totalIterations };
+					freshCollapse = collapse;
 					const result = await ctx.navigateTree(anchorId, { summarize: true });
-					freshCollapse = null;
+					if (freshCollapse === collapse) freshCollapse = null;
+					if (!ownsWorkflowSession(workflowGeneration, owner)) {
+						chainStatus = "cancelled";
+						chainAborted = true;
+						break;
+					}
 					if (result.cancelled) {
+						chainStatus = "cancelled";
 						chainAborted = true;
 						notify(ctx, "Loop cancelled", "warning");
 						break;
@@ -1566,39 +1627,36 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		} catch (error) {
 			chainErrorState = { hasError: true, error };
 		} finally {
-			chainErrorState = await restoreAfterExecution(
-				ctx,
-				shouldRestore,
-				originalModel,
-				originalThinking,
-				getCurrentModel(ctx),
-				pi.getThinkingLevel(),
-				chainErrorState,
-				"chain",
-			);
+			if (ownsWorkflowSession(workflowGeneration, owner)) {
+				const isCurrent = () => ownsWorkflowSession(workflowGeneration, owner);
+				chainErrorState = await restoreAfterExecution(
+					ctx,
+					shouldRestore,
+					originalModel,
+					originalThinking,
+					getCurrentModel(ctx),
+					pi.getThinkingLevel(),
+					chainErrorState,
+					"chain",
+					isCurrent,
+				);
 
-			pendingSkillMessage = undefined;
-			loopState = null;
-			freshCollapse = null;
-			boomerangCollapse = null;
-			accumulatedSummaries = [];
-			updateLoopStatus(ctx);
-			if (ctx.hasUI) {
-				ctx.ui.setStatus("prompt-chain", undefined);
-			}
+				if (isCurrent()) {
+					clearWorkflowPresentationState(ctx);
 
-			if (!chainErrorState.hasError) {
-				notifyLoopCompletion(ctx, completedIterations, totalIterations, effectiveMax, converged, true);
+					if (!chainErrorState.hasError) {
+						notifyLoopCompletion(ctx, completedIterations, totalIterations, effectiveMax, converged, true);
+					}
+				}
 			}
 		}
+		if (chainErrorState.hasError) throw chainErrorState.error;
+		if (!ownsWorkflowSession(workflowGeneration, owner)) return "cancelled";
 
 		if (lastDelegatedText && !chainErrorState.hasError && !chainAborted) {
 			if (!(await sendUserMessageAndWait(`[Delegated chain complete: ${chainStepNames}]\n\n${lastDelegatedText}`, ctx))) return "cancelled";
 		}
 
-		if (chainErrorState.hasError) {
-			throw chainErrorState.error;
-		}
 		return chainAborted ? (chainStatus === "completed" ? (isCommandAborted(ctx) ? "cancelled" : "failed") : chainStatus) : "completed";
 	}
 
@@ -2127,6 +2185,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				const repaired = resolvePromptInputs(repairSchema, flags);
 				if (repaired.errors.length) resolvedInputs = { ...resolvedInputs, errors: repaired.errors };
 				else resolvedInputs = { values: { ...resolvedInputs.values, ...repaired.values }, positional: resolvedInputs.positional, errors: [] };
+			} else if (formResult && typeof formResult === "object" && (formResult as { action?: string }).action === "cancelled") {
+				return "cancelled";
 			} else return "failed";
 		}
 		if (resolvedInputs?.errors.length) {
@@ -2190,6 +2250,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		const scope = options.scope ?? commandExecutionScope.getStore() ?? captureCommandExecutionScope(ctx);
 		return commandExecutionScope.run(scope, async () => {
 		let activityOwned = options.activeAlready === true;
+		let activityGeneration = activityOwned ? scope.generation : undefined;
 		let prompt = options.resolvedPrompt;
 		const runId = options.runId ?? randomUUID();
 		let lifecycleStarted = false;
@@ -2224,6 +2285,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				}
 				promptActivityCount++;
 				activityOwned = true;
+				activityGeneration = sessionGeneration;
 				startId = ctx.sessionManager.getLeafId();
 				emitPromptLifecycleEvent(pi, ctx, PROMPT_TEMPLATE_PROMPT_STARTED_EVENT, {
 					protocolVersion: PROMPT_TEMPLATE_PROMPT_PROTOCOL_VERSION,
@@ -2244,10 +2306,10 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			status = isCommandAborted(ctx) ? "cancelled" : "failed";
 			throw error;
 		} finally {
-			if (activityOwned) {
+			if (activityOwned && activityGeneration === sessionGeneration) {
 				promptActivityCount = Math.max(0, promptActivityCount - 1);
-				activityOwned = false;
 			}
+			activityOwned = false;
 			if (lifecycleStarted) {
 				const entries = getIterationEntries(ctx, startId);
 				const lastText = getLastAssistantText(entries);
@@ -2264,10 +2326,12 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		});
 	}
 
-	function resetSessionScopedState(ctx: ExtensionContext) {
+	async function resetSessionScopedState(ctx: ExtensionContext) {
+		const replacementModel = ctx.model;
+		const replacementThinking = pi.getThinkingLevel();
 		sessionAbortController.abort(new Error("Prompt workflow session was replaced"));
 		sessionAbortController = new AbortController();
-		sessionGeneration++;
+		const replacementGeneration = ++sessionGeneration;
 		sessionActive = true;
 		invocationCtx = ctx;
 		finishCompactionGeneration(activeCompactionGeneration, "reset");
@@ -2282,13 +2346,29 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		promptActivityCount = 0;
 		workflowOwner = null;
 		approvedProjectPromptLibraryCwds.clear();
-		pendingSkillMessage = undefined;
+		clearWorkflowPresentationState(ctx);
 		previousModel = undefined;
 		previousThinking = undefined;
-		runtimeModel = ctx.model;
-		boomerangCollapse = null;
+		runtimeModel = replacementModel;
 		toolManager.clearQueue();
 		refreshPrompts(ctx.cwd, ctx);
+
+		const staleRestorations = [...activeSessionRestorations];
+		if (staleRestorations.length === 0) return;
+		await Promise.allSettled(staleRestorations);
+		if (!ownsWorkflowSession(replacementGeneration)) return;
+
+		if (replacementModel && !sameModel(replacementModel, ctx.model)) {
+			const repaired = await trackSessionRestoration(() => pi.setModel(replacementModel));
+			if (!ownsWorkflowSession(replacementGeneration)) return;
+			if (!repaired) {
+				notify(ctx, `Failed to preserve replacement session model ${replacementModel.provider}/${replacementModel.id}`, "error");
+				return;
+			}
+			runtimeModel = replacementModel;
+		}
+		if (!ownsWorkflowSession(replacementGeneration)) return;
+		if (pi.getThinkingLevel() !== replacementThinking) pi.setThinkingLevel(replacementThinking);
 	}
 
 	getExtensionEvents(pi)?.on(PROMPT_TEMPLATE_PROMPT_INVOKE_REQUEST_EVENT, (payload) => {
@@ -2296,7 +2376,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		resetSessionScopedState(ctx);
+		await resetSessionScopedState(ctx);
 	});
 
 	pi.on("session_before_compact", async (event, ctx) => {
@@ -2307,9 +2387,11 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		handleCompactionTerminal();
 	});
 
-	pi.on("session_shutdown", async () => {
+	pi.on("session_shutdown", async (_event, ctx) => {
+		const shutdownModel = ctx.model;
+		const shutdownThinking = pi.getThinkingLevel();
 		sessionAbortController.abort(new Error("Prompt workflow session shut down"));
-		sessionGeneration++;
+		const shutdownGeneration = ++sessionGeneration;
 		sessionActive = false;
 		invocationCtx = null;
 		finishCompactionGeneration(activeCompactionGeneration, "reset");
@@ -2324,6 +2406,18 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		toolManager.clearQueue();
 		promptActivityCount = 0;
 		workflowOwner = null;
+		clearWorkflowPresentationState(ctx);
+		const staleRestorations = [...activeSessionRestorations];
+		if (staleRestorations.length === 0) return;
+		await Promise.allSettled(staleRestorations);
+		if (sessionGeneration !== shutdownGeneration || sessionActive) return;
+		if (shutdownModel && !sameModel(shutdownModel, ctx.model)) {
+			const repaired = await trackSessionRestoration(() => pi.setModel(shutdownModel));
+			if (sessionGeneration !== shutdownGeneration || sessionActive) return;
+			if (!repaired) return;
+		}
+		if (sessionGeneration !== shutdownGeneration || sessionActive) return;
+		if (pi.getThinkingLevel() !== shutdownThinking) pi.setThinkingLevel(shutdownThinking);
 	});
 
 	pi.on("model_select", async (event) => {
