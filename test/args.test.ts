@@ -2,11 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
 	extractChainContextFlag,
-	extractLineupOverrides,
 	extractLoopCount,
 	extractLoopFlags,
 	extractSubagentOverride,
-	extractWorktreeFlag,
+	findRemovedLegacyRuntimeFlag,
 	parseCommandArgs,
 	substituteArgs,
 } from "../args.ts";
@@ -34,6 +33,42 @@ test("substituteArgs is non-recursive", () => {
 test("substituteArgs supports @$ as alias for all args", () => {
 	const result = substituteArgs("Args: @$", ["one", "two"]);
 	assert.equal(result, "Args: one two");
+});
+
+test("findRemovedLegacyRuntimeFlag rejects retired delegation controls but preserves quoted literals", () => {
+	for (const flag of [
+		"--worktree",
+		"--preset=quick",
+		"--preset quick",
+		"--workers=[]",
+		"--workers-append=[]",
+		"--reviewers=[]",
+		"--reviewers-append=[]",
+		"--final-applier={}",
+		"--keep-artifacts",
+	]) {
+		assert.ok(findRemovedLegacyRuntimeFlag(`task ${flag}`), flag);
+	}
+	assert.equal(findRemovedLegacyRuntimeFlag("task -- --worktree"), "--worktree");
+	assert.equal(findRemovedLegacyRuntimeFlag('task "--worktree" \'--preset=quick\''), undefined);
+});
+
+test("findRemovedLegacyRuntimeFlag uses the command parser grammar around escaped quotes", () => {
+	const raw = "\\'literal' --worktree";
+	assert.deepEqual(parseCommandArgs(raw), ["\\literal", "--worktree"]);
+	assert.equal(findRemovedLegacyRuntimeFlag(raw), "--worktree");
+});
+
+test("findRemovedLegacyRuntimeFlag rejects retired flags with partially quoted tokens", () => {
+	for (const [raw, parsed, expected] of [
+		["--workers='[]'", ["--workers=[]"], "--workers"],
+		['--preset="quick"', ["--preset=quick"], "--preset"],
+		["--final-applier='{}'", ["--final-applier={}"], "--final-applier"],
+		['""--worktree', ["--worktree"], "--worktree"],
+	] as const) {
+		assert.deepEqual(parseCommandArgs(raw), parsed, raw);
+		assert.equal(findRemovedLegacyRuntimeFlag(raw), expected, raw);
+	}
 });
 
 test("extractLoopCount extracts --loop N and --loop=N forms", () => {
@@ -212,20 +247,6 @@ test("extractChainContextFlag composes with chain-style args and shared args sep
 	});
 });
 
-test("extractWorktreeFlag strips bare tokens and preserves quoted values", () => {
-	assert.deepEqual(extractWorktreeFlag("parallel(scan,review) --worktree"), {
-		args: "parallel(scan,review)",
-		worktree: true,
-	});
-	assert.deepEqual(extractWorktreeFlag("--worktree chain-a -> chain-b --worktree"), {
-		args: "chain-a -> chain-b",
-		worktree: true,
-	});
-	const extracted = extractWorktreeFlag('"--worktree" parallel(scan,review) --worktree');
-	assert.equal(extracted.worktree, true);
-	assert.deepEqual(parseCommandArgs(extracted.args), ["--worktree", "parallel(scan,review)"]);
-});
-
 test("extractSubagentOverride parses bare and named runtime overrides", () => {
 	assert.deepEqual(extractSubagentOverride("--subagent task"), {
 		args: "task",
@@ -313,37 +334,6 @@ test("extractSubagentOverride ignores empty --model= and quoted --model", () => 
 	});
 });
 
-test("extractSubagentOverride extracts --preset and strips it from args", () => {
-	assert.deepEqual(extractSubagentOverride("--preset=quick task"), {
-		args: "task",
-		preset: "quick",
-	});
-	assert.deepEqual(extractSubagentOverride("--preset quick task"), {
-		args: "task",
-		preset: "quick",
-	});
-	assert.deepEqual(extractSubagentOverride('--preset "quick smoke" task'), {
-		args: "task",
-		preset: "quick smoke",
-	});
-	assert.deepEqual(extractSubagentOverride("task --model=openai/gpt-5.4 --preset deep"), {
-		args: "task",
-		model: "openai/gpt-5.4",
-		preset: "deep",
-	});
-	assert.deepEqual(extractSubagentOverride('"--preset=quick" task --preset='), {
-		args: '"--preset=quick" task',
-	});
-	assert.deepEqual(extractSubagentOverride("task --preset --fork"), {
-		args: "task",
-		override: { enabled: true },
-		fork: true,
-	});
-	assert.deepEqual(extractSubagentOverride('task --workers=[{"agent":"delegate","taskSuffix":"do not use --preset quick"}]'), {
-		args: 'task --workers=[{"agent":"delegate","taskSuffix":"do not use --preset quick"}]',
-	});
-});
-
 test("extractSubagentOverride extracts --fork and implies --subagent", () => {
 	assert.deepEqual(extractSubagentOverride("task --fork"), {
 		args: "task",
@@ -361,127 +351,4 @@ test("extractSubagentOverride preserves quoted --fork", () => {
 	assert.deepEqual(extractSubagentOverride('"--fork" task'), {
 		args: '"--fork" task',
 	});
-});
-
-test("extractLineupOverrides parses worker/reviewer/final-applier slot aliases for unquoted and quoted JSON payloads", () => {
-	const cases = [
-		{
-			input: 'task --workers=[{"subagent":true,"count":3},{"subagent":"delegate","model":"openai/gpt-5.4","taskSuffix":"save to notes.md"}] --reviewers-append=[{"subagent":true,"cwd":"/tmp/repo","count":2}]',
-			expected: [
-				{
-					target: "workers",
-					mode: "replace",
-					slots: [
-						{ agent: "delegate", count: 3 },
-						{ agent: "delegate", model: "openai/gpt-5.4", taskSuffix: "save to notes.md" },
-					],
-				},
-				{
-					target: "reviewers",
-					mode: "append",
-					slots: [{ agent: "reviewer", cwd: "/tmp/repo", count: 2 }],
-				},
-			],
-		},
-		{
-			input: 'task --workers=[{"subagent":true, "task":"fix bug", "taskSuffix":"write findings"}, {"agent":"delegate","model":"openai/gpt-5.4"}] --reviewers=[{"subagent":true, "task":"rank variants", "count":2}]',
-			expected: [
-				{
-					target: "workers",
-					mode: "replace",
-					slots: [
-						{ agent: "delegate", task: "fix bug", taskSuffix: "write findings" },
-						{ agent: "delegate", model: "openai/gpt-5.4" },
-					],
-				},
-				{
-					target: "reviewers",
-					mode: "replace",
-					slots: [{ agent: "reviewer", task: "rank variants", count: 2 }],
-				},
-			],
-		},
-		{
-			input: `task --workers='[{"subagent":true,"task":"fix bug"}]' --reviewers-append='[{"subagent":true}]'`,
-			expected: [
-				{
-					target: "workers",
-					mode: "replace",
-					slots: [{ agent: "delegate", task: "fix bug" }],
-				},
-				{
-					target: "reviewers",
-					mode: "append",
-					slots: [{ agent: "reviewer" }],
-				},
-			],
-		},
-		{
-			input: 'task --final-applier={"subagent":true,"model":"openai-codex/gpt-5.4:low","taskSuffix":"Prefer merge plans when they beat any single worker."}',
-			expected: [
-				{
-					target: "finalApplier",
-					mode: "replace",
-					slots: [{ agent: "delegate", model: "openai-codex/gpt-5.4:low", taskSuffix: "Prefer merge plans when they beat any single worker." }],
-				},
-			],
-		},
-	] as const;
-
-	for (const testCase of cases) {
-		const extracted = extractLineupOverrides(testCase.input);
-		assert.equal(extracted.args, "task");
-		assert.equal(extracted.errors.length, 0);
-		assert.deepEqual(extracted.actions, testCase.expected);
-	}
-});
-
-test("extractLineupOverrides reports invalid slot payloads and strips known flags", () => {
-	const cases = [
-		{
-			input: 'task --workers=not-json --reviewers=[{"subagent":false}]',
-			errorCount: 2,
-			patterns: [/valid JSON/, /requires "subagent" to be true or a non-empty string/],
-		},
-		{
-			input: 'task --workers=[{"agent":"delegate","subagent":true}]',
-			errorCount: 1,
-			patterns: [/cannot combine "agent" and "subagent"/],
-		},
-		{
-			input: 'task --workers=[{"agent":"delegate","count":"2"}] --reviewers=[{"subagent":true,"count":0}]',
-			errorCount: 2,
-			patterns: [/"count" must be an integer greater than or equal to 1/, /"count" must be an integer greater than or equal to 1/],
-		},
-		{
-			input: 'task --final-applier=[{"subagent":true},{"subagent":true}]',
-			errorCount: 1,
-			patterns: [/one-element JSON array/],
-		},
-		{
-			input: 'task --final-applier={"subagent":true,"count":2}',
-			errorCount: 1,
-			patterns: [/"count" is not supported/],
-		},
-		{
-			input: 'task --final-applier={"subagent":true,"cwd":"/tmp/repo"}',
-			errorCount: 1,
-			patterns: [/"cwd" is not supported/],
-		},
-		{
-			input: 'task --final-applier={"subagent":true,"cwd":123}',
-			errorCount: 1,
-			patterns: [/"cwd" is not supported/],
-		},
-	] as const;
-
-	for (const testCase of cases) {
-		const extracted = extractLineupOverrides(testCase.input);
-		assert.equal(extracted.args, "task");
-		assert.equal(extracted.actions.length, 0);
-		assert.equal(extracted.errors.length, testCase.errorCount);
-		for (let i = 0; i < testCase.patterns.length; i++) {
-			assert.match(extracted.errors[i] ?? "", testCase.patterns[i]);
-		}
-	}
 });

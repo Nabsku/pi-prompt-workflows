@@ -473,258 +473,6 @@ test("validatePromptTemplates rejects chain step targets that are chain template
 	});
 });
 
-test("validatePromptTemplates rejects parallel chain step targets that are chain templates", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "leaf.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nleaf");
-		writeFileSync(join(cwd, ".pi", "prompts", "inner.md"), "---\nchain: leaf\n---\nignored");
-		writeFileSync(join(cwd, ".pi", "prompts", "worker.md"), "---\nmodel: claude-sonnet-4-20250514\nsubagent: true\n---\nworker");
-		writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "parallel(inner, worker)"\n---\nignored');
-
-		const result = validatePromptTemplates(cwd);
-
-		assert.equal(result.ok, false);
-		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "invalid-chain-step-target"), true);
-		assert.match(result.diagnostics.find((diagnostic) => diagnostic.code === "invalid-chain-step-target")?.message ?? "", /inner/);
-	});
-});
-
-test("validatePromptTemplates accepts parallel chain step targets that can be runtime delegated", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "plain.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nplain");
-		writeFileSync(join(cwd, ".pi", "prompts", "worker.md"), "---\nmodel: claude-sonnet-4-20250514\nsubagent: true\n---\nworker");
-		writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "parallel(plain, worker)"\n---\nignored');
-
-		const result = validatePromptTemplates(cwd);
-
-		assert.equal(result.ok, true);
-		assert.deepEqual(result.diagnostics, []);
-	});
-});
-
-test("validatePromptTemplates rejects mixed inheritContext between plain and inherited parallel targets", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "plain.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nplain");
-		writeFileSync(join(cwd, ".pi", "prompts", "inherited.md"), "---\nmodel: claude-sonnet-4-20250514\nsubagent: true\ninheritContext: true\n---\ninherited");
-		writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "parallel(plain, inherited)"\n---\nignored');
-
-		const result = validatePromptTemplates(cwd);
-
-		assert.equal(result.ok, false);
-		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "parallel-inherit-context-mismatch"), true);
-		assert.match(result.diagnostics.find((diagnostic) => diagnostic.code === "parallel-inherit-context-mismatch")?.message ?? "", /plain=fresh, inherited=fork/);
-	});
-});
-
-test("validatePromptTemplates allows skill-bearing parallel targets", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		mkdirSync(join(cwd, ".pi", "skills", "some-skill"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "skills", "some-skill", "SKILL.md"), "# some skill\n");
-		writeFileSync(join(cwd, ".pi", "prompts", "plain-skill.md"), "---\nmodel: claude-sonnet-4-20250514\nskills: [some-skill]\n---\nplain with skill");
-		writeFileSync(join(cwd, ".pi", "prompts", "worker.md"), "---\nmodel: claude-sonnet-4-20250514\nsubagent: true\n---\nworker");
-		writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "parallel(plain-skill, worker)"\n---\nignored');
-
-		const result = validatePromptTemplates(cwd);
-
-		assert.equal(result.ok, true);
-		assert.equal(result.diagnostics.some((entry) => entry.code === "parallel-skill-subagent-incompatible"), false);
-	});
-});
-
-test("validatePromptTemplates rejects unsupported per-task flags in parallel chain steps", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "looper.md"), "---\nmodel: claude-sonnet-4-20250514\nsubagent: true\n---\nlooper");
-		writeFileSync(join(cwd, ".pi", "prompts", "context.md"), "---\nmodel: claude-sonnet-4-20250514\nsubagent: true\n---\ncontext");
-		writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "parallel(looper --loop 2, context --with-context)"\n---\nignored');
-
-		const result = validatePromptTemplates(cwd);
-		const flagDiagnostics = result.diagnostics.filter((diagnostic) => diagnostic.code === "invalid-parallel-chain-step-flag");
-
-		assert.equal(result.ok, false);
-		assert.equal(flagDiagnostics.length, 2);
-		assert.match(flagDiagnostics.map((diagnostic) => diagnostic.message).join("\n"), /--loop/);
-		assert.match(flagDiagnostics.map((diagnostic) => diagnostic.message).join("\n"), /--with-context/);
-	});
-});
-
-test("validatePromptTemplates rejects delegated parallel steps with mixed inheritContext modes", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "fresh.md"), "---\nmodel: claude-sonnet-4-20250514\nsubagent: worker\n---\nfresh");
-		writeFileSync(join(cwd, ".pi", "prompts", "inherited.md"), "---\nmodel: claude-sonnet-4-20250514\nsubagent: reviewer\ninheritContext: true\n---\ninherited");
-		writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nchain: "parallel(fresh, inherited)"\n---\nignored');
-
-		const result = validatePromptTemplates(cwd);
-
-		assert.equal(result.ok, false);
-		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "parallel-inherit-context-mismatch"), true);
-		assert.match(result.diagnostics.find((diagnostic) => diagnostic.code === "parallel-inherit-context-mismatch")?.message ?? "", /fresh=fresh, inherited=fork/);
-	});
-});
-
-test("validatePromptTemplates validates best-of-N preset references and preset files", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		mkdirSync(join(cwd, ".pi"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "missing.md"), "---\nbestOfN:\n  preset: missing\n---\n$@");
-		writeFileSync(join(cwd, ".pi", "prompts", "invalid-preset-file.md"), "---\nbestOfN:\n  preset: bad\n---\n$@");
-		writeFileSync(join(cwd, ".pi", "best-of-n-presets.json"), JSON.stringify({ presets: { bad: { workers: [] } } }));
-
-		const result = validatePromptTemplates(cwd);
-		const codes = result.diagnostics.map((diagnostic) => diagnostic.code);
-
-		assert.equal(result.ok, false);
-		assert.equal(codes.filter((code) => code === "invalid-best-of-n-preset").length, 1);
-		assert.equal(codes.filter((code) => code === "best-of-n-preset-not-found").length, 2);
-		assert.match(result.diagnostics.map((diagnostic) => diagnostic.message).join("\n"), /references missing best-of-N preset "missing"/);
-		assert.match(result.diagnostics.map((diagnostic) => diagnostic.message).join("\n"), /references missing best-of-N preset "bad"/);
-	});
-});
-
-test("validatePromptTemplates rejects best-of-N preset references that exceed maxModelCalls", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		mkdirSync(join(cwd, ".pi"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "compare.md"), "---\nbestOfN:\n  preset: capped\n  worktree: true\n  finalApplier:\n    agent: reviewer\n---\n$@");
-		writeFileSync(join(cwd, ".pi", "best-of-n-presets.json"), JSON.stringify({ presets: { capped: { maxModelCalls: 2, workers: [{ agent: "delegate" }] } } }));
-
-		const result = validatePromptTemplates(cwd);
-
-		assert.equal(result.ok, false);
-		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "best-of-n-preset-cap-exceeded"), true);
-		assert.match(result.diagnostics.find((diagnostic) => diagnostic.code === "best-of-n-preset-cap-exceeded")?.message ?? "", /expanded model calls \(3\) exceed maxModelCalls \(2\)/);
-	});
-});
-
-test("validatePromptTemplates ignores invalid preset files when no prompt references a preset", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		mkdirSync(join(cwd, ".pi"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "plain.md"), "---\nmodel: claude-sonnet-4-20250514\n---\nbody");
-		writeFileSync(join(cwd, ".pi", "best-of-n-presets.json"), "{ not json");
-
-		const result = validatePromptTemplates(cwd);
-
-		assert.equal(result.ok, true);
-		assert.deepEqual(result.diagnostics, []);
-	});
-});
-
-test("validatePromptTemplates resolves best-of-N presets from prompt cwd", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		const target = join(root, "target");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		mkdirSync(join(target, ".pi"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "compare.md"), `---\ncwd: ${target}\nbestOfN:\n  preset: targetQuick\n---\n$@`);
-		writeFileSync(join(target, ".pi", "best-of-n-presets.json"), JSON.stringify({ presets: { targetQuick: { workers: [{ agent: "delegate" }] } } }));
-
-		const result = validatePromptTemplates(cwd);
-
-		assert.equal(result.ok, true);
-		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "best-of-n-preset-not-found"), false);
-	});
-});
-
-test("validatePromptTemplates rejects worktree parallel steps with mixed effective cwd values", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		const otherCwd = join(root, "other-project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		mkdirSync(otherCwd, { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "worker-a.md"), `---\nmodel: claude-sonnet-4-20250514\nsubagent: true\ncwd: ${cwd}\n---\nworker a`);
-		writeFileSync(join(cwd, ".pi", "prompts", "worker-b.md"), `---\nmodel: claude-sonnet-4-20250514\nsubagent: true\ncwd: ${otherCwd}\n---\nworker b`);
-		writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), '---\nworktree: true\nchain: "parallel(worker-a, worker-b)"\n---\nignored');
-
-		const result = validatePromptTemplates(cwd);
-
-		assert.equal(result.ok, false);
-		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "parallel-worktree-mixed-cwd"), true);
-		assert.match(result.diagnostics.find((diagnostic) => diagnostic.code === "parallel-worktree-mixed-cwd")?.message ?? "", /parallel\(\) step cwd values differ/);
-	});
-});
-
-test("validatePromptTemplates honors chain cwd override for worktree parallel cwd validation", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		const otherCwd = join(root, "other-project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		mkdirSync(otherCwd, { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "worker-a.md"), `---\nmodel: claude-sonnet-4-20250514\nsubagent: true\ncwd: ${cwd}\n---\nworker a`);
-		writeFileSync(join(cwd, ".pi", "prompts", "worker-b.md"), `---\nmodel: claude-sonnet-4-20250514\nsubagent: true\ncwd: ${otherCwd}\n---\nworker b`);
-		writeFileSync(join(cwd, ".pi", "prompts", "pipeline.md"), `---\nworktree: true\ncwd: ${cwd}\nchain: "parallel(worker-a, worker-b)"\n---\nignored`);
-
-		const result = validatePromptTemplates(cwd);
-
-		assert.equal(result.ok, true);
-		assert.deepEqual(result.diagnostics, []);
-	});
-});
-
-test("validatePromptTemplates rejects bestOfN.finalApplier without worktree true", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "compare.md"), [
-			"---",
-			"model: claude-sonnet-4-20250514",
-			"bestOfN:",
-			"  workers:",
-			"    - agent: delegate",
-			"  finalApplier:",
-			"    agent: delegate",
-			"---",
-			"compare",
-		].join("\n"));
-
-		const result = validatePromptTemplates(cwd);
-
-		assert.equal(result.ok, false);
-		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "compare-final-applier-requires-worktree"), true);
-	});
-});
-
-test("validatePromptTemplates rejects bestOfN.worktree true with mixed worker cwd values", () => {
-	withTempHome((root) => {
-		const cwd = join(root, "project");
-		const workerCwd = join(root, "worker-project");
-		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
-		mkdirSync(workerCwd, { recursive: true });
-		writeFileSync(join(cwd, ".pi", "prompts", "compare.md"), [
-			"---",
-			"model: claude-sonnet-4-20250514",
-			"bestOfN:",
-			"  worktree: true",
-			"  workers:",
-			"    - agent: delegate",
-			`      cwd: ${cwd}`,
-			"    - agent: reviewer",
-			`      cwd: ${workerCwd}`,
-			"---",
-			"compare",
-		].join("\n"));
-
-		const result = validatePromptTemplates(cwd);
-
-		assert.equal(result.ok, false);
-		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.code === "compare-worktree-mixed-worker-cwd"), true);
-		assert.match(result.diagnostics.find((diagnostic) => diagnostic.code === "compare-worktree-mixed-worker-cwd")?.message ?? "", /worker cwd values differ/);
-	});
-});
-
 test("validatePromptTemplates reads the highest-priority filesystem skill for exact skill references", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
@@ -1187,6 +935,23 @@ test("validatePromptTemplates does not defer malformed model-like text", () => {
 	});
 });
 
+test("validatePromptTemplates reports nested delegated cwd approval requirements", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const delegatedCwd = join(cwd, "delegated-project");
+		const promptsDir = join(cwd, ".pi", "prompts");
+		const skillDir = join(delegatedCwd, ".pi", "skills", "delegated-only");
+		mkdirSync(promptsDir, { recursive: true });
+		mkdirSync(skillDir, { recursive: true });
+		writeFileSync(join(skillDir, "SKILL.md"), "delegated skill content");
+		writeFileSync(join(promptsDir, "delegated.md"), `---\nmodel: openai/gpt-test\nsubagent: true\ncwd: ${delegatedCwd}\nskill: delegated-only\n---\nx`);
+
+		const result = validatePromptTemplates(cwd);
+		const diagnostic = result.diagnostics.find((item) => item.code === "delegated-cwd-trust");
+		assert.match(diagnostic?.message ?? "", /separate approval.*nested project/i);
+	});
+});
+
 test("validatePromptTemplates includes delegated skill payloads in static budgets", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
@@ -1365,4 +1130,22 @@ test("validation report has aggregate line and UTF-8 byte caps with a safe omiss
 	assert.ok(report.split("\n").length <= 400);
 	assert.match(report, /omitted/);
 	assert.doesNotMatch(report, /\x1b|[\u0000-\u0008\u000b-\u001f\u007f-\u009f]|[\ud800-\udbff](?![\udc00-\udfff])|(?:^|[^\ud800-\udbff])[\udc00-\udfff]/);
+});
+
+
+test("validatePromptTemplates rejects project skills from a delegated cwd outside the trusted session root", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const delegatedCwd = join(root, "outside-project");
+		const promptsDir = join(cwd, ".pi", "prompts");
+		const skillDir = join(delegatedCwd, ".pi", "skills", "outside-only");
+		mkdirSync(promptsDir, { recursive: true });
+		mkdirSync(skillDir, { recursive: true });
+		writeFileSync(join(skillDir, "SKILL.md"), "untrusted skill content");
+		writeFileSync(join(promptsDir, "delegated.md"), `---\nmodel: openai/gpt-test\nsubagent: true\ncwd: ${delegatedCwd}\nskill: outside-only\n---\nx`);
+
+		const outcome = validatePromptTemplates(cwd);
+		const diagnostic = outcome.diagnostics.find((item) => item.code === "delegated-cwd-trust");
+		assert.match(diagnostic?.message ?? "", /outside the trusted session root/i);
+	});
 });

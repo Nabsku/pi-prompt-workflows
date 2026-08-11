@@ -1,4 +1,4 @@
-import { parseCommandArgs } from "./args.ts";
+import { parseCommandArgs } from "./args.js";
 
 export interface ChainStep {
 	name: string;
@@ -7,20 +7,14 @@ export interface ChainStep {
 	withContext?: boolean;
 }
 
-export interface ParallelChainStep {
-	parallel: ChainStep[];
-}
-
-export type ChainStepOrParallel = ChainStep | ParallelChainStep;
-
 export interface ParsedChainSteps {
-	steps: ChainStepOrParallel[];
+	steps: ChainStep[];
 	sharedArgs: string[];
 	invalidSegments: string[];
 }
 
 export interface ParsedChainDeclaration {
-	steps: ChainStepOrParallel[];
+	steps: ChainStep[];
 	invalidSegments: string[];
 }
 
@@ -206,33 +200,6 @@ function splitByTopLevelSeparator(input: string, separator: string): string[] {
 	return parts;
 }
 
-function findMatchingParen(segment: string, openIndex: number): number {
-	let inQuote: string | null = null;
-	let depth = 0;
-
-	for (let i = openIndex; i < segment.length; i++) {
-		const char = segment[i];
-		if (inQuote) {
-			if (char === inQuote) inQuote = null;
-			continue;
-		}
-
-		if (char === '"' || char === "'") {
-			inQuote = char;
-			continue;
-		}
-		if (char === "(") {
-			depth++;
-			continue;
-		}
-		if (char !== ")") continue;
-		depth--;
-		if (depth === 0) return i;
-	}
-
-	return -1;
-}
-
 function parseSingleStepSegment(segment: string): ChainStep | undefined {
 	const { cleanedSegment, loopCount, withContext } = extractStepFlags(segment);
 	const tokens = parseCommandArgs(cleanedSegment);
@@ -240,35 +207,7 @@ function parseSingleStepSegment(segment: string): ChainStep | undefined {
 	return { name: tokens[0], args: tokens.slice(1), loopCount, ...(withContext ? { withContext: true } : {}) };
 }
 
-function parseParallelStepSegment(segment: string): ParallelChainStep | undefined {
-	if (!/^parallel\s*\(/.test(segment)) return undefined;
-	const openIndex = segment.indexOf("(");
-	if (openIndex < 0) return undefined;
-
-	const closeIndex = findMatchingParen(segment, openIndex);
-	if (closeIndex < 0) return undefined;
-	if (segment.slice(closeIndex + 1).trim().length > 0) return undefined;
-
-	const inner = segment.slice(openIndex + 1, closeIndex).trim();
-	if (!inner) return undefined;
-
-	const parsedSteps: ChainStep[] = [];
-	for (const rawEntry of splitByTopLevelSeparator(inner, ",")) {
-		const entry = rawEntry.trim();
-		if (!entry) return undefined;
-		if (/^parallel\s*\(/.test(entry)) return undefined;
-		const parsed = parseSingleStepSegment(entry);
-		if (!parsed) return undefined;
-		parsedSteps.push(parsed);
-	}
-
-	if (parsedSteps.length === 0) return undefined;
-	return { parallel: parsedSteps };
-}
-
-function parseChainSegment(segment: string): ChainStepOrParallel | undefined {
-	const parallelStep = parseParallelStepSegment(segment);
-	if (parallelStep) return parallelStep;
+function parseChainSegment(segment: string): ChainStep | undefined {
 	if (/^parallel\s*\(/.test(segment)) return undefined;
 	return parseSingleStepSegment(segment);
 }
@@ -279,7 +218,7 @@ export function parseChainSteps(args: string): ParsedChainSteps {
 	const argsPart = sharedArgsSplit.length > 1 ? sharedArgsSplit.slice(1).join(" -- ") : "";
 
 	const invalidSegments: string[] = [];
-	const steps: ChainStepOrParallel[] = [];
+	const steps: ChainStep[] = [];
 
 	for (const rawSegment of splitByTopLevelSeparator(templatesPart, "->")) {
 		const segment = rawSegment.trim();
@@ -388,7 +327,7 @@ export function parseChainDeclaration(chain: string | unknown[], limits?: unknow
 export function parseChainDeclaration(chain: string | unknown[], limits?: unknown): ParsedChainDeclaration | ParsedStructuredChainDeclaration {
 	if (Array.isArray(chain)) return parseStructuredChainDeclaration(chain, limits);
 	const invalidSegments: string[] = [];
-	const steps: ChainStepOrParallel[] = [];
+	const steps: ChainStep[] = [];
 
 	for (const rawSegment of splitByTopLevelSeparator(chain, "->")) {
 		const segment = rawSegment.trim();

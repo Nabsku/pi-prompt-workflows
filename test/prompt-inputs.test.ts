@@ -50,6 +50,25 @@ test("rejects runtime flag and boolean negative-alias collisions", () => {
 	assert.match(validatePromptInputSchema({ "no-model": { type: "string", required: true } }).join("\n"), /runtime flag/);
 });
 
+test("rejects input names reserved by removed runtime flags", () => {
+	for (const name of [
+		"worktree",
+		"preset",
+		"workers",
+		"workers-append",
+		"reviewers",
+		"reviewers-append",
+		"final-applier",
+		"keep-artifacts",
+	]) {
+		assert.match(
+			validatePromptInputSchema({ [name]: { type: "string", required: true } }).join("\n"),
+			/runtime flag/,
+			name,
+		);
+	}
+});
+
 test("requires a resolution path for strings and choices", () => {
 	const errors = validatePromptInputSchema({ note: { type: "string" }, mode: { type: "choice", options: ["a"] } });
 	assert.equal(errors.length, 2);

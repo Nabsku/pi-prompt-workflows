@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -48,6 +48,20 @@ function snapshotProbe(cwd: string, bin: string, deadlineMs?: number): { ok: boo
 		env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
 	}).trim());
 }
+
+test("non-repository snapshots do not leak Git diagnostics to stderr", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "git-snapshot-non-repo-"));
+	try {
+		const moduleUrl = new URL("../git-worktree-snapshot.ts", import.meta.url).href;
+		const source = `import { captureGitWorktreeSnapshot } from ${JSON.stringify(moduleUrl)};\ntry { captureGitWorktreeSnapshot(${JSON.stringify(cwd)}); } catch (error) { process.stdout.write(String(error?.code ?? "")); }`;
+		const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", source], { encoding: "utf8" });
+		assert.equal(result.status, 0);
+		assert.equal(result.stdout, "NOT_GIT_REPOSITORY");
+		assert.equal(result.stderr, "");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
 
 test("clean to unchanged, tracked edit, and untracked creation", () => {
 	const cwd = repo();
