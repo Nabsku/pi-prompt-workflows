@@ -1,6 +1,5 @@
 import { decodeKittyPrintable, Key, matchesKey, type Component } from "@earendil-works/pi-tui";
 import type { PromptDryRunResult } from "./prompt-dry-run.js";
-import { formatComparePreflight } from "./prompt-dry-run-renderer.js";
 import type { PromptIncludeGraph, PromptIncludeGraphEdge, PromptIncludeGraphNode } from "./prompt-includes.js";
 import type { PromptLoaderDiagnostic } from "./prompt-loader.js";
 import { capSanitizedText, sanitizeForTerminal, truncateForTerminalWidth } from "./render-safe.js";
@@ -25,7 +24,6 @@ export interface PromptDryRunTuiViewModel {
 		prompt: string;
 		metadata: string;
 		budget: string;
-		compare: string;
 		adaptive: string;
 		skills: string;
 		includes: string;
@@ -54,11 +52,6 @@ function modelLabel(result: PromptDryRunResult): string {
 	const model = result.model as { provider?: string; id?: string } | string | undefined;
 	if (typeof model === "string") return model;
 	return [model?.provider, model?.id].filter(Boolean).join("/") || "n/a";
-}
-
-function formatCompare(result: PromptDryRunResult): string {
-	if (!result.comparePreflight) return "No compare preflight.";
-	return sanitizeForTerminal(formatComparePreflight(result.comparePreflight, result.runtime, result.warnings), { preserveLineBreaks: true });
 }
 
 function formatRuntime(result: PromptDryRunResult): string[] {
@@ -187,7 +180,6 @@ export function createPromptDryRunTuiViewModel(result: PromptDryRunResult, plain
 			prompt,
 			metadata,
 			budget: formatBudget(result),
-			compare: formatCompare(result),
 			adaptive: result.adaptivePreflight ? formatAdaptivePreflight(result.adaptivePreflight) : "No adaptive chain.",
 			skills: formatSkills(result),
 			includes: formatIncludes(result),
@@ -282,7 +274,7 @@ export class PromptDryRunPicker implements Component {
 	invalidate(): void {}
 }
 
-const PANE_NAMES = ["Prompt", "Metadata", "Budget", "Compare", "Skills", "Includes", "Warnings", "Raw", "Adaptive"] as const;
+const PANE_NAMES = ["Prompt", "Metadata", "Budget", "Skills", "Includes", "Warnings", "Raw", "Adaptive"] as const;
 type PaneName = typeof PANE_NAMES[number];
 
 export class PromptDryRunInspector implements Component {
@@ -295,8 +287,7 @@ export class PromptDryRunInspector implements Component {
 		readonly theme?: unknown,
 		readonly done?: (value: PromptDryRunTuiResult) => void,
 	) {
-		if (viewModel.result.comparePreflight) this.paneIndex = PANE_NAMES.indexOf("Compare");
-		else if (viewModel.result.adaptivePreflight) this.paneIndex = PANE_NAMES.indexOf("Adaptive");
+		if (viewModel.result.adaptivePreflight) this.paneIndex = PANE_NAMES.indexOf("Adaptive");
 	}
 
 	private activePane(): PaneName {

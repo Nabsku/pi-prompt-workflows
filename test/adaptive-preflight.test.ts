@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createAdaptivePreflight, formatAdaptivePreflight, MAX_ADAPTIVE_PREFLIGHT_STATES, prepareAdaptivePreflight } from "../adaptive-preflight.ts";
 import { formatAdaptiveDecision, formatAdaptiveRuntimeReport } from "../adaptive-renderer.ts";
 import type { PromptWithModel } from "../prompt-loader.ts";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { estimatePromptTokens } from "../prompt-budget.ts";
@@ -86,17 +86,15 @@ test("adaptive initial token path labels baseline limit exhaustion", async () =>
 	assert.match(formatAdaptivePreflight(result), /initial baseline=1 .*exhausted/);
 });
 
-test("adaptive preflight fails closed for missing, kind mismatch and multi-call target", () => {
-	const wrapper = prompt("flow", { adaptiveChain: { limits: { maxSteps: 3, maxModelCalls: 3 }, steps: [
+test("adaptive preflight fails closed for missing and kind-mismatched targets", () => {
+	const wrapper = prompt("flow", { adaptiveChain: { limits: { maxSteps: 2, maxModelCalls: 2 }, steps: [
 		{ id: "a", kind: "prompt", target: "missing", when: "always" },
 		{ id: "b", kind: "run", target: "plain", when: "always" },
-		{ id: "c", kind: "prompt", target: "multi", when: "always" },
 	] } });
-	const result = createAdaptivePreflight(wrapper, new Map([["plain", prompt("plain")], ["multi", prompt("multi", { parallel: 2 })]]), "/repo");
+	const result = createAdaptivePreflight(wrapper, new Map([["plain", prompt("plain")]]), "/repo");
 	assert.equal(result.status, "blocked");
 	assert.match(result.diagnostics.join("\n"), /Missing prompt target/);
 	assert.match(result.diagnostics.join("\n"), /Kind mismatch/);
-	assert.match(result.diagnostics.join("\n"), /multiple top-level model calls/);
 });
 
 test("adaptive preflight bounds adversarial branching by deterministic state count", () => {
@@ -308,4 +306,32 @@ test("inconclusive adaptive cost bound includes every prepared switched-model ro
 	assert.equal(result.analysis.complete, false);
 	assert.ok(result.promptCostBounds.maximumReachable >= result.promptCostBounds.initialFallthrough);
 	assert.ok(result.promptCostBounds.maximumReachable >= 128 * 1000);
+});
+
+
+test("adaptive preflight rejects project skills from a target cwd outside the trusted session root", async () => {
+	const root = mkdtempSync(join(tmpdir(), "adaptive-trust-"));
+	try {
+		const sessionCwd = join(root, "session");
+		const delegatedCwd = join(root, "outside");
+		const skillDir = join(delegatedCwd, ".pi", "skills", "outside-only");
+		mkdirSync(sessionCwd, { recursive: true });
+		mkdirSync(skillDir, { recursive: true });
+		writeFileSync(join(skillDir, "SKILL.md"), "untrusted skill content");
+		const wrapper = prompt("flow", { adaptiveChain: { limits: { maxSteps: 1, maxModelCalls: 1 }, steps: [{ id: "delegated", kind: "prompt", target: "delegated", when: "always" }] } });
+		const catalog = new Map([["delegated", prompt("delegated", { cwd: delegatedCwd, skills: ["outside-only"] })]]);
+		const activeModel = { provider: "test", id: "model" } as any;
+		const outcome = await prepareAdaptivePreflight(wrapper, catalog, {
+			cwd: sessionCwd,
+			args: [],
+			currentModel: activeModel,
+			modelRegistry: { find: () => activeModel, getAll: () => [activeModel], getAvailable: () => [activeModel] } as any,
+			projectTrusted: true,
+		});
+
+		assert.equal(outcome.status, "blocked");
+		assert.match(outcome.targets[0]!.issues.join("\n"), /Skill \"outside-only\" not found/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });

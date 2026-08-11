@@ -1,5 +1,6 @@
 import type { MessageRenderOptions, Theme } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Spacer, Text } from "@earendil-works/pi-tui";
+import type { DelegatedSubagentUsage } from "./subagent-runtime.js";
 
 interface AssistantContent {
 	type: string;
@@ -23,12 +24,7 @@ interface DelegatedDetails {
 	context?: "fresh" | "fork";
 	model?: string;
 	messages?: SessionMessage[];
-	parallelResults?: Array<{
-		agent?: string;
-		messages?: SessionMessage[];
-		isError?: boolean;
-		errorText?: string;
-	}>;
+	usage?: DelegatedSubagentUsage;
 }
 
 const DEFAULT_AGENT = "delegate";
@@ -51,7 +47,7 @@ function formatToolCall(name: string, args: Record<string, unknown>): string {
 	switch (name) {
 		case "bash": {
 			const cmd = String(args.command ?? "").replace(/[\n\t]/g, " ").trim();
-			return `$ ${cmd.length > 80 ? cmd.slice(0, 80) + "..." : cmd}`;
+			return `$ ${cmd.length > 80 ? `${cmd.slice(0, 80)}...` : cmd}`;
 		}
 		case "read": return `[read: ${args.path ?? args.file_path ?? ""}]`;
 		case "write": return `[write: ${args.path ?? args.file_path ?? ""}]`;
@@ -60,8 +56,9 @@ function formatToolCall(name: string, args: Record<string, unknown>): string {
 		case "find": return `[find: ${args.pattern ?? ""} in ${args.path ?? "."}]`;
 		case "ls": return `[ls: ${args.path ?? "."}]`;
 		default: {
-			const a = JSON.stringify(args).slice(0, 50);
-			return `[${name}: ${a}${JSON.stringify(args).length > 50 ? "..." : ""}]`;
+			const serialized = JSON.stringify(args);
+			const short = serialized.slice(0, 50);
+			return `[${name}: ${short}${serialized.length > 50 ? "..." : ""}]`;
 		}
 	}
 }
@@ -71,26 +68,19 @@ function extractToolCalls(messages: SessionMessage[]): string[] {
 	for (const msg of messages) {
 		if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
 		for (const block of msg.content) {
-			if (block.type === "toolCall" && block.name) {
-				calls.push(formatToolCall(block.name, block.arguments ?? {}));
-			}
+			if (block.type === "toolCall" && block.name) calls.push(formatToolCall(block.name, block.arguments ?? {}));
 		}
 	}
 	return calls;
 }
 
-function extractAssistantText(messages: SessionMessage[]): string {
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const msg = messages[i];
-		if (msg.role !== "assistant") continue;
-		const text = extractTextContent(msg.content);
-		if (text.trim()) return text;
-	}
-	return "";
-}
-
 function extractUsage(messages: SessionMessage[]): { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; model?: string; turns: number } {
-	let input = 0, output = 0, cacheRead = 0, cacheWrite = 0, cost = 0, turns = 0;
+	let input = 0;
+	let output = 0;
+	let cacheRead = 0;
+	let cacheWrite = 0;
+	let cost = 0;
+	let turns = 0;
 	let model: string | undefined;
 	for (const msg of messages) {
 		if (msg.role !== "assistant") continue;
@@ -112,104 +102,73 @@ function formatTokensShort(n: number): string {
 	return String(n);
 }
 
+function formatDurationMs(durationMs: number): string {
+	if (durationMs < 1000) return `${Math.round(durationMs)}ms`;
+	return `${Number((durationMs / 1000).toFixed(1))}s`;
+}
+
 export function renderDelegatedSubagentResult(
 	message: { content?: unknown; details?: DelegatedDetails },
 	options: MessageRenderOptions,
 	theme: Theme,
 ) {
 	const details = message.details;
-	const parallelResults = details?.parallelResults ?? [];
-	const hasParallelResults = parallelResults.length > 0;
-	const agent = hasParallelResults ? "parallel" : (details?.agent ?? DEFAULT_AGENT);
+	const agent = details?.agent ?? DEFAULT_AGENT;
 	const context = details?.context === "fork" ? theme.fg("warning", " [fork]") : "";
-	const messages = hasParallelResults
-		? parallelResults.flatMap((result) => (result.messages ?? []) as SessionMessage[])
-		: ((details?.messages ?? []) as SessionMessage[]);
+	const messages = (details?.messages ?? []) as SessionMessage[];
 	const text = extractTextContent(message.content);
-
-	const usage = extractUsage(messages);
+	const messageUsage = extractUsage(messages);
+	const aggregateUsage = details?.usage;
+	const usage = {
+		input: aggregateUsage?.input ?? messageUsage.input,
+		output: aggregateUsage?.output ?? messageUsage.output,
+		cacheRead: aggregateUsage?.cacheRead ?? messageUsage.cacheRead,
+		cacheWrite: aggregateUsage?.cacheWrite ?? messageUsage.cacheWrite,
+		cost: aggregateUsage?.cost ?? messageUsage.cost,
+		turns: aggregateUsage?.turns ?? messageUsage.turns,
+		durationMs: aggregateUsage?.durationMs ?? 0,
+		model: messageUsage.model,
+	};
 	const toolCalls = extractToolCalls(messages);
-	const toolCount = toolCalls.length;
+	const toolCallCount = aggregateUsage?.toolCalls ?? toolCalls.length;
 	const tokensLabel = `${formatTokensShort(usage.output)} tok`;
 
 	const container = new Container();
 	container.addChild(new Spacer(1));
-	const box = new Box(1, 1, (text: string) => theme.bg("toolSuccessBg", text));
-
-	// Header: ok worker [fork] | 3 tools, 496 tok
+	const box = new Box(1, 1, (value: string) => theme.bg("toolSuccessBg", value));
 	const icon = theme.fg("success", "ok");
-	const stats = hasParallelResults
-		? `${parallelResults.length} task${parallelResults.length === 1 ? "" : "s"}, ${toolCount} tool${toolCount === 1 ? "" : "s"}, ${tokensLabel}`
-		: `${toolCount} tool${toolCount === 1 ? "" : "s"}, ${tokensLabel}`;
+	const stats = `${toolCallCount} tool${toolCallCount === 1 ? "" : "s"}, ${tokensLabel}`;
 	box.addChild(new Text(`${icon} ${theme.fg("toolTitle", theme.bold(agent))}${context} | ${stats}`, 0, 0));
 	box.addChild(new Spacer(1));
 
-	// Task preview
 	if (details?.task) {
 		const taskPreview = details.task.length > 120 ? `${details.task.slice(0, 120)}...` : details.task;
 		box.addChild(new Text(theme.fg("dim", `Task: ${taskPreview}`), 0, 0));
 		box.addChild(new Spacer(1));
 	}
 
-	if (hasParallelResults) {
-		for (let index = 0; index < parallelResults.length; index++) {
-			const result = parallelResults[index]!;
-			const taskLabel = result.agent || `task-${index + 1}`;
-			box.addChild(new Text(theme.fg("toolTitle", `=== Task ${index + 1}: ${taskLabel} ===`), 0, 0));
-			const taskMessages = (result.messages ?? []) as SessionMessage[];
-			const taskText = extractAssistantText(taskMessages);
-			if (result.isError) {
-				const errorText = result.errorText || "Task failed.";
-				box.addChild(new Text(theme.fg("error", errorText), 0, 0));
-				box.addChild(new Spacer(1));
-				continue;
-			}
-
-			if (!taskText) {
-				box.addChild(new Text(theme.fg("dim", "(no assistant text)"), 0, 0));
-				box.addChild(new Spacer(1));
-				continue;
-			}
-
-			const lines = taskText.split("\n");
-			if (options.expanded || lines.length <= PREVIEW_LINES) {
-				box.addChild(new Text(theme.fg("toolOutput", taskText), 0, 0));
-			} else {
-				box.addChild(new Text(theme.fg("toolOutput", lines.slice(0, PREVIEW_LINES).join("\n")), 0, 0));
-				box.addChild(new Text(theme.fg("warning", `\n... (${lines.length - PREVIEW_LINES} more lines — Ctrl+O to expand)`), 0, 0));
-			}
-			box.addChild(new Spacer(1));
+	if (toolCalls.length > 0) {
+		const showCalls = options.expanded ? toolCalls : toolCalls.slice(0, 5);
+		for (const call of showCalls) box.addChild(new Text(theme.fg("dim", call), 0, 0));
+		if (!options.expanded && toolCalls.length > 5) {
+			box.addChild(new Text(theme.fg("warning", `... (${toolCalls.length - 5} more tool calls)`), 0, 0));
 		}
-	} else {
-		// Tool calls
-		if (toolCalls.length > 0) {
-			const showCalls = options.expanded ? toolCalls : toolCalls.slice(0, 5);
-			for (const call of showCalls) {
-				box.addChild(new Text(theme.fg("dim", call), 0, 0));
-			}
-			if (!options.expanded && toolCalls.length > 5) {
-				box.addChild(new Text(theme.fg("warning", `... (${toolCalls.length - 5} more tool calls)`), 0, 0));
-			}
-			box.addChild(new Spacer(1));
-		}
-
-		// Output text
-		if (text) {
-			const lines = text.split("\n");
-			if (options.expanded || lines.length <= PREVIEW_LINES) {
-				box.addChild(new Text(theme.fg("toolOutput", text), 0, 0));
-			} else {
-				box.addChild(new Text(theme.fg("toolOutput", lines.slice(0, PREVIEW_LINES).join("\n")), 0, 0));
-				box.addChild(new Text(theme.fg("warning", `\n... (${lines.length - PREVIEW_LINES} more lines — Ctrl+O to expand)`), 0, 0));
-			}
-			box.addChild(new Spacer(1));
-		}
+		box.addChild(new Spacer(1));
 	}
 
-	// Stats footer
-	const statsLine = `${usage.turns} turn${usage.turns === 1 ? "" : "s"} in:${usage.input} out:${usage.output} R${formatTokensShort(usage.cacheRead)} W${formatTokensShort(usage.cacheWrite)}${usage.cost ? ` $${usage.cost.toFixed(4)}` : ""} ${usage.model ?? details?.model ?? ""}`;
-	box.addChild(new Text(theme.fg("dim", statsLine), 0, 0));
+	if (text) {
+		const lines = text.split("\n");
+		if (options.expanded || lines.length <= PREVIEW_LINES) {
+			box.addChild(new Text(theme.fg("toolOutput", text), 0, 0));
+		} else {
+			box.addChild(new Text(theme.fg("toolOutput", lines.slice(0, PREVIEW_LINES).join("\n")), 0, 0));
+			box.addChild(new Text(theme.fg("warning", `\n... (${lines.length - PREVIEW_LINES} more lines — Ctrl+O to expand)`), 0, 0));
+		}
+		box.addChild(new Spacer(1));
+	}
 
+	const statsLine = `${usage.turns} turn${usage.turns === 1 ? "" : "s"} in:${usage.input} out:${usage.output} R${formatTokensShort(usage.cacheRead)} W${formatTokensShort(usage.cacheWrite)}${usage.cost ? ` $${usage.cost.toFixed(4)}` : ""}${usage.durationMs > 0 ? ` ${formatDurationMs(usage.durationMs)}` : ""} ${usage.model ?? details?.model ?? ""}`;
+	box.addChild(new Text(theme.fg("dim", statsLine), 0, 0));
 	container.addChild(box);
 	return container;
 }

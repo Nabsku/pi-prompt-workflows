@@ -326,65 +326,6 @@ test("unsupported chain and deterministic prompts report clear errors without dr
 	});
 });
 
-test("compare prompts render a read-only preflight report with --plain", async () => {
-	await setup(async (_root, cwd, pi, ctx) => {
-		writePrompt(cwd, "compare", "---\nmodel: anthropic/claude-sonnet-4-20250514\ncommit: ask\nbestOfN:\n  workers:\n    - agent: worker\n      model: openai/gpt-5.2\n  reviewers:\n    - agent: reviewer\n  worktree: true\n---\nTask $@");
-		await pi.emit("session_start", {}, ctx);
-
-		const output = await captureStdout(() => pi.commands.get("print-prompt")!.handler!("compare --plain src/app.ts", ctx));
-
-		assert.match(output, /# Prompt dry-run: compare/);
-		assert.match(output, /## Compare preflight/);
-		assert.match(output, /worker 1: agent=worker, model=openai\/gpt-5\.2/);
-		assert.match(output, /Worktree: true \(shared\)/);
-		assert.match(output, /Task src\/app\.ts/);
-		assertNoExecutionSideEffects(pi);
-	});
-});
-
-test("default UI dry-run routes compare preflight through notification unless --plain is explicit", async () => {
-	await setup(async (_root, cwd, pi, ctx) => {
-		writePrompt(cwd, "compare", "---\nmodel: anthropic/claude-sonnet-4-20250514\nbestOfN:\n  workers:\n    - agent: worker\n---\nTask $@");
-		await pi.emit("session_start", {}, ctx);
-
-		const output = await captureStdout(() => pi.commands.get("dry-run-prompt")!.handler!("compare src/app.ts", ctx));
-
-		assert.equal(output, "");
-		assert.equal(pi.notifications.at(-1)?.type, "info");
-		assert.match(pi.notifications.at(-1)?.message ?? "", /## Compare preflight/);
-		assertNoExecutionSideEffects(pi);
-	});
-});
-
-test("default UI dry-run shows full blocked compare preflight guidance", async () => {
-	await setup(async (_root, cwd, pi, ctx) => {
-		writePrompt(cwd, "compare", [
-			"---",
-			"model: anthropic/claude-sonnet-4-20250514",
-			"bestOfN:",
-			"  workers:",
-			"    - agent: worker",
-			"  reviewers:",
-			"    - agent: reviewer",
-			"  finalApplier:",
-			"    agent: reviewer",
-			"---",
-			"Task $@",
-		].join("\n"));
-		await pi.emit("session_start", {}, ctx);
-
-		const output = await captureStdout(() => pi.commands.get("dry-run-prompt")!.handler!("compare src/app.ts", ctx));
-
-		assert.equal(output, "");
-		assert.equal(pi.notifications.at(-1)?.type, "error");
-		assert.match(pi.notifications.at(-1)?.message ?? "", /## Compare preflight/);
-		assert.match(pi.notifications.at(-1)?.message ?? "", /Verdict: blocked/);
-		assert.match(pi.notifications.at(-1)?.message ?? "", /Fix before running/);
-		assert.match(pi.notifications.at(-1)?.message ?? "", /Compare prompts with finalApplier require worktree: true/);
-		assertNoExecutionSideEffects(pi);
-	});
-});
-
 
 test("exact plain dry-run of hidden project prompt-library commands previews without approval", async () => {
 	await setup(async (_root, cwd, pi, ctx) => {

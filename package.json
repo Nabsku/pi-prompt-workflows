@@ -29,12 +29,6 @@
   "files": [
     "index.ts",
     "args.ts",
-    "best-of-n-preflight.ts",
-    "best-of-n-preset-renderer.ts",
-    "best-of-n-presets.ts",
-    "best-of-n-run-history.ts",
-    "best-of-n-run-history-renderer.ts",
-    "best-of-n-run-history-tui.ts",
     "chain-parser.ts",
     "adaptive-chain.ts",
     "adaptive-runtime.ts",
@@ -42,7 +36,6 @@
     "adaptive-renderer.ts",
     "git-worktree-snapshot.ts",
     "git-environment.ts",
-    "compare-defaults.ts",
     "loop-utils.ts",
     "model-selection.ts",
     "notifications.ts",
@@ -60,7 +53,6 @@
     "prompt-validation.ts",
     "deterministic-step.ts",
     "deterministic-renderer.ts",
-    "commit-ask-renderer.ts",
     "subagent-renderer.ts",
     "subagent-runtime.ts",
     "subagent-step.ts",
@@ -86,10 +78,11 @@
     "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "^0.84.0",
-    "@earendil-works/pi-ai": "^0.84.0",
-    "@earendil-works/pi-coding-agent": "^0.84.0",
-    "@earendil-works/pi-tui": "^0.84.0",
+    "@earendil-works/pi-agent-core": "^0.84.1",
+    "@earendil-works/pi-ai": "^0.84.1",
+    "@earendil-works/pi-coding-agent": "^0.84.1",
+    "@earendil-works/pi-tui": "^0.84.1",
+    "pi-subagents": "0.44.0",
     "tsx": "^4.22.4",
     "typebox": "^1.3.2"
   },
@@ -105,11 +98,11 @@
     "minimatch": "^10.2.5"
   },
   "overrides": {
-    "undici": "8.5.0",
+    "undici": "8.9.0",
     "ws": "8.21.0",
     "protobufjs": "7.6.4",
     "@earendil-works/pi-coding-agent": {
-      "undici": "8.5.0",
+      "undici": "8.9.0",
       "ws": "8.21.0",
       "protobufjs": "7.6.4"
     }

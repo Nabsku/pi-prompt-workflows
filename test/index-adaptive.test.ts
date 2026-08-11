@@ -22,7 +22,7 @@ test("adaptive command fails closed before execution when changed-gate analysis 
 		writeFileSync(join(dir, "flow.md"), ["---", "chain:", ...chain, "limits:", "  maxSteps: 23", "  maxModelCalls: 23", "---", "ignored"].join("\n"));
 		const commands = new Map<string, any>(); const messages: string[] = []; const notifications: string[] = [];
 		const pi: any = { registerCommand(name: string, command: any) { commands.set(name, command); }, registerMessageRenderer() {}, registerTool() {}, getCommands() { return []; }, on(event: string, handler: any) { if (event === "session_start") this.start = handler; }, async setModel() { return true; }, getThinkingLevel() { return "medium"; }, setThinkingLevel() {}, sendUserMessage(value: string) { messages.push(value); }, sendMessage() {} };
-		const ctx: any = { cwd, model: MODEL, signal: new AbortController().signal, hasUI: false, modelRegistry: { find: () => MODEL, getAll: () => [MODEL], getAvailable: () => [MODEL] }, ui: { notify(value: string) { notifications.push(value); }, setStatus() {}, setWorkingMessage() {}, onTerminalInput() { return () => {}; }, theme: { fg(_x: string, value: string) { return value; } } }, isIdle: () => false, waitForIdle: async () => { throw new Error("must not wait"); }, sessionManager: { getLeafId: () => "root", getBranch: () => [] }, navigateTree: async () => ({ cancelled: false }) };
+		const ctx: any = { cwd, model: MODEL, signal: new AbortController().signal, hasUI: false, modelRegistry: { find: () => MODEL, getAll: () => [MODEL], getAvailable: () => [MODEL] }, ui: { notify(value: string) { notifications.push(value); }, setStatus() {}, setWorkingMessage() {}, onTerminalInput() { return () => {}; }, theme: { fg(_x: string, value: string) { return value; } } }, isIdle: () => true, waitForIdle: async () => { throw new Error("must not wait"); }, sessionManager: { getLeafId: () => "root", getBranch: () => [] }, navigateTree: async () => ({ cancelled: false }) };
 		promptModelExtension(pi); await pi.start({}, ctx); await commands.get("flow").handler("", ctx);
 		assert.deepEqual(messages, []);
 	} finally { process.env.HOME = oldHome; rmSync(root, { recursive: true, force: true }); }
@@ -81,16 +81,17 @@ for (const [stopReason, expectedTarget] of [["stop", "success"], ["error", "fail
 			const messages: string[] = [];
 			const branch: any[] = [{ id: "root", type: "message", message: { role: "user", content: "root", timestamp: Date.now() } }];
 			const completions = [stopReason, "stop"];
+			let activeTurn = false;
 			const pi: any = {
 				registerCommand(name: string, command: any) { commands.set(name, command); }, registerMessageRenderer() {}, registerTool() {}, getCommands() { return []; }, on(event: string, handler: any) { if (event === "session_start") this.start = handler; },
-				async setModel() { return true; }, getThinkingLevel() { return "medium"; }, setThinkingLevel() {}, sendUserMessage(value: string) { messages.push(value); }, sendMessage() {},
+				async setModel() { return true; }, getThinkingLevel() { return "medium"; }, setThinkingLevel() {}, sendUserMessage(value: string) { activeTurn = true; messages.push(value); }, sendMessage() {},
 			};
 			const ctx: any = {
 				cwd, model: MODEL, signal: new AbortController().signal, hasUI: false,
 				modelRegistry: { find: () => MODEL, getAll: () => [MODEL], getAvailable: () => [MODEL], getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test-key" }), isUsingOAuth: () => false },
 				ui: { notify() {}, setStatus() {}, setWorkingMessage() {}, onTerminalInput() { return () => {}; }, theme: { fg(_x: string, value: string) { return value; } } },
-				isIdle: () => false,
-				async waitForIdle() { const reason = completions.shift()!; branch.push({ id: `a${branch.length}`, type: "message", message: { role: "assistant", content: [{ type: "text", text: reason }], stopReason: reason, timestamp: Date.now(), usage: {} } }); },
+				isIdle: () => !activeTurn,
+				async waitForIdle() { const reason = completions.shift()!; branch.push({ id: `a${branch.length}`, type: "message", message: { role: "assistant", content: [{ type: "text", text: reason }], stopReason: reason, timestamp: Date.now(), usage: {} } }); activeTurn = false; },
 				sessionManager: { getLeafId: () => branch.at(-1)?.id ?? "root", getBranch: () => branch }, navigateTree: async () => ({ cancelled: false }),
 			};
 			promptModelExtension(pi);

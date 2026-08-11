@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createDelegatedProgressWidget } from "../subagent-widget.ts";
+import { renderDelegatedSubagentResult } from "../subagent-renderer.ts";
 import { clearDelegatedLiveState, updateDelegatedLiveState } from "../subagent-runtime.ts";
 
 const theme = {
@@ -9,37 +10,18 @@ const theme = {
 	bold(text: string) { return text; },
 } as any;
 
-test("parallel delegated widget renders per-task models, tools, and output snippets", () => {
-	const requestId = "widget-parallel-rich";
+test("delegated widget renders one structured subagent state", () => {
+	const requestId = "widget-structured-rich";
 	clearDelegatedLiveState(requestId);
 	updateDelegatedLiveState(requestId, {
 		status: "running",
-		toolCount: 5,
+		model: "openai-codex/gpt-5.3-codex-spark",
+		currentTool: "read",
+		currentToolArgs: "README.md",
+		recentTools: [{ tool: "bash", args: "git diff -- README.md" }],
+		recentOutput: ["found section", "writing focused test"],
+		toolCount: 2,
 		tokens: 1200,
-		taskProgress: [
-			{
-				index: 0,
-				agent: "delegate",
-				status: "running",
-				model: "openai-codex/gpt-5.3-codex-spark",
-				currentTool: "read",
-				currentToolArgs: "README.md",
-				recentTools: [{ tool: "bash", args: "git diff -- README.md" }],
-				recentOutputLines: ["found compare section", "writing smoke test line"],
-				toolCount: 2,
-				tokens: 400,
-			},
-			{
-				index: 1,
-				agent: "delegate",
-				status: "completed",
-				model: "openai-codex/gpt-5.4-mini",
-				recentTools: [{ tool: "edit", args: "README.md" }],
-				recentOutputLines: ["done"],
-				toolCount: 3,
-				tokens: 800,
-			},
-		],
 	});
 
 	const widget = createDelegatedProgressWidget(
@@ -47,52 +29,34 @@ test("parallel delegated widget renders per-task models, tools, and output snipp
 		"delegate",
 		"fork",
 		"do work",
-		[
-			{ agent: "delegate", task: "worker 1", model: "openai-codex/gpt-5.3-codex-spark" },
-			{ agent: "delegate", task: "worker 2", model: "openai-codex/gpt-5.4-mini" },
-		],
 		theme,
+		"openai-codex/fallback",
 	);
 
 	const rendered = widget.render(120).join("\n");
 	clearDelegatedLiveState(requestId);
 
-	assert.match(rendered, /parallel 1\/2 running \[fork\] \| 5 tools, 1\.2k tok/);
-	assert.match(rendered, /task 1 · delegate gpt-5\.3-codex-spark running/);
-	assert.match(rendered, /> \[read: README\.md\]/);
+	assert.match(rendered, /delegate \[fork\] gpt-5\.3-codex-spark \| 2 tools, 1\.2k tok/);
+	assert.match(rendered, /Task: do work/);
 	assert.match(rendered, /\$ git diff -- README\.md/);
-	assert.match(rendered, /found compare section/);
-	assert.match(rendered, /writing smoke test line/);
-	assert.match(rendered, /task 2 · delegate gpt-5\.4-mini completed/);
-	assert.match(rendered, /\[edit: README\.md\]/);
-	assert.match(rendered, /done/);
+	assert.match(rendered, /> \[read: README\.md\]/);
+	assert.match(rendered, /found section/);
+	assert.match(rendered, /writing focused test/);
 });
 
-test("parallel delegated widget rerenders when per-task output changes without status changes", () => {
-	const requestId = "widget-parallel-rerender";
+test("delegated widget rerenders when output changes without a status change", () => {
+	const requestId = "widget-structured-rerender";
 	clearDelegatedLiveState(requestId);
 	updateDelegatedLiveState(requestId, {
 		status: "running",
-		taskProgress: [
-			{ index: 0, agent: "delegate", status: "running", recentOutputLines: ["line 1"] },
-		],
+		recentOutput: ["line 1"],
 	});
 
-	const widget = createDelegatedProgressWidget(
-		requestId,
-		"delegate",
-		"fresh",
-		"do work",
-		[{ agent: "delegate", task: "worker 1", model: "openai-codex/gpt-5.3-codex-spark" }],
-		theme,
-	);
-
+	const widget = createDelegatedProgressWidget(requestId, "delegate", "fresh", "do work", theme);
 	const first = widget.render(120).join("\n");
 	updateDelegatedLiveState(requestId, {
 		status: "running",
-		taskProgress: [
-			{ index: 0, agent: "delegate", status: "running", recentOutputLines: ["line 1", "line 2"] },
-		],
+		recentOutput: ["line 1", "line 2"],
 	});
 	const second = widget.render(120).join("\n");
 	clearDelegatedLiveState(requestId);
@@ -100,4 +64,34 @@ test("parallel delegated widget rerenders when per-task output changes without s
 	assert.match(first, /line 1/);
 	assert.doesNotMatch(first, /line 2/);
 	assert.match(second, /line 2/);
+});
+
+
+test("delegated completion renderer uses aggregate bridge usage", () => {
+	const rendered = renderDelegatedSubagentResult(
+		{
+			content: [{ type: "text", text: "Done." }],
+			details: {
+				agent: "delegate",
+				task: "Review the change",
+				model: "anthropic/claude-sonnet",
+				usage: {
+					input: 120,
+					output: 34,
+					cacheRead: 5,
+					cacheWrite: 6,
+					cost: 0.1234,
+					turns: 3,
+					toolCalls: 7,
+					durationMs: 1500,
+				},
+			},
+		},
+		{ expanded: false } as never,
+		theme,
+	);
+
+	const output = rendered.render(120).join("\n");
+	assert.match(output, /delegate \| 7 tools, 34 tok/);
+	assert.match(output, /3 turns in:120 out:34 R5 W6 \$0\.1234 1\.5s anthropic\/claude-sonnet/);
 });

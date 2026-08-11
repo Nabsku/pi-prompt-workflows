@@ -234,101 +234,24 @@ test("dry-run previews skill-bearing delegated prompts", async () => {
 	});
 });
 
+test("dry-run rejects nested delegated project configuration without separate approval", async () => {
+	await withTempHome(async (root) => {
+		const sessionCwd = join(root, "session-project");
+		const delegatedCwd = join(sessionCwd, "delegated-project");
+		mkdirSync(sessionCwd, { recursive: true });
+		writeProjectSkill(delegatedCwd, "tmux", "delegated tmux content");
+		const result = assertError(await createPromptDryRun(
+			prompt({ skill: "tmux", subagent: true, cwd: delegatedCwd }),
+			options(sessionCwd),
+		));
+
+		assert.match(result.error, /separate approval.*nested project/i);
+	});
+});
+
 test("returns unsupported error for chain prompts", async () => {
 	const result = assertError(await createPromptDryRun(prompt({ chain: "one -> two" }), options("/tmp")));
 	assert.equal(result.error, "Dry-run for chain templates is not supported in v1. Use /validate-prompts for structural checks.");
-});
-
-test("returns compare preflight for compare prompts", async () => {
-	await withTempHome(async (root) => {
-		const result = assertOk(await createPromptDryRun(prompt({ workers: [{ agent: "worker" }] }), options(root)));
-		assert.equal(result.comparePreflight?.callCount.workers, 1);
-		assert.equal(result.comparePreflight?.slots.workers[0]?.agent, "worker");
-		assert.equal(result.content, "Body ");
-	});
-});
-
-test("compare dry-run budgets effective lineup tasks and blocks exceeded verdicts", async () => {
-	await withTempHome(async (root) => {
-		const result = assertError(await createPromptDryRun(
-			prompt({ workers: [{ agent: "worker", taskSuffix: "this worker-specific suffix makes the effective task much larger" }], budget: { maxTokens: 5 } }),
-			options(root),
-		));
-		assert.equal(result.budget?.verdict, "exceeded");
-		assert.match(result.error, /Compare lineup task estimated .* exceeds configured maximum/);
-		assert.equal(result.comparePreflight?.diagnostics.some((diagnostic) => diagnostic.code === "prompt-budget-exceeded"), true);
-
-		const warning = assertOk(await createPromptDryRun(
-			prompt({ workers: [{ agent: "worker", taskSuffix: "this worker-specific suffix is larger than the shared task" }], budget: { warnTokens: 5, maxTokens: 200 } }),
-			options(root),
-		));
-		assert.equal(warning.budget.verdict, "warning");
-		assert.ok(warning.budget.bytes > Buffer.byteLength(warning.content, "utf8"));
-		assert.equal(warning.comparePreflight?.diagnostics.some((diagnostic) => diagnostic.code === "prompt-budget-warning"), true);
-	});
-});
-
-test("compare dry-run includes statically known reviewer phase preambles", async () => {
-	await withTempHome(async (root) => {
-		const result = assertOk(await createPromptDryRun(
-			prompt({ workers: [{ agent: "worker" }], reviewers: [{ agent: "reviewer" }] }),
-			options(root),
-		));
-		const reviewerTask = result.comparePreflight?.slots.reviewers[0]?.effectiveTask ?? "";
-		assert.ok(result.budget.bytes > Buffer.byteLength(reviewerTask, "utf8"));
-	});
-});
-
-test("compare dry-run includes skill preambles in lineup budgets", async () => {
-	await withTempHome(async (root) => {
-		const skillPath = writeProjectSkill(root, "large", "this compare skill payload is deliberately large");
-		const result = assertOk(await createPromptDryRun(
-			prompt({ workers: [{ agent: "worker" }], skills: ["large"], budget: { warnTokens: 5, maxTokens: 500 } }),
-			options(root),
-		));
-		assert.equal(result.budget.verdict, "warning");
-		assert.deepEqual(result.skills, [{ skillName: "large", skillPath }]);
-		assert.equal(result.budget.sources?.some((source) => source.kind === "skill"), true);
-	});
-});
-
-test("compare preflight dry-run renders model conditionals like runtime", async () => {
-	await withTempHome(async (root) => {
-		const result = assertOk(await createPromptDryRun(
-			prompt({ workers: [{ agent: "worker" }], content: '<if-model is="openai/*">OpenAI $@<else>Other $@</if-model>' }),
-			options(root, { rawArgs: "--model=gpt-5.2 ship" }),
-		));
-		assert.equal(result.content, "OpenAI ship");
-		assert.equal(result.comparePreflight?.task.renderedTask, "OpenAI ship");
-		assert.equal(result.model?.id, gpt.id);
-	});
-});
-
-test("compare preflight dry-run rejects relative runtime cwd like runtime", async () => {
-	const result = assertError(await createPromptDryRun(prompt({ workers: [{ agent: "worker" }] }), options("/tmp", { rawArgs: "--cwd=subdir ship" })));
-	assert.equal(result.error, "Invalid --cwd path: must be absolute");
-});
-
-test("compare preflight dry-run fails when preflight has error diagnostics", async () => {
-	const result = assertError(await createPromptDryRun(
-		prompt({ preset: "missing" }),
-		options("/tmp", { rawArgs: "ship" }),
-	));
-	assert.match(result.error, /Best-of-N preset `missing` was not found/);
-});
-
-test("returns compare preflight for path-driven compare prompts", async () => {
-	await withTempHome(async (root) => {
-		const target = join(root, "target-repo");
-		mkdirSync(target, { recursive: true });
-		const result = assertOk(await createPromptDryRun(
-			prompt({ name: "parallel-patch-compare-at-path", workers: [{ agent: "worker" }], content: "Fix $@" }),
-			options(root, { rawArgs: `${target} bug now`, pathArgumentPromptName: "parallel-patch-compare-at-path" }),
-		));
-		assert.equal(result.comparePreflight?.compareCwd.resolved, realpathSync(target));
-		assert.deepEqual(result.args, ["bug", "now"]);
-		assert.equal(result.content, "Fix bug now");
-	});
 });
 
 test("returns unsupported error for deterministic prompts", async () => {
@@ -412,8 +335,8 @@ test("rotating loop dry-run uses first rotated model for label and conditionals"
 test("delegated prompt frontmatter cwd is shown as effective runtime cwd metadata", async () => {
 	await withTempHome(async (root) => {
 		const ctxCwd = join(root, "ctx");
-		const delegatedCwd = join(root, "delegated");
-		const cliCwd = join(root, "cli");
+		const delegatedCwd = join(ctxCwd, "delegated");
+		const cliCwd = join(ctxCwd, "cli");
 		mkdirSync(ctxCwd, { recursive: true });
 		mkdirSync(delegatedCwd, { recursive: true });
 		mkdirSync(cliCwd, { recursive: true });
@@ -444,25 +367,6 @@ test("non-delegated dry-run keeps cwd metadata without existence check", async (
 		const result = assertOk(await createPromptDryRun(prompt(), options(root, { rawArgs: `--cwd=${missing}` })));
 		assert.equal(result.runtime.cwd, missing);
 	});
-});
-
-test("parallel delegated dry-run shows each runtime subagent task prefix", async () => {
-	const result = assertOk(await createPromptDryRun(prompt({ subagent: true, parallel: 3, content: "Body $1" }), options("/tmp", { rawArgs: "file.ts" })));
-	assert.deepEqual(result.runtime.delegation, { enabled: true, agent: "delegate", parallel: 3 });
-	assert.equal(result.content, [
-		"[Parallel subagent 1/3]",
-		"",
-		"Body file.ts",
-		"",
-		"[Parallel subagent 2/3]",
-		"",
-		"Body file.ts",
-		"",
-		"[Parallel subagent 3/3]",
-		"",
-		"Body file.ts",
-	].join("\n"));
-	assert.ok(result.budget.bytes < Buffer.byteLength(result.content, "utf8"));
 });
 
 test("--cwd is displayed as runtime metadata but skills still resolve from ctx.cwd, matching runtime", async () => {
@@ -525,5 +429,38 @@ test("dry-run preserves budget details when the rendered prompt exceeds the maxi
 		assert.equal(result.budget.verdict, "exceeded");
 		assert.deepEqual(result.budget.config, { maxTokens: 2 });
 		assert.deepEqual(result.budget.sources?.map((source) => source.kind), ["prompt"]);
+	});
+});
+
+
+test("dry-run rejects project skills from a delegated cwd outside the trusted session root", async () => {
+	await withTempHome(async (root) => {
+		const sessionCwd = join(root, "session-project");
+		const delegatedCwd = join(root, "outside-project");
+		mkdirSync(sessionCwd, { recursive: true });
+		writeProjectSkill(delegatedCwd, "outside-only", "untrusted skill content");
+		const outcome = await createPromptDryRun(
+			prompt({ skill: "outside-only", subagent: true, cwd: delegatedCwd }),
+			options(sessionCwd),
+		);
+
+		assert.equal(outcome.status, "error");
+		assert.match((outcome as { error: string }).error, /outside the trusted session root/i);
+	});
+});
+
+test("dry-run rejects removed delegation runtime flags instead of rendering them as prompt text", async () => {
+	await withTempHome(async (root) => {
+		const result = assertError(await createPromptDryRun(
+			prompt({ subagent: true }),
+			options(root, { rawArgs: "--worktree target" }),
+		));
+		assert.match(result.error, /removed legacy runtime flag.*--worktree/i);
+
+		const afterBoundary = assertError(await createPromptDryRun(
+			prompt({ inputs: { target: { type: "string", required: true } } }),
+			options(root, { rawArgs: "-- --worktree" }),
+		));
+		assert.match(afterBoundary.error, /removed legacy runtime flag.*--worktree/i);
 	});
 });

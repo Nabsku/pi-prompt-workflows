@@ -72,7 +72,16 @@ function runGit(cwd: string, args: string[], fallback: GitWorktreeSnapshotErrorC
 	const safeArgs = [...GIT_SAFE_GLOBAL_ARGS, ...args];
 	const env = sanitizedGitEnvironment();
 	try {
-		return execFileSync("git", safeArgs, { cwd, input, encoding: "buffer", maxBuffer, timeout: remainingTimeout(deadline), killSignal: "SIGTERM", env }) as Buffer;
+		return execFileSync("git", safeArgs, {
+			cwd,
+			input,
+			encoding: "buffer",
+			maxBuffer,
+			timeout: remainingTimeout(deadline),
+			killSignal: "SIGTERM",
+			env,
+			stdio: ["pipe", "pipe", "pipe"],
+		}) as Buffer;
 	}
 	catch (cause: any) {
 		if (cause instanceof GitWorktreeSnapshotError) throw cause;

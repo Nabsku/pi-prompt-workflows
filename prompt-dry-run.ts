@@ -5,24 +5,23 @@ import {
 	extractLoopCount,
 	extractLoopFlags,
 	extractSubagentOverride,
+	findRemovedLegacyRuntimeFlag,
 	parseCommandArgs,
 	splitRawArgsAtBoundary,
 	type SubagentOverride,
 } from "./args.js";
-import { createBestOfNPreflight, type BestOfNPreflight } from "./best-of-n-preflight.js";
-import type { RegistryLike } from "./model-selection.js";
+import type { ModelSelectionOptions, RegistryLike } from "./model-selection.js";
 import { evaluatePromptBudget, estimatePromptTokens, type PromptBudgetResult, type PromptBudgetSourceEstimate } from "./prompt-budget.js";
 import { preparePromptExecution } from "./prompt-execution.js";
 import { expandCwdPath, type PromptWithModel } from "./prompt-loader.js";
 import { stripPromptPartialFrontmatter, type PromptIncludeGraph } from "./prompt-includes.js";
-import { buildSkillLoadedMessage, getRequestedSkills, resolvePromptSkills, type RuntimeSkillCommand } from "./prompt-skills.js";
+import { buildSkillLoadedMessage, canResolveProjectSkills, getDelegatedCwdTrustError, getRequestedSkills, resolvePromptSkills, type RuntimeSkillCommand } from "./prompt-skills.js";
 import { DEFAULT_SUBAGENT_NAME } from "./subagent-runtime.js";
 import { prepareAdaptivePreflight, type AdaptivePreflight } from "./adaptive-preflight.js";
 import { inputModeEligibilityError, resolvePromptInputs } from "./prompt-inputs.js";
 
 export const DRY_RUN_CHAIN_UNSUPPORTED =
 	"Dry-run for chain templates is not supported in v1. Use /validate-prompts for structural checks.";
-export const DRY_RUN_COMPARE_UNSUPPORTED = "Dry-run for compare prompts is not supported in v1.";
 export const DRY_RUN_DETERMINISTIC_UNSUPPORTED =
 	"Dry-run for deterministic prompts is not supported in v1 because it would require running configured commands/scripts.";
 
@@ -43,7 +42,6 @@ export interface PromptDryRunDelegationMetadata {
 	agent?: string;
 	fork?: boolean;
 	inheritContext?: boolean;
-	parallel?: number;
 }
 
 export interface PromptDryRunRuntimeMetadata {
@@ -75,7 +73,6 @@ export interface PromptDryRunSuccess {
 	details: PromptDryRunDetails;
 	includeGraph?: PromptIncludeGraph;
 	runtime: PromptDryRunRuntimeMetadata;
-	comparePreflight?: BestOfNPreflight;
 	adaptivePreflight?: AdaptivePreflight;
 }
 
@@ -85,7 +82,6 @@ export interface PromptDryRunError {
 	error: string;
 	warnings: string[];
 	runtime?: Partial<PromptDryRunRuntimeMetadata>;
-	comparePreflight?: BestOfNPreflight;
 	adaptivePreflight?: AdaptivePreflight;
 	budget?: PromptBudgetResult;
 }
@@ -99,13 +95,13 @@ export interface CreatePromptDryRunOptions {
 	args?: string[];
 	currentModel?: Model<any>;
 	modelRegistry: RegistryLike;
+	scopedModels?: ModelSelectionOptions["scopedModels"];
+	projectTrusted?: boolean;
 	commands?: RuntimeSkillCommand[];
 	/** Runtime command context cwd. Skill resolution intentionally uses this, not runtime --cwd. */
 	cwd: string;
 	showSkills?: boolean;
 	currentModelLabel?: string;
-	/** Prompt name whose first positional arg is compare cwd for path-driven compare templates. */
-	pathArgumentPromptName?: string;
 	/** Effective catalog used for pure adaptive target inspection. */
 	promptCatalog?: ReadonlyMap<string, PromptWithModel>;
 }
@@ -220,14 +216,9 @@ function errorResult(
 	error: string,
 	warnings: string[] = [],
 	runtime?: Partial<PromptDryRunRuntimeMetadata>,
-	comparePreflight?: BestOfNPreflight,
 	budget?: PromptBudgetResult,
 ): PromptDryRunError {
-	return { status: "error", promptName: prompt.name, error, warnings, ...(runtime ? { runtime } : {}), ...(comparePreflight ? { comparePreflight } : {}), ...(budget ? { budget } : {}) };
-}
-
-function hasCompareLineup(prompt: PromptWithModel): boolean {
-	return prompt.workers !== undefined || prompt.reviewers !== undefined || prompt.finalApplier !== undefined || prompt.preset !== undefined;
+	return { status: "error", promptName: prompt.name, error, warnings, ...(runtime ? { runtime } : {}), ...(budget ? { budget } : {}) };
 }
 
 function shouldDelegatePrompt(prompt: Pick<PromptWithModel, "subagent">, override?: SubagentOverride): boolean {
@@ -322,7 +313,6 @@ function parseDryRunArgs(prompt: PromptWithModel, rawArgs: string | undefined, a
 			override: undefined,
 			model: undefined,
 			fork: false,
-			preset: undefined,
 			runtimeCwd: undefined,
 		} as const;
 	}
@@ -357,7 +347,6 @@ function parseDryRunArgs(prompt: PromptWithModel, rawArgs: string | undefined, a
 		override: subagent.override,
 		model: subagent.model,
 		fork: subagent.fork === true,
-		preset: subagent.preset,
 		runtimeCwd: subagent.cwd,
 	} as const;
 }
@@ -366,6 +355,17 @@ export async function createPromptDryRun(
 	prompt: PromptWithModel,
 	options: CreatePromptDryRunOptions,
 ): Promise<PromptDryRunResult> {
+	if (options.rawArgs !== undefined) {
+		const removedFlag = findRemovedLegacyRuntimeFlag(options.rawArgs);
+		if (removedFlag) {
+			return errorResult(
+				prompt,
+				`Removed legacy runtime flag \`${removedFlag}\` is not supported. Use structured single/fork delegation or a sequential/adaptive workflow. Quote the flag when it is prompt content.`,
+				[],
+				{},
+			);
+		}
+	}
 	const parsed = parseDryRunArgs(prompt, options.rawArgs, options.args);
 	const inputModeError = inputModeEligibilityError({ ...prompt, subagent: prompt.subagent || parsed.override || parsed.fork });
 	if (inputModeError) return errorResult(prompt, inputModeError, []);
@@ -384,121 +384,14 @@ export async function createPromptDryRun(
 		const runtimeCwd = parsed.runtimeCwd ? expandCwdPath(parsed.runtimeCwd) : undefined;
 		if (parsed.runtimeCwd && !runtimeCwd) return errorResult(prompt, "Invalid --cwd path: must be absolute", warnings, runtime);
 		if (runtimeCwd) runtime.cwd = runtimeCwd;
-		const adaptivePreflight = await prepareAdaptivePreflight(prompt, options.promptCatalog ?? new Map(), { cwd: options.cwd, runtimeCwd, args: parsed.args, modelOverride: parsed.model, currentModel: options.currentModel, modelRegistry: options.modelRegistry, commands: options.commands });
+		const adaptivePreflight = await prepareAdaptivePreflight(prompt, options.promptCatalog ?? new Map(), { cwd: options.cwd, runtimeCwd, args: parsed.args, modelOverride: parsed.model, currentModel: options.currentModel, modelRegistry: options.modelRegistry, scopedModels: options.scopedModels, projectTrusted: options.projectTrusted, commands: options.commands });
 		warnings.push(...adaptivePreflight.warnings);
-		const unsupportedRuntime = parsed.override || parsed.fork || parsed.preset || parsed.runtime.loop;
-		if (unsupportedRuntime) return { ...errorResult(prompt, "Adaptive chains reject runtime --subagent, --fork, --preset, and --loop modes because they can expand one router action into multiple top-level model calls; exact call reservation is not implemented.", warnings, runtime), adaptivePreflight };
+		const unsupportedRuntime = parsed.override || parsed.fork || parsed.runtime.loop;
+		if (unsupportedRuntime) return { ...errorResult(prompt, "Adaptive chains reject runtime --subagent, --fork, and --loop modes because they can expand one router action into multiple top-level model calls; exact call reservation is not implemented.", warnings, runtime), adaptivePreflight };
 		if (adaptivePreflight.status === "blocked") return { ...errorResult(prompt, adaptivePreflight.diagnostics.join("\n"), warnings, runtime), adaptivePreflight };
 		return { status: "ok", promptName: prompt.name, content: "", args: parsed.args, modelAlreadyActive: true, warnings, budget: evaluateDryRunBudget("", prompt, []), skills: [], details: { skills: [] }, runtime, adaptivePreflight };
 	}
 	if (prompt.chain) return errorResult(prompt, DRY_RUN_CHAIN_UNSUPPORTED, warnings, runtime);
-	if (hasCompareLineup(prompt)) {
-		const compareSkillResolution = resolvePromptSkills(getRequestedSkills(prompt), options.cwd, options.commands ?? []);
-		if (compareSkillResolution.kind === "error") return errorResult(prompt, compareSkillResolution.error, warnings, runtime);
-		const compareSkills = compareSkillResolution.kind === "ready" ? compareSkillResolution.skills : [];
-		const compareSkillPreamble = compareSkills.length > 0 ? buildSkillLoadedMessage(compareSkills).content : undefined;
-		if (parsed.runtimeCwd) {
-			const runtimeCwd = expandCwdPath(parsed.runtimeCwd);
-			if (!runtimeCwd) return errorResult(prompt, "Invalid --cwd path: must be absolute", warnings, runtime);
-			runtime.cwd = runtimeCwd;
-		}
-		const initialPreflight = createBestOfNPreflight({
-			prompt,
-			args: options.rawArgs ?? (options.args ?? []).join(" "),
-			contextCwd: options.cwd,
-			currentModelLabel: options.currentModelLabel,
-			pathArgumentPromptName: options.pathArgumentPromptName,
-		});
-		const effectivePrompt: PromptWithModel = {
-			...prompt,
-			...(parsed.model ? { models: [parsed.model] } : {}),
-		};
-		const prepared = await preparePromptExecution(
-			effectivePrompt,
-			initialPreflight.task.parsed,
-			options.currentModel,
-			options.modelRegistry,
-		);
-		if (!prepared) {
-			return errorResult(prompt, `No available model from: ${effectivePrompt.models.join(", ")}`, warnings, runtime);
-		}
-		if ("message" in prepared) {
-			if (prepared.warning) warnings.push(prepared.warning);
-			return errorResult(prompt, prepared.message, warnings, runtime);
-		}
-		if (prepared.warning) warnings.push(prepared.warning);
-		const modelLabel = `${prepared.selectedModel.model.provider}/${prepared.selectedModel.model.id}`;
-		const preflight = createBestOfNPreflight({
-			prompt,
-			args: options.rawArgs ?? (options.args ?? []).join(" "),
-			contextCwd: options.cwd,
-			currentModelLabel: modelLabel,
-			pathArgumentPromptName: options.pathArgumentPromptName,
-			renderedTask: prepared.content,
-		});
-		const sharedTask = preflight.task.renderedTask ?? "";
-		const workerTasks = preflight.slots.workers.map((slot) => slot.effectiveTask).filter((task): task is string => task !== undefined);
-		const reviewerTasks = preflight.slots.reviewers.map((slot) => [
-			"[Original implementation task]",
-			sharedTask,
-			"",
-			"[Worker outputs and worktree summaries]",
-			"",
-			"---",
-			"",
-			slot.effectiveTask ?? "",
-		].join("\n"));
-		const finalApplierTasks = preflight.slots.finalApplier ? [[
-			"[Original implementation task]",
-			sharedTask,
-			"",
-			"[Worker outputs and worktree summaries]",
-			"",
-			"[Reviewer findings]",
-			"",
-			"[Final apply instructions]",
-			"Pick one winner or synthesize/cherry-pick from multiple variants, apply the final patch directly in the current repo, keep edits minimal, run obvious relevant verification when practical, and report changed files plus verification run.",
-			"",
-			"---",
-			"",
-			preflight.slots.finalApplier.effectiveTask ?? "",
-			...(preflight.policies.commit.mode === "ask" ? [
-				"",
-				"Commit approval mode:",
-				"- Do not run `git add`, `git commit`, or any command that stages or commits changes.",
-				"- Leave all changes unstaged in the worktree for the user to review and approve after you finish.",
-				"- If you need git for verification or reporting, use read-only commands such as `git status` or `git diff`.",
-			] : []),
-		].join("\n")] : [];
-		const lineupTasks = [...workerTasks, ...reviewerTasks, ...finalApplierTasks];
-		const budgetLineupTasks = compareSkillPreamble
-			? lineupTasks.map((task) => `${compareSkillPreamble}\n\n---\n\n${task}`)
-			: lineupTasks;
-		const budget = evaluateDryRunBudget(budgetLineupTasks.length > 0 ? budgetLineupTasks : (preflight.task.renderedTask ?? ""), prompt, compareSkills);
-		if (budget.verdict === "exceeded") {
-			preflight.diagnostics.push({ severity: "error", code: "prompt-budget-exceeded", message: `Compare lineup task estimated ${budget.estimatedTokens} tokens exceeds configured maximum of ${budget.config?.maxTokens}.`, source: prompt.source, filePath: prompt.filePath });
-		} else if (budget.verdict === "warning") {
-			preflight.diagnostics.push({ severity: "warning", code: "prompt-budget-warning", message: `Compare lineup task estimated ${budget.estimatedTokens} tokens reached warning threshold of ${budget.config?.warnTokens}.`, source: prompt.source, filePath: prompt.filePath });
-		}
-		warnings.push(...preflight.diagnostics.filter((diagnostic) => diagnostic.severity === "warning").map((diagnostic) => diagnostic.message));
-		const errors = preflight.diagnostics.filter((diagnostic) => diagnostic.severity === "error").map((diagnostic) => diagnostic.message);
-		if (errors.length > 0) return errorResult(prompt, errors.join("\n"), warnings, runtime, preflight, budget);
-		const compareSkillPreviews = previewSkills(compareSkills, options.showSkills === true);
-		return {
-			status: "ok",
-			promptName: prompt.name,
-			content: preflight.task.renderedTask ?? "",
-			args: preflight.task.parsed,
-			model: prepared.selectedModel.model,
-			modelAlreadyActive: prepared.selectedModel.alreadyActive,
-			warnings,
-			budget,
-			skills: compareSkillPreviews,
-			details: { skills: compareSkillPreviews },
-			runtime,
-			comparePreflight: preflight,
-		};
-	}
 	if (prompt.deterministic) return errorResult(prompt, DRY_RUN_DETERMINISTIC_UNSUPPORTED, warnings, runtime);
 
 	if (parsed.runtimeCwd) {
@@ -506,10 +399,6 @@ export async function createPromptDryRun(
 		if (!runtimeCwd) return errorResult(prompt, "Invalid --cwd path: must be absolute", warnings, runtime);
 		runtime.cwd = runtimeCwd;
 	}
-
-	const requestedSkills = getRequestedSkills(prompt);
-	const skillResolution = resolvePromptSkills(requestedSkills, options.cwd, options.commands ?? []);
-	if (skillResolution.kind === "error") return errorResult(prompt, skillResolution.error, warnings, runtime);
 
 	let effectivePrompt: PromptWithModel = {
 		...prompt,
@@ -519,17 +408,23 @@ export async function createPromptDryRun(
 	};
 
 	const delegated = shouldDelegatePrompt(effectivePrompt, parsed.override);
+	const skillResolutionCwd = delegated ? (effectivePrompt.cwd ?? options.cwd) : options.cwd;
+	if (delegated) {
+		if (skillResolutionCwd !== options.cwd && !existsSync(skillResolutionCwd)) {
+			return errorResult(prompt, `cwd directory does not exist: ${skillResolutionCwd}`, warnings, runtime);
+		}
+		const cwdTrustError = getDelegatedCwdTrustError(options.cwd, skillResolutionCwd, options.projectTrusted !== false);
+		if (cwdTrustError) return errorResult(prompt, cwdTrustError, warnings, runtime);
+	}
+	const requestedSkills = getRequestedSkills(effectivePrompt);
+	const skillResolution = resolvePromptSkills(requestedSkills, skillResolutionCwd, options.commands ?? [], { includeProjectSkills: canResolveProjectSkills(options.cwd, skillResolutionCwd, options.projectTrusted !== false) });
+	if (skillResolution.kind === "error") return errorResult(prompt, skillResolution.error, warnings, runtime);
 	if (delegated && !runtime.cwd && prompt.cwd) runtime.cwd = prompt.cwd;
 	if (delegated) {
-		const effectiveCwd = effectivePrompt.cwd ?? options.cwd;
-		if (effectiveCwd !== options.cwd && !existsSync(effectiveCwd)) {
-			return errorResult(prompt, `cwd directory does not exist: ${effectiveCwd}`, warnings, runtime);
-		}
 		runtime.delegation = {
 			enabled: true,
 			agent: parsed.override?.agent ?? (typeof effectivePrompt.subagent === "string" ? effectivePrompt.subagent : DEFAULT_SUBAGENT_NAME),
 			...(parsed.fork ? { fork: true, inheritContext: true } : {}),
-			...(effectivePrompt.parallel && effectivePrompt.parallel > 1 ? { parallel: effectivePrompt.parallel } : {}),
 		};
 	}
 	if (effectivePrompt.inheritContext) runtime.inheritContext = true;
@@ -542,6 +437,7 @@ export async function createPromptDryRun(
 		resolvedPositional,
 		options.currentModel,
 		options.modelRegistry,
+		{ scopedModels: options.scopedModels },
 	);
 	if (!prepared) {
 		return errorResult(prompt, `No available model from: ${effectivePrompt.models.join(", ")}`, warnings, runtime);
@@ -555,13 +451,9 @@ export async function createPromptDryRun(
 	const resolvedSkills = skillResolution.kind === "ready" ? skillResolution.skills : [];
 	const skillPreviews = previewSkills(resolvedSkills, options.showSkills === true);
 	let content = prepared.content;
-	let budgetContent: string | string[] = content;
+	let budgetContent = content;
 	const skillPreamble = resolvedSkills.length > 0 ? buildSkillLoadedMessage(resolvedSkills).content : undefined;
-	if (delegated && effectivePrompt.parallel && effectivePrompt.parallel > 1) {
-		const tasks = Array.from({ length: effectivePrompt.parallel }, (_, index) => `[Parallel subagent ${index + 1}/${effectivePrompt.parallel}]\n\n${prepared.content}`);
-		budgetContent = tasks.map((task) => skillPreamble ? `${skillPreamble}\n\n---\n\n${task}` : task);
-		content = tasks.join("\n\n");
-	} else if (delegated && skillPreamble) {
+	if (delegated && skillPreamble) {
 		budgetContent = `${skillPreamble}\n\n---\n\n${content}`;
 	} else if (runtime.loop && !delegated) {
 		content = `[${representativeLoopContext(runtime.loop, loopRotation.rotationLabel)}]\n\n${prepared.content}`;

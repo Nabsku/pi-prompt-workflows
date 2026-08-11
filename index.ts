@@ -2,29 +2,26 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve as resolvePath } from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { AssistantMessage, Message, Model } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
 	extractChainContextFlag,
-	extractLineupOverrides,
 	extractLoopCount,
 	extractLoopFlags,
 	extractSubagentOverride,
-	extractWorktreeFlag,
+	findRemovedLegacyRuntimeFlag,
 	parseCommandArgs,
 	splitRawArgsAtBoundary,
 	substituteArgs,
-	type LineupOverrideAction,
 	type SubagentOverride,
 } from "./args.js";
-import { DEFAULT_COMPARE_FINAL_APPLIER_TASK, DEFAULT_COMPARE_REVIEWER_TASK } from "./compare-defaults.js";
-import { loadBestOfNPresetCatalog, applyPresetDefaultModel, getBestOfNPresetCandidatePaths, type ResolvedBestOfNPreset } from "./best-of-n-presets.js";
-import { parseChainSteps, parseChainDeclaration, type ChainStep, type ChainStepOrParallel, type ParallelChainStep } from "./chain-parser.js";
+import { parseChainSteps, parseChainDeclaration, type ChainStep } from "./chain-parser.js";
 import { AdaptiveChainCancelledError, executeAdaptiveChain } from "./adaptive-runtime.js";
 import { formatAdaptiveDecision, formatAdaptiveError, formatAdaptiveRuntimeReport } from "./adaptive-renderer.js";
 import { captureGitWorktreeSnapshot, compareGitWorktreeSnapshots } from "./git-worktree-snapshot.js";
-import { generateBoomerangSummary, generateChainStepSummary, generateIterationSummary, didIterationMakeChanges, getIterationEntries, wasIterationAborted } from "./loop-utils.js";
+import { generateBoomerangSummary, generateChainStepSummary, generateIterationSummary, didIterationMakeChanges, getIterationEntries, getLastAssistantText, wasIterationAborted } from "./loop-utils.js";
 import { selectModelCandidate } from "./model-selection.js";
 import { notify, summarizePromptDiagnostics, diagnosticsFingerprint } from "./notifications.js";
 import { checkPromptExecutionBudget, normalizePromptCompletionOutcome, preparePromptExecution, PromptBudgetExceededError, renderPromptForResolvedModel } from "./prompt-execution.js";
@@ -35,7 +32,6 @@ import {
 	loadPromptsWithModel,
 	collectPromptSourceRecords,
 	selectEffectivePromptSourceRecords,
-	type DelegationLineupSlot,
 	type PromptWithModel,
 } from "./prompt-loader.js";
 import { createInvalidAdaptivePreflight, isAdaptivePromptTarget, isAdaptiveRunTarget } from "./adaptive-preflight.js";
@@ -48,10 +44,24 @@ import {
 	type PendingSkillMessage,
 	type RuntimeSkillCommand,
 } from "./prompt-skills.js";
-import { renderSkillLoaded } from "./skill-loaded-renderer.js";
+import { renderSkillLoaded, type SkillLoadedDetails } from "./skill-loaded-renderer.js";
 import { createToolManager } from "./tool-manager.js";
-import { executeSubagentPromptStep, type DelegatedPromptParallelResult, type PreparedDelegatedTask } from "./subagent-step.js";
-import { DEFAULT_SUBAGENT_NAME, PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE } from "./subagent-runtime.js";
+import { DelegatedPromptCancelledError, executeSubagentPromptStep } from "./subagent-step.js";
+import {
+	DEFAULT_SUBAGENT_NAME,
+	PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT,
+	PROMPT_TEMPLATE_PROMPT_INVOKE_ACK_EVENT,
+	PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION,
+	PROMPT_TEMPLATE_PROMPT_INVOKE_REQUEST_EVENT,
+	PROMPT_TEMPLATE_PROMPT_PROTOCOL_VERSION,
+	PROMPT_TEMPLATE_PROMPT_STARTED_EVENT,
+	PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE,
+	type PromptTemplatePromptFinished,
+	type PromptTemplatePromptInvokeAcknowledgement,
+	type PromptTemplatePromptInvokeRequest,
+	type PromptTemplatePromptStarted,
+	type PromptTemplatePromptStatus,
+} from "./subagent-runtime.js";
 import { renderDelegatedSubagentResult } from "./subagent-renderer.js";
 import {
 	PROMPT_TEMPLATE_DETERMINISTIC_COMPLETION_MESSAGE_TYPE,
@@ -62,17 +72,6 @@ import {
 	shouldHandoffToLlm,
 } from "./deterministic-step.js";
 import { renderDeterministicCompletion, renderDeterministicResult } from "./deterministic-renderer.js";
-import { PROMPT_TEMPLATE_COMMIT_ASK_MESSAGE_TYPE, renderCommitAskMessage } from "./commit-ask-renderer.js";
-import { formatBestOfNPresetCatalog } from "./best-of-n-preset-renderer.js";
-import { collectBestOfNRunHistory, parseBestOfNRunHistoryArgs, type BestOfNRunHistoryResult } from "./best-of-n-run-history.js";
-import { formatBestOfNRunDetail, formatBestOfNRunHistory } from "./best-of-n-run-history-renderer.js";
-import {
-	CompareRunDetailInspector,
-	CompareRunPicker,
-	buildCompareRunCatalog,
-	createCompareRunDetailViewModel,
-	type CompareRunHistoryTuiResult,
-} from "./best-of-n-run-history-tui.js";
 import { collectChangedGatePredecessors, formatPromptValidationReport, validatePromptTemplates, type RegisteredPromptSkill } from "./prompt-validation.js";
 import {
 	DRY_RUN_CHAIN_UNSUPPORTED,
@@ -94,20 +93,6 @@ interface LoopState {
 	currentIteration: number;
 	totalIterations: number | null;
 	rotationLabel?: string;
-}
-
-type ReportLineupSlot = DelegationLineupSlot & { effectiveModel: string; effectiveTask: string };
-type BestOfNRunStatus = "review-complete" | "apply-complete" | "worker-failed" | "reviewer-failed" | "final-applier-failed" | "artifact-write-failed" | "report-write-failed";
-
-interface GitSnapshot {
-	head?: string;
-	status?: string;
-	diffStat?: string;
-	shortStat?: string;
-	diffRaw?: string;
-	stagedRaw?: string;
-	diffFingerprint?: string;
-	stagedNameStatus?: string;
 }
 
 interface FreshCollapse {
@@ -133,11 +118,70 @@ interface PromptStepResult {
 	text?: string;
 	terminalAssistantMessage?: AssistantMessage;
 	aborted?: boolean;
+	status?: PromptTemplatePromptStatus;
 }
 
 interface PromptTurnRestore {
 	originalModel: Model<any> | undefined;
 	originalThinking: ThinkingLevel | undefined;
+}
+
+interface CommandExecutionScope {
+	generation: number;
+	signal: AbortSignal;
+	skipAgentEndDrain?: boolean;
+}
+
+interface PendingPromptTurn {
+	content: string;
+	generation: number;
+	started: boolean;
+	settled: boolean;
+	startedSignal: Promise<void>;
+	resolveStarted: () => void;
+	settledSignal: Promise<void>;
+	resolveSettled: () => void;
+}
+
+// Graph invocations run from a base ExtensionContext, which has no waitForIdle.
+// Pi's extension send is fire-and-forget and cannot be cancelled by this
+// extension. These are warning tripwires, not cancellation deadlines: the
+// extension retains ownership until the matching turn settles or the session
+// is reset.
+const INVOKE_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+const COMPACTION_WAIT_FALLBACK_MS = 5 * 60 * 1000;
+
+function getExtensionEvents(pi: ExtensionAPI): ExtensionAPI["events"] | undefined {
+	return (pi as ExtensionAPI & { events?: ExtensionAPI["events"] }).events;
+}
+
+function emitPromptLifecycleEvent(
+	pi: ExtensionAPI,
+	ctx: Pick<ExtensionContext, "hasUI" | "ui"> | undefined,
+	event: typeof PROMPT_TEMPLATE_PROMPT_STARTED_EVENT | typeof PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT,
+	payload: PromptTemplatePromptStarted | PromptTemplatePromptFinished,
+): void {
+	const events = getExtensionEvents(pi);
+	if (!events) return;
+	try {
+		events.emit(event, payload);
+	} catch (error) {
+		notify(ctx, `Prompt lifecycle observer failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
+	}
+}
+
+function emitPromptInvocationAcknowledgement(
+	pi: ExtensionAPI,
+	ctx: Pick<ExtensionContext, "hasUI" | "ui"> | undefined,
+	payload: PromptTemplatePromptInvokeAcknowledgement,
+): void {
+	const events = getExtensionEvents(pi);
+	if (!events) return;
+	try {
+		events.emit(PROMPT_TEMPLATE_PROMPT_INVOKE_ACK_EVENT, payload);
+	} catch (error) {
+		notify(ctx, `Prompt invocation observer failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
+	}
 }
 
 export default function promptModelExtension(pi: ExtensionAPI) {
@@ -149,10 +193,12 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	let previousThinking: ThinkingLevel | undefined;
 	let pendingSkillMessage: PendingSkillMessage | undefined;
 	let runtimeModel: Model<any> | undefined;
+	let promptActivityCount = 0;
 	let workflowOwner: symbol | null = null;
 	const isWorkflowActive = () => workflowOwner !== null;
-	function claimWorkflowOwner(label: string): symbol | undefined {
-		if (workflowOwner !== null) return undefined;
+	const isPromptActive = () => promptActivityCount > 0;
+	function claimWorkflowOwner(label: string, allowPromptActive = false): symbol | undefined {
+		if (workflowOwner !== null || (isPromptActive() && !allowPromptActive)) return undefined;
 		const owner = Symbol(label);
 		workflowOwner = owner;
 		return owner;
@@ -168,9 +214,312 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	let accumulatedSummaries: string[] = [];
 	let lastDiagnostics = "";
 	let storedCommandCtx: ExtensionCommandContext | null = null;
+	let invocationCtx: ExtensionContext | null = null;
+	let sessionGeneration = 0;
+	let sessionActive = false;
+	let sessionAbortController = new AbortController();
+	const commandExecutionScope = new AsyncLocalStorage<CommandExecutionScope>();
+	let pendingCompaction: Promise<void> | null = null;
+	let resolvePendingCompaction: (() => void) | null = null;
+	let pendingCompactionFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+	let nextCompactionGeneration = 0;
+	let activeCompactionGeneration: number | null = null;
+	type CompactionReleaseReason = "terminal" | "turn_start" | "abort" | "fallback" | "reset";
+	const compactionReleaseReasons = new Map<number, CompactionReleaseReason>();
+	let compactionTerminalCorrelationLost = false;
+	let removeActiveCompactionAbortListener: (() => void) | null = null;
+	let agentEndDrain: Promise<void> | null = null;
+	let resolveAgentEndDrain: (() => void) | null = null;
+	let agentEndDrainDepth = 0;
+	let queuedAgentSettledDrainPending = false;
+	let queuedAgentSettledDrainGenerationBaseline: number | null = null;
+	let pendingPromptTurn: PendingPromptTurn | null = null;
 	const approvedProjectPromptLibraryCwds = new Set<string>();
-	const approvedProjectPresetCwds = new Set<string>();
 	const UNLIMITED_LOOP_CAP = 999;
+
+	function captureCommandExecutionScope(ctx: ExtensionContext): CommandExecutionScope {
+		const parent = commandExecutionScope.getStore();
+		if (parent) return parent;
+		const signals = [sessionAbortController.signal, ...(ctx.signal ? [ctx.signal] : [])];
+		return {
+			generation: sessionGeneration,
+			signal: signals.length === 1 ? signals[0]! : AbortSignal.any(signals),
+		};
+	}
+
+	function getCommandSignal(ctx: ExtensionContext): AbortSignal | undefined {
+		return commandExecutionScope.getStore()?.signal ?? ctx.signal;
+	}
+
+	function isCommandAborted(ctx: ExtensionContext): boolean {
+		return getCommandSignal(ctx)?.aborted === true;
+	}
+
+	function isCommandExecutionCurrent(ctx: ExtensionContext): boolean {
+		const scope = commandExecutionScope.getStore();
+		return sessionActive
+			&& (scope === undefined || (scope.generation === sessionGeneration && !scope.signal.aborted))
+			&& ctx.signal?.aborted !== true;
+	}
+
+	function beginCompactionBarrier(
+		signal?: AbortSignal,
+		ctx?: Pick<ExtensionContext, "hasUI" | "ui">,
+	): boolean {
+		if (activeCompactionGeneration !== null) {
+			notify(ctx, "Compaction request refused because another compaction generation is still active.", "warning");
+			return false;
+		}
+		if (signal?.aborted) return false;
+		const generation = ++nextCompactionGeneration;
+		activeCompactionGeneration = generation;
+		const startedAt = Date.now();
+		const barrier = new Promise<void>((resolve) => {
+			resolvePendingCompaction = resolve;
+		});
+		pendingCompaction = barrier;
+		pendingCompactionFallbackTimer = setTimeout(() => {
+			if (pendingCompaction !== barrier) return;
+			const observedMs = Math.max(0, Date.now() - startedAt);
+			if (pendingPromptTurn && pendingPromptTurn.generation === sessionGeneration && !pendingPromptTurn.started) {
+				pendingCompactionFallbackTimer = null;
+				notify(
+					ctx,
+					`The host send remains owned after the compaction wait tripwire: budget ${COMPACTION_WAIT_FALLBACK_MS}ms, configured ${COMPACTION_WAIT_FALLBACK_MS}ms, observed ${observedMs}ms. Pi 0.84.1 does not expose cancellation for this fire-and-forget send, so the barrier remains active until session_compact, before_agent_start, session reset, or shutdown. Do not retry; inspect the host compaction logs.`,
+					"warning",
+				);
+				return;
+			}
+			notify(
+				ctx,
+				`Compaction barrier fallback released blocked work: budget ${COMPACTION_WAIT_FALLBACK_MS}ms, configured ${COMPACTION_WAIT_FALLBACK_MS}ms, observed ${observedMs}ms. A session_compact, before_agent_start, or abort signal did not arrive; pending commands were cancelled. Untagged compaction terminals remain fail-closed until the host accepts another prompt or this extension reloads. Inspect the compaction hooks before increasing the fallback.`,
+				"warning",
+			);
+			compactionTerminalCorrelationLost = true;
+			finishCompactionGeneration(generation, "fallback");
+		}, COMPACTION_WAIT_FALLBACK_MS);
+		if (signal) {
+			const onAbort = () => finishCompactionGeneration(generation, "abort");
+			signal.addEventListener("abort", onAbort, { once: true });
+			removeActiveCompactionAbortListener = () => signal.removeEventListener("abort", onAbort);
+		}
+		return true;
+	}
+
+	function completeCompactionBarrier(expected = pendingCompaction) {
+		if (!expected || pendingCompaction !== expected) return;
+		const resolve = resolvePendingCompaction;
+		const fallbackTimer = pendingCompactionFallbackTimer;
+		resolvePendingCompaction = null;
+		pendingCompactionFallbackTimer = null;
+		pendingCompaction = null;
+		if (fallbackTimer) clearTimeout(fallbackTimer);
+		resolve?.();
+	}
+
+	function finishCompactionGeneration(
+		expected = activeCompactionGeneration,
+		reason: CompactionReleaseReason = "terminal",
+	): void {
+		if (expected === null || activeCompactionGeneration !== expected) return;
+		compactionReleaseReasons.set(expected, reason);
+		while (compactionReleaseReasons.size > 32) {
+			const oldest = compactionReleaseReasons.keys().next().value;
+			if (oldest === undefined) break;
+			compactionReleaseReasons.delete(oldest);
+		}
+		const removeAbortListener = removeActiveCompactionAbortListener;
+		activeCompactionGeneration = null;
+		removeActiveCompactionAbortListener = null;
+		removeAbortListener?.();
+		completeCompactionBarrier();
+	}
+
+	function handleCompactionTerminal(): void {
+		if (compactionTerminalCorrelationLost) {
+			if (activeCompactionGeneration !== null && invocationCtx) {
+				notify(
+					invocationCtx,
+					`Ignored an uncorrelated session_compact event while a compaction barrier is active: fallback budget ${COMPACTION_WAIT_FALLBACK_MS}ms, configured ${COMPACTION_WAIT_FALLBACK_MS}ms. Wait for the host to accept another prompt or reload this extension to restore terminal correlation.`,
+					"warning",
+				);
+			}
+			return;
+		}
+		finishCompactionGeneration(activeCompactionGeneration, "terminal");
+	}
+
+	async function waitForPendingCompaction() {
+		while (pendingCompaction) await pendingCompaction;
+	}
+
+	async function waitForPendingCompactionBoundary(): Promise<boolean> {
+		const generation = activeCompactionGeneration;
+		await waitForPendingCompaction();
+		return generation === null || compactionReleaseReasons.get(generation) !== "fallback";
+	}
+
+	function enterAgentEndDrain(): void {
+		if (agentEndDrainDepth === 0) {
+			agentEndDrain = new Promise<void>((resolve) => {
+				resolveAgentEndDrain = resolve;
+			});
+		}
+		agentEndDrainDepth++;
+	}
+
+	function leaveAgentEndDrain(): void {
+		if (agentEndDrainDepth === 0) return;
+		agentEndDrainDepth--;
+		if (agentEndDrainDepth > 0) return;
+		const resolve = resolveAgentEndDrain;
+		agentEndDrain = null;
+		resolveAgentEndDrain = null;
+		resolve?.();
+	}
+
+	function clearAgentEndDrain(): void {
+		agentEndDrainDepth = 0;
+		const resolve = resolveAgentEndDrain;
+		agentEndDrain = null;
+		resolveAgentEndDrain = null;
+		resolve?.();
+	}
+
+	async function waitForAgentEndDrain(): Promise<void> {
+		while (agentEndDrain) await agentEndDrain;
+	}
+
+	function isCommandContext(ctx: ExtensionContext): ctx is ExtensionCommandContext {
+		const candidate = ctx as Partial<ExtensionCommandContext>;
+		return typeof candidate.waitForIdle === "function" && typeof candidate.navigateTree === "function";
+	}
+
+	async function pollUntil(
+		ctx: ExtensionContext,
+		done: () => boolean,
+		warningMs: number,
+		what: string,
+	): Promise<void> {
+		const startedAt = Date.now();
+		let warned = false;
+		while (!done()) {
+			if (isCommandAborted(ctx)) throw new Error(`Prompt invocation aborted while ${what}`);
+			const observedMs = Math.max(0, Date.now() - startedAt);
+			if (!warned && observedMs >= warningMs) {
+				warned = true;
+				notify(
+					ctx,
+					`Prompt invocation is still ${what}: warning budget ${warningMs}ms, configured ${warningMs}ms, observed ${observedMs}ms. Pi 0.84.1 does not expose cancellation for the owned host turn, so this workflow will keep waiting. Do not retry; reset or shut down the session to cancel ownership.`,
+					"warning",
+				);
+			}
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+	}
+
+	async function waitForPromptIdle(ctx: ExtensionContext): Promise<void> {
+		if (isCommandContext(ctx)) {
+			const signal = getCommandSignal(ctx);
+			if (!signal) {
+				await ctx.waitForIdle();
+				return;
+			}
+			if (signal.aborted) throw new Error("Prompt invocation aborted while waiting for the run to finish");
+			let onAbort!: () => void;
+			const aborted = new Promise<never>((_resolve, reject) => {
+				onAbort = () => reject(new Error("Prompt invocation aborted while waiting for the run to finish"));
+				signal.addEventListener("abort", onAbort, { once: true });
+			});
+			try {
+				await Promise.race([ctx.waitForIdle(), aborted]);
+			} finally {
+				signal.removeEventListener("abort", onAbort);
+			}
+			return;
+		}
+		await pollUntil(ctx, () => ctx.isIdle(), INVOKE_IDLE_TIMEOUT_MS, "waiting for the run to finish");
+	}
+
+	async function waitForCommandLifecycleBoundary(
+		ctx: ExtensionContext,
+		options: { skipAgentEndDrain?: boolean } = {},
+	): Promise<boolean> {
+		const scope = commandExecutionScope.getStore();
+		const skipAgentEndDrain = options.skipAgentEndDrain ?? scope?.skipAgentEndDrain ?? false;
+		const expectedGeneration = scope?.generation ?? sessionGeneration;
+		const isCurrentSession = () => isCommandExecutionCurrent(ctx) && sessionGeneration === expectedGeneration;
+		if (!isCurrentSession()) return false;
+		while (true) {
+			if (!(await waitForPendingCompactionBoundary())) return false;
+			if (!isCurrentSession()) return false;
+			if (!skipAgentEndDrain) await waitForAgentEndDrain();
+			if (!isCurrentSession()) return false;
+			if (!ctx.isIdle()) await waitForPromptIdle(ctx);
+			if (!isCurrentSession()) return false;
+			if (!(await waitForPendingCompactionBoundary())) return false;
+			if (!isCurrentSession()) return false;
+			if (!skipAgentEndDrain && agentEndDrain) {
+				await waitForAgentEndDrain();
+				if (!isCurrentSession()) return false;
+				continue;
+			}
+			return true;
+		}
+	}
+
+	async function sendUserMessageAndWait(content: string, ctx: ExtensionContext): Promise<boolean> {
+		if (!(await waitForCommandLifecycleBoundary(ctx))) return false;
+		if (pendingPromptTurn) {
+			throw new Error("Cannot start a second host prompt while another fire-and-forget send is still owned by this extension.");
+		}
+
+		let resolveStarted!: () => void;
+		let resolveSettled!: () => void;
+		const pending: PendingPromptTurn = {
+			content,
+			generation: sessionGeneration,
+			started: false,
+			settled: false,
+			startedSignal: new Promise<void>((resolve) => { resolveStarted = resolve; }),
+			resolveStarted: () => resolveStarted(),
+			settledSignal: new Promise<void>((resolve) => { resolveSettled = resolve; }),
+			resolveSettled: () => resolveSettled(),
+		};
+		pendingPromptTurn = pending;
+		const startedAt = Date.now();
+		let warned = false;
+		const pollDelay = () => new Promise<void>((resolve) => setTimeout(resolve, 10));
+		const warnIfNeeded = () => {
+			const observedMs = Math.max(0, Date.now() - startedAt);
+			if (warned || observedMs < INVOKE_IDLE_TIMEOUT_MS) return;
+			warned = true;
+			notify(
+				ctx,
+				`The owned host turn has not settled: warning budget ${INVOKE_IDLE_TIMEOUT_MS}ms, configured ${INVOKE_IDLE_TIMEOUT_MS}ms, observed ${observedMs}ms. Pi 0.84.1 exposes this send as fire-and-forget, so the workflow will keep waiting rather than report a false cancellation. Do not retry; inspect host send and compaction logs, or reset the session.`,
+				"warning",
+			);
+		};
+		try {
+			pi.sendUserMessage(content);
+			while (ctx.isIdle() && !pending.started && !pending.settled) {
+				if (!isCommandExecutionCurrent(ctx)) return false;
+				warnIfNeeded();
+				await Promise.race([pending.startedSignal, pending.settledSignal, pollDelay()]);
+			}
+			while (ctx.isIdle() && pending.started && !pending.settled) {
+				if (!isCommandExecutionCurrent(ctx)) return false;
+				warnIfNeeded();
+				await Promise.race([pending.settledSignal, pollDelay()]);
+			}
+
+			if (!isCommandExecutionCurrent(ctx)) return false;
+			if (!pending.settled) await waitForPromptIdle(ctx);
+			return isCommandExecutionCurrent(ctx);
+		} finally {
+			if (pendingPromptTurn === pending) pendingPromptTurn = null;
+		}
+	}
 
 	const toolManager = createToolManager(pi, {
 		isActive: () => !!(loopState || isWorkflowActive()),
@@ -200,7 +549,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		return prompt.source === "project" && prompt.rootKind === "prompt-library";
 	}
 
-	async function ensureProjectPromptLibraryApproved(prompt: PromptWithModel, ctx: ExtensionCommandContext): Promise<boolean> {
+	async function ensureProjectPromptLibraryApproved(prompt: PromptWithModel, ctx: ExtensionContext): Promise<boolean> {
 		if (!isProjectPromptLibraryPrompt(prompt)) return true;
 		// Pi core trust has historically covered only core-known project resources
 		// (for example .pi/prompts), not extension-defined .pi/prompt-library
@@ -240,73 +589,10 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		return true;
 	}
 
-	async function ensureProjectPresetApproved(preset: ResolvedBestOfNPreset, ctx: ExtensionCommandContext, catalogCwd: string): Promise<boolean> {
-		if (preset.source !== "project") return true;
-		const cwdKey = resolvePath(catalogCwd);
-		if (approvedProjectPresetCwds.has(cwdKey)) return true;
-		const message = `Best-of-N preset \`${preset.name}\` is loaded from ${preset.filePath}. Approve project best-of-N presets for compare cwd ${cwdKey} in this session?`;
-		if (!ctx.hasUI || typeof (ctx.ui as { confirm?: unknown }).confirm !== "function") {
-			notify(ctx, `${message} Run in an interactive UI session and approve it, or move trusted presets to ~/.pi/agent/best-of-n-presets.json.`, "error");
-			return false;
-		}
-		const approved = await ctx.ui.confirm("Approve project best-of-N preset", message, { timeout: 30_000 });
-		if (!approved) {
-			notify(ctx, `Project best-of-N preset \`${preset.name}\` was not approved.`, "warning");
-			return false;
-		}
-		approvedProjectPresetCwds.add(cwdKey);
-		return true;
-	}
-
-	function formatPresetSearchPaths(catalogCwd: string): string {
-		const paths = getBestOfNPresetCandidatePaths(catalogCwd);
-		return [...paths.user, ...paths.project].join(", ");
-	}
-
-	function formatMissingBestOfNPresetMessage(presetName: string, catalogCwd: string, catalog: ReturnType<typeof loadBestOfNPresetCatalog>): string {
-		const invalidProjectReasons = catalog.projectFileInvalid
-			? catalog.diagnostics
-				.filter((diagnostic) => diagnostic.source === "project" && diagnostic.code === "invalid-best-of-n-presets-file")
-				.map((diagnostic) => diagnostic.message)
-			: [];
-		return [
-			`Best-of-N preset \`${presetName}\` was not found.`,
-			`Effective compare cwd: ${resolvePath(catalogCwd)}.`,
-			`Searched preset files: ${formatPresetSearchPaths(catalogCwd)}.`,
-			...(invalidProjectReasons.length > 0 ? [`Invalid project preset file: ${invalidProjectReasons.join(" ")}`] : []),
-		].join(" ");
-	}
-
-	async function resolveBestOfNPresetLineup(
-		prompt: PromptWithModel,
-		runtimePreset: string | undefined,
-		ctx: ExtensionCommandContext,
-		catalogCwd: string,
-	): Promise<{ workers?: DelegationLineupSlot[]; reviewers?: DelegationLineupSlot[]; maxModelCalls?: number } | undefined> {
-		const presetName = runtimePreset ?? prompt.preset;
-		if (!presetName) return {};
-		const catalog = loadBestOfNPresetCatalog(catalogCwd);
-		for (const diagnostic of catalog.diagnostics) {
-			notify(ctx, diagnostic.message, "warning");
-		}
-		const preset = catalog.presets.get(presetName);
-		if (!preset) {
-			notify(ctx, formatMissingBestOfNPresetMessage(presetName, catalogCwd, catalog), "error");
-			return undefined;
-		}
-		if (!(await ensureProjectPresetApproved(preset, ctx, catalogCwd))) return undefined;
-		return {
-			workers: applyPresetDefaultModel(preset.workers, preset.defaultModel),
-			reviewers: applyPresetDefaultModel(preset.reviewers, preset.defaultModel),
-			maxModelCalls: preset.maxModelCalls,
-		};
-	}
-
 	pi.registerMessageRenderer<SkillLoadedDetails>("skill-loaded", renderSkillLoaded);
 	pi.registerMessageRenderer(PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE, renderDelegatedSubagentResult);
 	pi.registerMessageRenderer(PROMPT_TEMPLATE_DETERMINISTIC_MESSAGE_TYPE, renderDeterministicResult);
 	pi.registerMessageRenderer(PROMPT_TEMPLATE_DETERMINISTIC_COMPLETION_MESSAGE_TYPE, renderDeterministicCompletion);
-	pi.registerMessageRenderer(PROMPT_TEMPLATE_COMMIT_ASK_MESSAGE_TYPE, renderCommitAskMessage);
 
 	function registerPromptCommand(name: string) {
 		pi.registerCommand(name, {
@@ -362,6 +648,103 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		lastDiagnostics = fingerprint;
 	}
 
+	function handlePromptInvocation(payload: unknown): void {
+		if (!payload || typeof payload !== "object" || Array.isArray(payload)) return;
+		const candidate = payload as Record<string, unknown>;
+		const requestId = candidate.requestId;
+		const name = candidate.name;
+		if (typeof requestId !== "string" || typeof name !== "string") return;
+		const ctx = invocationCtx;
+
+		if (
+			candidate.protocolVersion !== PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION
+			|| (candidate.args !== undefined && typeof candidate.args !== "string")
+		) {
+			emitPromptInvocationAcknowledgement(pi, ctx ?? undefined, {
+				protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION,
+				requestId,
+				name,
+				accepted: false,
+				reason: "invalid-request",
+			});
+			return;
+		}
+
+		const request = candidate as unknown as PromptTemplatePromptInvokeRequest;
+		if (!ctx) {
+			emitPromptInvocationAcknowledgement(pi, ctx ?? undefined, {
+				protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION,
+				requestId: request.requestId,
+				name: request.name,
+				accepted: false,
+				reason: "not-ready",
+			});
+			return;
+		}
+		if (isPromptActive() || isWorkflowActive() || loopState !== null || pendingCompaction !== null || agentEndDrainDepth > 0 || !ctx.isIdle()) {
+			emitPromptInvocationAcknowledgement(pi, ctx ?? undefined, {
+				protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION,
+				requestId: request.requestId,
+				name: request.name,
+				accepted: false,
+				reason: "busy",
+			});
+			return;
+		}
+
+		refreshPrompts(ctx.cwd, ctx);
+		const prompt = prompts.get(request.name) ?? adaptivePrompts.get(request.name);
+		if (!prompt || prompt.hidden) {
+			emitPromptInvocationAcknowledgement(pi, ctx ?? undefined, {
+				protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION,
+				requestId: request.requestId,
+				name: request.name,
+				accepted: false,
+				reason: "unknown-template",
+			});
+			return;
+		}
+		if (prompt.chain || prompt.adaptiveChain) {
+			emitPromptInvocationAcknowledgement(pi, ctx ?? undefined, {
+				protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION,
+				requestId: request.requestId,
+				name: request.name,
+				accepted: false,
+				reason: "chain-template",
+			});
+			return;
+		}
+		if (prompt.boomerang || prompt.loop !== undefined || prompt.inputs || extractLoopCount(request.args ?? "")) {
+			emitPromptInvocationAcknowledgement(pi, ctx ?? undefined, {
+				protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION,
+				requestId: request.requestId,
+				name: request.name,
+				accepted: false,
+				reason: "unsupported-context",
+			});
+			return;
+		}
+
+		const scope = captureCommandExecutionScope(ctx);
+		const runId = randomUUID();
+		promptActivityCount++;
+		emitPromptInvocationAcknowledgement(pi, ctx, {
+			protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION,
+			requestId: request.requestId,
+			name: request.name,
+			accepted: true,
+			runId,
+		});
+		void runPromptCommand(request.name, request.args ?? "", ctx, {
+			runId,
+			activeAlready: true,
+			resolvedPrompt: prompt,
+			scope,
+		}).catch(() => {
+			// Invocation failures are reported through the lifecycle event.
+		});
+	}
+
 	function consumePendingSkillMessage() {
 		if (!pendingSkillMessage) return undefined;
 		const message = pendingSkillMessage;
@@ -385,18 +768,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		return skills;
 	}
 
-	async function waitForTurnStart(ctx: ExtensionContext) {
-		while (ctx.isIdle()) {
-			await new Promise((resolve) => setTimeout(resolve, 10));
-		}
-	}
-
 	function shouldDelegatePrompt(prompt: PromptWithModel, override?: SubagentOverride): boolean {
 		return prompt.subagent !== undefined || override?.enabled === true;
-	}
-
-	function isParallelChainStep(step: ChainStepOrParallel): step is ParallelChainStep {
-		return "parallel" in step;
 	}
 
 	function terminalAssistantMessage(messages: readonly Message[]): AssistantMessage | undefined {
@@ -407,14 +780,39 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		return undefined;
 	}
 
-	function isAbortedStepResult(result: PromptStepResult | "aborted"): boolean {
+	function ordinaryTerminalStatus(message: AssistantMessage | undefined): PromptTemplatePromptStatus | undefined {
+		switch (message?.stopReason) {
+			case undefined:
+			case "stop":
+			case "length":
+			case "toolUse":
+				return undefined;
+			case "aborted":
+				return "cancelled";
+			default:
+				return "failed";
+		}
+	}
+
+	function isAbortedStepResult(
+		result: PromptStepResult | "aborted",
+	): result is "aborted" | (PromptStepResult & { aborted: true }) {
 		return result === "aborted" || result.aborted === true;
+	}
+
+	function abortedStepStatus(
+		result: "aborted" | (PromptStepResult & { aborted: true }),
+		ctx: ExtensionContext,
+	): PromptTemplatePromptStatus {
+		return result === "aborted"
+			? (isCommandAborted(ctx) ? "cancelled" : "failed")
+			: (result.status ?? (isCommandAborted(ctx) ? "cancelled" : "failed"));
 	}
 
 	async function executePromptStep(
 		prompt: PromptWithModel,
 		args: string[],
-		ctx: ExtensionCommandContext,
+		ctx: ExtensionContext,
 		currentModel: Model<any> | undefined,
 		override?: SubagentOverride,
 		inheritedModel?: Model<any>,
@@ -434,8 +832,13 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			return "aborted";
 		}
 
+		const delegatedPrompt = shouldDelegatePrompt(prompt, override);
 		const requestedSkills = getRequestedSkills(prompt);
-		const skillResolution = resolvePromptSkills(requestedSkills, ctx.cwd, pi.getCommands() as RuntimeSkillCommand[]);
+		// Delegated execution resolves and binds skills only after its effective cwd
+		// has passed the nested-project approval boundary.
+		const skillResolution = delegatedPrompt
+			? { kind: "none" as const }
+			: resolvePromptSkills(requestedSkills, ctx.cwd, pi.getCommands() as RuntimeSkillCommand[]);
 		if (skillResolution.kind === "error") {
 			notify(ctx, skillResolution.error, "error");
 			adaptiveAbortStatus?.("blocked");
@@ -444,7 +847,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		let deterministicPreamble: string | undefined;
 		if (prompt.deterministic) {
 			try {
-				const deterministicResult = await runDeterministicStep(prompt, prompt.deterministic, ctx.cwd);
+				const deterministicResult = await runDeterministicStep(prompt, prompt.deterministic, ctx.cwd, getCommandSignal(ctx));
 				const deterministicPreambleText = buildDeterministicPreamble(deterministicResult);
 				pi.sendMessage({
 					customType: PROMPT_TEMPLATE_DETERMINISTIC_MESSAGE_TYPE,
@@ -464,7 +867,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 							status: deterministicResult.exitCode === 0 ? "succeeded" : "failed",
 						},
 					});
-					return { changed: false };
+					return { changed: false, status: deterministicResult.exitCode === 0 ? "completed" : "failed" };
 				}
 				deterministicPreamble = deterministicPreambleText;
 			} catch (error) {
@@ -475,58 +878,39 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 		const combinedTaskPreamble = [taskPreamble, deterministicPreamble].filter(Boolean).join("\n\n");
 
-		if (shouldDelegatePrompt(prompt, override)) {
+		if (delegatedPrompt) {
 			try {
-				const delegated =
-					prompt.parallel && prompt.parallel > 1
-						? await executeSubagentPromptStep({
-							pi,
-							ctx,
-							currentModel,
-							override,
-							signal: ctx.signal,
-							inheritedModel,
-							taskPreamble: combinedTaskPreamble || undefined,
-							parallel: Array.from({ length: prompt.parallel }, (_, index) => ({
-								prompt,
-								args,
-								taskPrefix: `[Parallel subagent ${index + 1}/${prompt.parallel}]`,
-							})),
-							worktree: prompt.worktree === true,
-						})
-						: await executeSubagentPromptStep({
-							pi,
-							prompt,
-							args,
-							ctx,
-							currentModel,
-							override,
-							signal: ctx.signal,
-							inheritedModel,
-							taskPreamble: combinedTaskPreamble || undefined,
-						});
+				const delegated = await executeSubagentPromptStep({
+					pi,
+					prompt,
+					args,
+					ctx,
+					currentModel,
+					override,
+					signal: getCommandSignal(ctx),
+					inheritedModel,
+					taskPreamble: combinedTaskPreamble || undefined,
+				});
 				if (!delegated) {
 					notify(ctx, `Prompt \`${prompt.name}\` is not configured for delegated execution.`, "error");
 					return "aborted";
 				}
-				return {
-					changed: delegated.changed,
-					text: delegated.text,
-				};
+				return { changed: delegated.changed, text: delegated.text };
 			} catch (error) {
 				notify(ctx, error instanceof Error ? error.message : String(error), "error");
 				if (error instanceof PromptBudgetExceededError) {
 					adaptiveAbortStatus?.("blocked");
 					return "aborted";
 				}
-				return { changed: false };
+				adaptiveAbortStatus?.("failed");
+				return { changed: false, status: isCommandAborted(ctx) || error instanceof DelegatedPromptCancelledError ? "cancelled" : "failed" };
 			}
 		}
 
 		const prepared =
 			inheritedModel === undefined
-				? await preparePromptExecution(prompt, args, currentModel, ctx.modelRegistry)
-				: await preparePromptExecution(prompt, args, currentModel, ctx.modelRegistry, { inheritedModel });
+				? await preparePromptExecution(prompt, args, currentModel, ctx.modelRegistry, { scopedModels: ctx.scopedModels })
+				: await preparePromptExecution(prompt, args, currentModel, ctx.modelRegistry, { inheritedModel, scopedModels: ctx.scopedModels });
 		if (!prepared) {
 			notify(ctx, `No available model from: ${prompt.models.join(", ")}`, "error");
 			adaptiveAbortStatus?.("blocked");
@@ -581,20 +965,26 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 
 		const startId = ctx.sessionManager.getLeafId();
-		pi.sendUserMessage(content);
-		await waitForTurnStart(ctx);
-		await ctx.waitForIdle();
+		if (!(await sendUserMessageAndWait(content, ctx))) {
+			return { changed: false, aborted: true, status: "cancelled" };
+		}
 
 		const entries = getIterationEntries(ctx, startId);
 		const terminal = terminalAssistantMessage(entries.flatMap((entry) => entry.type === "message" && entry.message.role === "assistant" ? [entry.message as AssistantMessage] : []));
-		return { changed: didIterationMakeChanges(entries), terminalAssistantMessage: terminal, aborted: wasIterationAborted(entries) };
+		const terminalStatus = ordinaryTerminalStatus(terminal);
+		return {
+			changed: didIterationMakeChanges(entries),
+			terminalAssistantMessage: terminal,
+			aborted: wasIterationAborted(entries) || terminalStatus === "cancelled",
+			...(terminalStatus ? { status: terminalStatus } : {}),
+		};
 	}
 
 	async function executeOrdinaryPrompt(
 		name: string,
 		prompt: PromptWithModel,
 		args: string[],
-		ctx: ExtensionCommandContext,
+		ctx: ExtensionContext,
 		currentModel: Model<any> | undefined,
 		override?: SubagentOverride,
 		adaptiveAbortStatus?: (status: "failed" | "blocked") => void,
@@ -611,15 +1001,20 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		if (isAbortedStepResult(result)) return result;
 		if (isDelegatedPrompt && result.text) {
 			const parentStartId = ctx.sessionManager.getLeafId();
-			pi.sendUserMessage(`[Delegated result: ${name}]\n\n${result.text}`);
-			await waitForTurnStart(ctx);
-			await ctx.waitForIdle();
+			if (!(await sendUserMessageAndWait(`[Delegated result: ${name}]\n\n${result.text}`, ctx))) {
+				return { ...result, aborted: true, status: "cancelled" };
+			}
 			const parentEntries = getIterationEntries(ctx, parentStartId);
 			result.terminalAssistantMessage = terminalAssistantMessage(parentEntries.flatMap((entry) =>
 				entry.type === "message" && entry.message.role === "assistant" ? [entry.message as AssistantMessage] : []));
-			result.aborted = wasIterationAborted(parentEntries);
+			const parentStatus = ordinaryTerminalStatus(result.terminalAssistantMessage);
+			result.aborted = wasIterationAborted(parentEntries) || parentStatus === "cancelled";
+			if (parentStatus) result.status = parentStatus;
 		}
-		if (prompt.boomerang) await collapseBoomerangPrompt(ctx, name, boomerangTargetId);
+		if (prompt.boomerang) {
+			if (!isCommandContext(ctx)) return "aborted";
+			await collapseBoomerangPrompt(ctx, name, boomerangTargetId);
+		}
 		return result;
 	}
 
@@ -723,1311 +1118,34 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 	}
 
-	async function executeToolCommand(command: string, ctx: ExtensionCommandContext) {
+	async function executeToolCommand(command: string, ctx: ExtensionCommandContext, source?: "queue") {
 		const stripped = command.startsWith("/") ? command.slice(1) : command;
 		const spaceIdx = stripped.indexOf(" ");
 		const name = spaceIdx >= 0 ? stripped.slice(0, spaceIdx) : stripped;
 		const args = spaceIdx >= 0 ? stripped.slice(spaceIdx + 1) : "";
+		const queued = source === "queue";
 
-		if (name === "chain-prompts") {
-			await runChainCommand(args, ctx);
-		} else {
-			await runPromptCommand(name, args, ctx);
-		}
-	}
-
-	function cloneLineup(slots: DelegationLineupSlot[] | undefined): DelegationLineupSlot[] | undefined {
-		return slots?.map((slot) => ({ ...slot }));
-	}
-
-	function expandedLineupCallCount(slots: DelegationLineupSlot[]): number {
-		let total = 0;
-		for (const slot of slots) total += slot.count ?? 1;
-		return total;
-	}
-
-	function expandLineupCounts(slots: DelegationLineupSlot[]): DelegationLineupSlot[] {
-		const expanded: DelegationLineupSlot[] = [];
-		for (const slot of slots) {
-			const { count, ...concreteSlot } = slot;
-			for (let index = 0; index < (count ?? 1); index++) {
-				expanded.push({ ...concreteSlot });
+		const execute = async () => {
+			if (name === "chain-prompts") {
+				await runChainCommand(args, ctx, { skipAgentEndDrain: queued, allowPromptActive: queued });
+			} else {
+				await runPromptCommand(name, args, ctx, { skipAgentEndDrain: queued, allowPromptActive: queued });
 			}
-		}
-		return expanded;
-	}
-
-	function applyLineupActions(
-		defaultSlots: DelegationLineupSlot[] | undefined,
-		actions: LineupOverrideAction[],
-		target: "workers" | "reviewers",
-	): DelegationLineupSlot[] | undefined {
-		let lineup = cloneLineup(defaultSlots);
-		for (const action of actions) {
-			if (action.target !== target) continue;
-			const incoming = action.slots.map((slot) => ({ ...slot }));
-			lineup = action.mode === "replace" ? incoming : [...(lineup ?? []), ...incoming];
-		}
-		return lineup;
-	}
-
-	function applyFinalApplierAction(
-		defaultSlot: DelegationLineupSlot | undefined,
-		actions: LineupOverrideAction[],
-	): DelegationLineupSlot | undefined {
-		let slot = defaultSlot ? { ...defaultSlot } : undefined;
-		for (const action of actions) {
-			if (action.target !== "finalApplier") continue;
-			slot = action.slots[0] ? { ...action.slots[0] } : undefined;
-		}
-		return slot;
-	}
-
-	async function resolveCompareBaseModel(
-		prompt: PromptWithModel,
-		currentModel: Model<any> | undefined,
-		ctx: ExtensionCommandContext,
-		modelOverride?: string,
-	): Promise<Model<any> | undefined> {
-		const requestedModels = modelOverride ? [modelOverride] : prompt.models;
-		if (requestedModels.length > 0) {
-			const selected = await selectModelCandidate(requestedModels, currentModel, ctx.modelRegistry);
-			if (!selected) {
-				notify(ctx, `No available model from: ${requestedModels.join(", ")}`, "error");
-				return undefined;
-			}
-			return selected.model;
-		}
-		if (currentModel) return currentModel;
-		notify(ctx, `Prompt \`${prompt.name}\` requires an active model or a runtime --model override.`, "error");
-		return undefined;
-	}
-
-	function resolveCompareCwd(raw: string, ctx: ExtensionCommandContext): string {
-		return expandCwdPath(raw) ?? resolvePath(ctx.cwd, raw);
-	}
-
-	function normalizeLineupCwds(
-		slots: DelegationLineupSlot[],
-		defaultCwd: string,
-		ctx: ExtensionCommandContext,
-	): DelegationLineupSlot[] | undefined {
-		const normalized: DelegationLineupSlot[] = [];
-		for (const slot of slots) {
-			const slotCwd = slot.cwd ? resolveCompareCwd(slot.cwd, ctx) : defaultCwd;
-			if (!existsSync(slotCwd)) {
-				notify(ctx, `cwd directory does not exist: ${slotCwd}`, "error");
-				return undefined;
-			}
-			normalized.push({
-				...slot,
-				cwd: slotCwd,
-			});
-		}
-		return normalized;
-	}
-
-	function formatCompareSlotLabel(slot: DelegationLineupSlot, fallbackAgent: string): string {
-		return slot.model ? `${fallbackAgent}, ${slot.model}` : fallbackAgent;
-	}
-
-	function renderComparePhaseResults(
-		label: string,
-		entries: Array<{ index: number; slot: DelegationLineupSlot; result: DelegatedPromptParallelResult }>,
-	): string {
-		return entries
-			.map(({ index, slot, result }) => {
-				const body = result.text || "(no assistant text)";
-				return `=== ${label} ${index + 1} (${formatCompareSlotLabel(slot, result.agent)}) ===\n${body}`;
-			})
-			.join("\n\n");
-	}
-
-	function formatPhaseFailureSummary(
-		label: string,
-		entries: Array<{ index: number; slot: DelegationLineupSlot; result: DelegatedPromptParallelResult }>,
-	): string | undefined {
-		if (entries.length === 0) return undefined;
-		return [
-			`[${label} failures]`,
-			...entries.map(({ index, slot, result }) =>
-				`- ${label} ${index + 1} (${formatCompareSlotLabel(slot, result.agent)}): ${result.errorText || "unknown delegated error"}`,
-			),
-		].join("\n");
-	}
-
-	function extractSuccessfulWorktreeChanges(aggregateText: string | undefined, successfulIndexes: number[]): string | undefined {
-		if (!aggregateText) return undefined;
-		const marker = "=== Worktree Changes ===";
-		const markerIndex = aggregateText.indexOf(marker);
-		if (markerIndex < 0) return undefined;
-		const worktreeText = aggregateText.slice(markerIndex + marker.length).trim();
-		if (!worktreeText) return undefined;
-		const successfulTaskNumbers = new Set(successfulIndexes.map((index) => index + 1));
-		const sections = worktreeText
-			.split(/\n(?=--- Task \d+ \()/)
-			.map((section) => section.trim())
-			.filter(Boolean)
-			.filter((section) => {
-				const match = section.match(/^--- Task (\d+) \(/);
-				return match ? successfulTaskNumbers.has(parseInt(match[1]!, 10)) : false;
-			});
-		if (sections.length === 0) return undefined;
-		return `${marker}\n\n${sections.join("\n\n")}`;
-	}
-
-	function slugifyRunSegment(value: string): string {
-		const slug = value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-		return (slug || "compare").slice(0, 48);
-	}
-
-	function formatRunTimestamp(date = new Date()): string {
-		return date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
-	}
-
-	function extractKeepArtifactsFlag(argsString: string): { args: string; keepArtifacts: boolean } {
-		let keepArtifacts = false;
-		const ranges: Array<{ start: number; end: number }> = [];
-		let i = 0;
-		while (i < argsString.length) {
-			const char = argsString[i];
-			if (char === '"' || char === "'") {
-				const quote = char;
-				i++;
-				while (i < argsString.length) {
-					if (argsString[i] === "\\") {
-						i += 2;
-						continue;
-					}
-					if (argsString[i] === quote) {
-						i++;
-						break;
-					}
-					i++;
-				}
-				continue;
-			}
-			if (/\s/.test(char)) {
-				i++;
-				continue;
-			}
-			const start = i;
-			while (i < argsString.length && !/\s/.test(argsString[i])) i++;
-			if (argsString.slice(start, i) === "--keep-artifacts") {
-				keepArtifacts = true;
-				ranges.push({ start, end: i });
-			}
-		}
-		let cleaned = argsString;
-		for (const range of ranges.sort((a, b) => b.start - a.start)) {
-			cleaned = cleaned.slice(0, range.start) + cleaned.slice(range.end);
-		}
-		return { args: cleaned.trim(), keepArtifacts };
-	}
-
-	function buildReportLineupSlots(slots: DelegationLineupSlot[], preparedTasks: PreparedDelegatedTask[]): ReportLineupSlot[] {
-		return slots.map((slot, index) => {
-			const prepared = preparedTasks[index];
-			return {
-				...slot,
-				effectiveModel: prepared?.model ?? slot.model ?? "unknown",
-				effectiveTask: prepared?.task ?? "",
-			};
-		});
-	}
-
-	function fallbackReportLineupSlots(slots: DelegationLineupSlot[], baseTask: string, taskArgs: string[], baseModel: Model<any>): ReportLineupSlot[] {
-		return slots.map((slot) => ({
-			...slot,
-			effectiveModel: slot.model ?? `${baseModel.provider}/${baseModel.id}`,
-			effectiveTask: buildLineupSlotTask(baseTask, slot, taskArgs),
-		}));
-	}
-
-	function serializeLineupSlot(slot: ReportLineupSlot): Record<string, unknown> {
-		return {
-			agent: slot.agent,
-			...(slot.model ? { model: slot.model } : {}),
-			effectiveModel: slot.effectiveModel,
-			effectiveTask: slot.effectiveTask,
-			...(slot.cwd ? { cwd: slot.cwd } : {}),
-			...(slot.task ? { task: slot.task } : {}),
-			...(slot.taskSuffix ? { taskSuffix: slot.taskSuffix } : {}),
 		};
-	}
 
-	function formatRunArtifactResult(result: DelegatedPromptParallelResult): string {
-		const text = result.text?.trim();
-		if (!result.isError) return text || "(no assistant text)";
-		const parts = [`Error: ${result.errorText || "(error)"}`];
-		if (text) parts.push("", "Assistant output:", text);
-		return parts.join("\n");
-	}
-
-	function renderRunReportSection(title: string, body?: string): string[] {
-		return [`## ${title}`, "", body?.trim() || "(none)", ""];
-	}
-
-	function validateWritableBestOfNRunRoot(compareCwd: string): string | undefined {
-		for (const path of [join(compareCwd, ".pi"), join(compareCwd, ".pi", "runs"), join(compareCwd, ".pi", "runs", "best-of-n")]) {
-			if (!existsSync(path)) continue;
-			const stat = lstatSync(path);
-			if (stat.isSymbolicLink()) return `Run root component ${path} is a symlink; refusing to write compare run artifacts.`;
-			if (!stat.isDirectory()) return `Run root component ${path} exists but is not a directory.`;
-		}
-		return undefined;
-	}
-
-	function writeBestOfNRunReport(options: {
-		compareCwd: string;
-		promptName: string;
-		status: BestOfNRunStatus;
-		sharedTask: string;
-		taskArgs: string[];
-		presetName?: string;
-		commitMode?: "ask";
-		keepArtifacts: boolean;
-		workers: ReportLineupSlot[];
-		reviewers: ReportLineupSlot[];
-		finalApplier?: ReportLineupSlot;
-		workerPairs: Array<{ index: number; slot: DelegationLineupSlot; result: DelegatedPromptParallelResult }>;
-		reviewerPairs: Array<{ index: number; slot: DelegationLineupSlot; result: DelegatedPromptParallelResult }>;
-		workerSummary: string;
-		workerFailures?: string;
-		reviewerSummary?: string;
-		reviewerFailures?: string;
-		finalText?: string;
-		failureSummary?: string;
-	}): string {
-		const rootDiagnostic = validateWritableBestOfNRunRoot(options.compareCwd);
-		if (rootDiagnostic) throw new Error(rootDiagnostic);
-		const runDir = join(options.compareCwd, ".pi", "runs", "best-of-n", `${formatRunTimestamp()}-${slugifyRunSegment(options.promptName)}-${randomUUID().slice(0, 8)}`);
-		mkdirSync(runDir, { recursive: true });
-		const artifactWriteErrors: string[] = [];
-		if (options.keepArtifacts) {
-			for (const { index, result } of options.workerPairs) {
-				try { writeFileSync(join(runDir, `worker-${index + 1}.md`), `${formatRunArtifactResult(result)}\n`); }
-				catch (error) { artifactWriteErrors.push(`worker-${index + 1}.md: ${error instanceof Error ? error.message : String(error)}`); }
-			}
-			for (const { index, result } of options.reviewerPairs) {
-				try { writeFileSync(join(runDir, `reviewer-${index + 1}.md`), `${formatRunArtifactResult(result)}\n`); }
-				catch (error) { artifactWriteErrors.push(`reviewer-${index + 1}.md: ${error instanceof Error ? error.message : String(error)}`); }
-			}
-			if (options.finalText) {
-				try { writeFileSync(join(runDir, "final-applier.md"), `${options.finalText}\n`); }
-				catch (error) { artifactWriteErrors.push(`final-applier.md: ${error instanceof Error ? error.message : String(error)}`); }
-			}
-		}
-		const status: BestOfNRunStatus = artifactWriteErrors.length > 0 ? "artifact-write-failed" : options.status;
-		const lineup = {
-			prompt: options.promptName,
-			status,
-			preset: options.presetName,
-			commit: options.commitMode,
-			keepArtifacts: options.keepArtifacts,
-			artifactsProduced: {
-				workers: options.workerPairs.length,
-				reviewers: options.reviewerPairs.length,
-				finalApplier: Boolean(options.finalText),
-			},
-			args: options.taskArgs,
-			workers: options.workers.map(serializeLineupSlot),
-			reviewers: options.reviewers.map(serializeLineupSlot),
-			finalApplier: options.finalApplier ? serializeLineupSlot(options.finalApplier) : undefined,
-			failureSummary: options.failureSummary,
-			artifactWriteErrors: artifactWriteErrors.length > 0 ? artifactWriteErrors : undefined,
-		};
-		writeFileSync(join(runDir, "lineup.json"), `${JSON.stringify(lineup, null, 2)}\n`);
-		const report = [
-			`# Best-of-N run: ${options.promptName}`,
-			"",
-			`- Status: ${status}`,
-			`- Compare cwd: ${options.compareCwd}`,
-			...(options.presetName ? [`- Preset: ${options.presetName}`] : []),
-			...(options.commitMode ? [`- Commit policy: ${options.commitMode}`] : []),
-			`- Worker calls: ${options.workers.length}`,
-			`- Reviewer calls: ${options.reviewers.length}`,
-			`- Final applier: ${options.finalApplier ? "yes" : "no"}`,
-			`- Raw artifacts retained: ${options.keepArtifacts ? "yes" : "no"}`,
-			...(options.failureSummary ? [`- Failure: ${options.failureSummary}`] : []),
-			...(artifactWriteErrors.length > 0 ? [`- Artifact write errors: ${artifactWriteErrors.join("; ")}`] : []),
-			"",
-			...renderRunReportSection("Task", options.sharedTask),
-			...renderRunReportSection("Failure", options.failureSummary),
-			...renderRunReportSection("Workers", options.workerSummary),
-			...renderRunReportSection("Worker failures", options.workerFailures),
-			...renderRunReportSection("Reviewers", options.reviewerSummary),
-			...renderRunReportSection("Reviewer failures", options.reviewerFailures),
-			...renderRunReportSection("Final applier", options.finalText),
-		].join("\n");
-		try {
-			writeFileSync(join(runDir, "report.md"), report);
-		} catch (error) {
-			const reportWriteError = error instanceof Error ? error.message : String(error);
-			try {
-				writeFileSync(join(runDir, "lineup.json"), `${JSON.stringify({
-					...lineup,
-					status: "report-write-failed",
-					reportWriteError,
-				}, null, 2)}\n`);
-			} catch {
-				// The original report-write failure is the actionable error; best-effort history update failed too.
-			}
-			throw error;
-		}
-		return join(runDir, "report.md");
-	}
-
-	function tryWriteBestOfNRunReport(options: Parameters<typeof writeBestOfNRunReport>[0], ctx: ExtensionCommandContext): string | undefined {
-		try {
-			return writeBestOfNRunReport(options);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			notify(ctx, `Best-of-N report could not be written under ${join(options.compareCwd, ".pi", "runs", "best-of-n")}: ${message}. Recovery: fix the run-history directory permissions/shape, then rerun the compare command; no subagents were rerun while attempting to write history.`, "warning");
-			return undefined;
-		}
-	}
-
-	function quoteSlashCommandArg(value: string): string {
-		return /^[^\s"'\\]+$/.test(value) ? value : JSON.stringify(value);
-	}
-
-	function formatCompareRunCommand(runId: string, options: { plain?: boolean; compareCwd?: string; commandCwd?: string } = {}): string {
-		const parts = ["/compare-runs"];
-		if (options.plain) parts.push("--plain");
-		if (options.compareCwd && options.commandCwd && resolvePath(options.compareCwd) !== resolvePath(options.commandCwd)) {
-			parts.push("--cwd", quoteSlashCommandArg(options.compareCwd));
-		}
-		parts.push("--id", quoteSlashCommandArg(runId));
-		return parts.join(" ");
-	}
-
-	function formatRunReportCompletionLine(reportPath: string | undefined, options: { keepArtifacts?: boolean; compareCwd?: string; commandCwd?: string } = {}): string {
-		if (!reportPath) return "Report: unavailable (failed to write run artifacts)";
-		const runId = basename(dirname(reportPath));
-		return [
-			`Run id: ${runId}`,
-			`Report: ${reportPath}`,
-			`Inspect: ${formatCompareRunCommand(runId, { compareCwd: options.compareCwd, commandCwd: options.commandCwd })}`,
-			`Plain detail: ${formatCompareRunCommand(runId, { plain: true, compareCwd: options.compareCwd, commandCwd: options.commandCwd })}`,
-			"Browse recent: /compare-runs",
-			...(options.keepArtifacts === false ? ["Raw artifacts: not retained. Rerun with --keep-artifacts to keep raw worker/reviewer outputs."] : []),
-		].join("\n");
-	}
-
-	function writeCompareFailureHistory(options: {
-		ctx: ExtensionCommandContext;
-		compareCwd: string;
-		promptName: string;
-		status: Exclude<BestOfNRunStatus, "review-complete" | "apply-complete">;
-		sharedTask: string;
-		taskArgs: string[];
-		presetName?: string;
-		commitMode?: "ask";
-		keepArtifacts: boolean;
-		workers: ReportLineupSlot[];
-		reviewers: ReportLineupSlot[];
-		finalApplier?: ReportLineupSlot;
-		workerPairs?: Array<{ index: number; slot: DelegationLineupSlot; result: DelegatedPromptParallelResult }>;
-		reviewerPairs?: Array<{ index: number; slot: DelegationLineupSlot; result: DelegatedPromptParallelResult }>;
-		workerSummary?: string;
-		workerFailures?: string;
-		reviewerSummary?: string;
-		reviewerFailures?: string;
-		finalText?: string;
-		failureSummary: string;
-	}): string | undefined {
-		const reportPath = tryWriteBestOfNRunReport({
-			compareCwd: options.compareCwd,
-			promptName: options.promptName,
-			status: options.status,
-			sharedTask: options.sharedTask,
-			taskArgs: options.taskArgs,
-			presetName: options.presetName,
-			commitMode: options.commitMode,
-			keepArtifacts: options.keepArtifacts,
-			workers: options.workers,
-			reviewers: options.reviewers,
-			finalApplier: options.finalApplier,
-			workerPairs: options.workerPairs ?? [],
-			reviewerPairs: options.reviewerPairs ?? [],
-			workerSummary: options.workerSummary ?? "",
-			workerFailures: options.workerFailures,
-			reviewerSummary: options.reviewerSummary,
-			reviewerFailures: options.reviewerFailures,
-			finalText: options.finalText,
-			failureSummary: options.failureSummary,
-		}, options.ctx);
-		notify(options.ctx, `Compare failed (${options.status}): ${options.failureSummary}\n${formatRunReportCompletionLine(reportPath, { keepArtifacts: options.keepArtifacts, compareCwd: options.compareCwd, commandCwd: options.ctx.cwd })}`, "error");
-		return reportPath;
-	}
-
-	function runGitCapture(cwd: string, args: string[]): string | undefined {
-		try {
-			const output = execFileSync("git", args, {
-				cwd,
-				encoding: "utf8",
-				env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
-				stdio: ["ignore", "pipe", "pipe"],
-			});
-			return output.trimEnd();
-		} catch {
-			return undefined;
-		}
-	}
-
-	function resolveGitRoot(cwd: string): string | undefined {
-		return runGitCapture(cwd, ["rev-parse", "--show-toplevel"]);
-	}
-
-	function captureDiffFingerprint(cwd: string): string | undefined {
-		const names = runGitCapture(cwd, ["diff", "--no-ext-diff", "--name-only", "-z", "HEAD"]);
-		if (names === undefined) return undefined;
-		const fingerprints: string[] = [];
-		for (const path of names.split("\0").filter(Boolean).sort()) {
-			const hash = existsSync(join(cwd, path)) ? runGitCapture(cwd, ["hash-object", "--", path]) : "(deleted)";
-			fingerprints.push(`${path}\0${hash ?? "(unavailable)"}`);
-		}
-		return fingerprints.join("\0");
-	}
-
-	function captureGitSnapshot(cwd: string): GitSnapshot {
-		return {
-			head: runGitCapture(cwd, ["rev-parse", "HEAD"]),
-			status: runGitCapture(cwd, ["status", "--short"]),
-			diffStat: runGitCapture(cwd, ["diff", "--no-ext-diff", "--stat", "HEAD"]),
-			shortStat: runGitCapture(cwd, ["diff", "--no-ext-diff", "--shortstat", "HEAD"]),
-			diffRaw: runGitCapture(cwd, ["diff", "--no-ext-diff", "--raw", "-z", "HEAD"]),
-			stagedRaw: runGitCapture(cwd, ["diff", "--no-ext-diff", "--cached", "--raw", "-z", "HEAD"]),
-			diffFingerprint: captureDiffFingerprint(cwd),
-			stagedNameStatus: runGitCapture(cwd, ["diff", "--no-ext-diff", "--cached", "--name-status", "HEAD"]),
-		};
-	}
-
-	function splitGitDiffByPath(diff: string | undefined): Map<string, string> {
-		const blocks = new Map<string, string>();
-		if (!diff) return blocks;
-		if (diff.includes("\0")) {
-			const tokens = diff.split("\0").filter(Boolean);
-			if (!tokens[0]?.startsWith(":")) {
-				for (let i = 0; i < tokens.length; i += 2) {
-					const path = tokens[i];
-					if (!path) continue;
-					blocks.set(path, `${path}\0${tokens[i + 1] ?? ""}`);
-				}
-				return blocks;
-			}
-			for (let i = 0; i < tokens.length;) {
-				const header = tokens[i++];
-				if (!header?.startsWith(":")) continue;
-				const status = header.trim().split(/\s+/)[4] ?? "";
-				const firstPath = tokens[i++];
-				if (!firstPath) continue;
-				const secondPath = /^[RC]/.test(status) ? tokens[i++] : undefined;
-				const path = secondPath || firstPath;
-				blocks.set(path, [header, firstPath, secondPath].filter((value): value is string => Boolean(value)).join("\0"));
-			}
-			return blocks;
-		}
-		const lines = diff.split("\n");
-		let currentPath: string | undefined;
-		let currentBlock: string[] = [];
-		const flush = () => {
-			if (currentPath) blocks.set(currentPath, currentBlock.join("\n"));
-		};
-		for (const line of lines) {
-			const match = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
-			if (match) {
-				flush();
-				currentPath = match[2];
-				currentBlock = [line];
-				continue;
-			}
-			if (currentPath) currentBlock.push(line);
-		}
-		flush();
-		return blocks;
-	}
-
-	function diffPatchChangedPaths(beforePatch: string | undefined, afterPatch: string | undefined): Set<string> {
-		const beforeBlocks = splitGitDiffByPath(beforePatch);
-		const afterBlocks = splitGitDiffByPath(afterPatch);
-		const changed = new Set<string>();
-		const paths = new Set([...beforeBlocks.keys(), ...afterBlocks.keys()]);
-		for (const path of paths) {
-			if (beforeBlocks.get(path) !== afterBlocks.get(path)) changed.add(path);
-		}
-		return changed;
-	}
-
-	function diffChangedPaths(before: GitSnapshot, after: GitSnapshot): Set<string> {
-		return new Set([
-			...diffPatchChangedPaths(before.diffFingerprint, after.diffFingerprint),
-			...diffPatchChangedPaths(before.diffRaw, after.diffRaw),
-			...diffPatchChangedPaths(before.stagedRaw, after.stagedRaw),
-		]);
-	}
-
-	function unquoteGitPath(path: string): string {
-		if (!path.startsWith('"') || !path.endsWith('"')) return path;
-		let result = "";
-		let octalBytes: number[] = [];
-		const flushOctalBytes = () => {
-			if (octalBytes.length === 0) return;
-			result += Buffer.from(octalBytes).toString("utf8");
-			octalBytes = [];
-		};
-		for (let i = 1; i < path.length - 1; i++) {
-			const char = path[i]!;
-			if (char !== "\\") {
-				flushOctalBytes();
-				result += char;
-				continue;
-			}
-			const next = path[++i];
-			if (next === undefined) break;
-			if (next >= "0" && next <= "7") {
-				let octal = next;
-				for (let count = 0; count < 2 && i + 1 < path.length - 1 && path[i + 1]! >= "0" && path[i + 1]! <= "7"; count++) {
-					octal += path[++i]!;
-				}
-				octalBytes.push(Number.parseInt(octal, 8));
-				continue;
-			}
-			flushOctalBytes();
-			const escapes: Record<string, string> = { a: "\x07", b: "\b", f: "\f", n: "\n", r: "\r", t: "	", v: "\v", "\\": "\\", '"': '"' };
-			result += escapes[next] ?? next;
-		}
-		flushOctalBytes();
-		return result;
-	}
-
-	function findUnquotedRenameSeparator(value: string): number {
-		let inQuote = false;
-		let escaped = false;
-		for (let i = 0; i <= value.length - 4; i++) {
-			const char = value[i]!;
-			if (escaped) {
-				escaped = false;
-				continue;
-			}
-			if (char === "\\" && inQuote) {
-				escaped = true;
-				continue;
-			}
-			if (char === '"') {
-				inQuote = !inQuote;
-				continue;
-			}
-			if (!inQuote && value.slice(i, i + 4) === " -> ") return i;
-		}
-		return -1;
-	}
-
-	function statusLinePath(line: string): string | undefined {
-		if (line.length < 4) return undefined;
-		const raw = line.slice(3);
-		const renameIndex = findUnquotedRenameSeparator(raw);
-		return unquoteGitPath(renameIndex >= 0 ? raw.slice(renameIndex + 4) : raw);
-	}
-
-	function statusLinesChangedAfter(before: GitSnapshot, after: GitSnapshot): string {
-		if (after.status === undefined) return "(git status unavailable or no changes detected)";
-		const beforeLines = (before.status || "").split("\n").filter(Boolean);
-		const afterLines = after.status.split("\n").filter(Boolean);
-		const beforeLineSet = new Set(beforeLines);
-		const afterLineSet = new Set(afterLines);
-		const dirtyPathsWithDiffChanges = diffChangedPaths(before, after);
-		const changed = afterLines.filter((line) => {
-			if (!beforeLineSet.has(line)) return true;
-			const path = statusLinePath(line);
-			return path ? dirtyPathsWithDiffChanges.has(path) : false;
-		});
-		for (const line of beforeLines) {
-			if (afterLineSet.has(line)) continue;
-			const path = statusLinePath(line);
-			if (line.startsWith("?? ") || (path && dirtyPathsWithDiffChanges.has(path))) changed.push(`${line} (pre-existing status entry removed or cleaned by final applier)`);
-		}
-		return changed.length > 0 ? changed.join("\n") : "(no new status entries since final applier started; inspect full diff if pre-existing files were modified)";
-	}
-
-	function preExistingUntrackedLines(snapshot: GitSnapshot): string[] {
-		return (snapshot.status || "").split("\n").filter((line) => line.startsWith("?? "));
-	}
-
-	function formatApprovalGuardWarnings(before: GitSnapshot, after: GitSnapshot): string | undefined {
-		const warnings: string[] = [];
-		if (before.head && after.head && before.head !== after.head) {
-			warnings.push(`HEAD changed during the final applier run (${before.head.slice(0, 12)} -> ${after.head.slice(0, 12)}). Inspect history before committing; the final applier may have committed already.`);
-		}
-		if ((before.stagedNameStatus || "") || (before.stagedRaw || "")) {
-			warnings.push("Pre-existing staged changes were present before the final applier ran. Review `git diff --cached` and unstage unrelated hunks before using the suggested commit command.");
-		}
-		if ((after.stagedNameStatus || "") !== (before.stagedNameStatus || "") || (after.stagedRaw || "") !== (before.stagedRaw || "")) {
-			warnings.push("Staged changes changed during the final applier run. Review `git diff --cached` and unstage anything that should remain under manual approval.");
-		}
-		const preExistingUntracked = preExistingUntrackedLines(before);
-		if (preExistingUntracked.length > 0) {
-			warnings.push(`Pre-existing untracked entries were present before the final applier ran. Git cannot diff their prior contents, so review them manually: ${preExistingUntracked.join(", ")}`);
-		}
-		return warnings.length > 0 ? warnings.join("\n") : undefined;
-	}
-
-	function buildSuggestedBestOfNCommitMessage(promptName: string, taskArgs: string[]): string {
-		const target = taskArgs.join(" ").replace(/\s+/g, " ").trim();
-		const suffix = target ? `: ${target.slice(0, 72)}` : "";
-		return `feat: apply ${promptName} best-of-n result${suffix}`;
-	}
-
-	function shellQuote(value: string): string {
-		return `'${value.replace(/'/g, `'"'"'`)}'`;
-	}
-
-	function renderBestOfNCommitAsk(options: {
-		compareCwd: string;
-		commandCwd: string;
-		reportCwd?: string;
-		promptName: string;
-		taskArgs: string[];
-		reportPath?: string;
-		beforeFinalApplier: GitSnapshot;
-		afterFinalApplier: GitSnapshot;
-	}): string {
-		const suggestedMessage = buildSuggestedBestOfNCommitMessage(options.promptName, options.taskArgs);
-		const gitBase = `git -C ${shellQuote(options.compareCwd)}`;
-		const addPatchCommand = `${gitBase} add --patch`;
-		const addIntentCommand = `${gitBase} add -N -- ${shellQuote("<path>")}`;
-		const command = `${gitBase} commit -m ${shellQuote(suggestedMessage)}`;
-		const changedStatus = statusLinesChangedAfter(options.beforeFinalApplier, options.afterFinalApplier);
-		const guardWarnings = formatApprovalGuardWarnings(options.beforeFinalApplier, options.afterFinalApplier);
-		return [
-			"## Commit approval",
-			"",
-			"`bestOfN.commit: ask` is enabled. Review and stage only the intended final-applier changes before committing.",
-			"",
-			`- Compare cwd: ${options.compareCwd}`,
-			`- ${formatRunReportCompletionLine(options.reportPath, { compareCwd: options.reportCwd ?? options.compareCwd, commandCwd: options.commandCwd })}`,
-			`- Suggested commit: \`${suggestedMessage}\``,
-			"",
-			...(guardWarnings ? [
-				"Approval guard warnings:",
-				"```",
-				guardWarnings,
-				"```",
-			] : []),
-			"New status entries since final applier started:",
-			"```",
-			changedStatus,
-			"```",
-			...(options.beforeFinalApplier.status ? [
-				"Pre-existing status before final applier:",
-				"```",
-				options.beforeFinalApplier.status,
-				"```",
-			] : []),
-			"Full diff summary after final applier:",
-			"```",
-			[options.afterFinalApplier.diffStat, options.afterFinalApplier.shortStat].filter((value): value is string => Boolean(value)).join("\n") || "(git diff unavailable or empty)",
-			"```",
-			"Diff summary before final applier:",
-			"```",
-			[options.beforeFinalApplier.diffStat, options.beforeFinalApplier.shortStat].filter((value): value is string => Boolean(value)).join("\n") || "(empty)",
-			"```",
-			"For intended new files shown as `??`, first mark the path for patch selection (or explicitly stage the file):",
-			"```bash",
-			addIntentCommand,
-			"```",
-			"Stage only the intended tracked-file and intent-to-add hunks, for example:",
-			"```bash",
-			addPatchCommand,
-			"```",
-			"Then commit the staged changes:",
-			"```bash",
-			command,
-			"```",
-		].join("\n");
-	}
-
-	function buildReviewerPreamble(sharedTask: string, workerAggregation: string, workerFailureSummary?: string): string {
-		return [
-			"[Original implementation task]",
-			sharedTask,
-			"",
-			"[Worker outputs and worktree summaries]",
-			workerAggregation,
-			...(workerFailureSummary ? ["", workerFailureSummary] : []),
-		].join("\n");
-	}
-
-	function buildFinalApplierPreamble(
-		sharedTask: string,
-		workerAggregation: string,
-		workerFailureSummary?: string,
-		reviewerAggregation?: string,
-		reviewerFailureSummary?: string,
-	): string {
-		return [
-			"[Original implementation task]",
-			sharedTask,
-			"",
-			"[Worker outputs and worktree summaries]",
-			workerAggregation,
-			...(workerFailureSummary ? ["", workerFailureSummary] : []),
-			"",
-			"[Reviewer findings]",
-			reviewerAggregation ?? "All reviewer runs failed. Synthesize directly from the worker variants.",
-			...(reviewerFailureSummary ? ["", reviewerFailureSummary] : []),
-			"",
-			"[Final apply instructions]",
-			"Pick one winner or synthesize/cherry-pick from multiple variants, apply the final patch directly in the current repo, keep edits minimal, run obvious relevant verification when practical, and report changed files plus verification run.",
-		].join("\n");
-	}
-
-	function buildCommitAskFinalApplierTask(task: string): string {
-		return [
-			task,
-			"",
-			"Commit approval mode:",
-			"- Do not run `git add`, `git commit`, or any command that stages or commits changes.",
-			"- Leave all changes unstaged in the worktree for the user to review and approve after you finish.",
-			"- If you need git for verification or reporting, use read-only commands such as `git status` or `git diff`.",
-		].join("\n");
-	}
-
-	function buildLineupSlotTask(
-		baseTask: string,
-		slot: DelegationLineupSlot,
-		taskArgs: string[],
-	): string {
-		const effectiveBaseTask = slot.task ? substituteArgs(slot.task, taskArgs) : baseTask;
-		if (!slot.taskSuffix) return effectiveBaseTask;
-		return `${effectiveBaseTask}\n\n${substituteArgs(slot.taskSuffix, taskArgs)}`;
-	}
-
-	function buildComparePrompt(
-		base: PromptWithModel,
-		options: {
-			name: string;
-			agent: string;
-			task: string;
-			model?: string;
-			cwd: string;
-			inheritContext?: boolean;
-		},
-	): PromptWithModel {
-		return {
-			...base,
-			name: options.name,
-			content: options.task,
-			models: options.model ? [options.model] : [],
-			chain: undefined,
-			chainContext: undefined,
-			parallel: undefined,
-			worktree: undefined,
-			subagent: options.agent,
-			inheritContext: options.inheritContext ? true : undefined,
-			cwd: options.cwd,
-			workers: undefined,
-			reviewers: undefined,
-			finalApplier: undefined,
-		};
-	}
-
-	async function runComparePrompt(
-		name: string,
-		prompt: PromptWithModel,
-		args: string,
-		ctx: ExtensionCommandContext,
-		currentModel: Model<any> | undefined,
-		runtime: { cwd?: string; model?: string; preset?: string; subagentOverride?: SubagentOverride; fork?: boolean },
-	) {
-		if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return;
-
-		if (runtime.subagentOverride) {
-			notify(ctx, `--subagent is not supported for compare prompts (ignored)`, "warning");
-		}
-		if (runtime.fork) {
-			notify(ctx, `--fork is not supported for compare prompts (ignored)`, "warning");
-		}
-
-		const lineupExtraction = extractLineupOverrides(args);
-		if (lineupExtraction.errors.length > 0) {
-			for (const error of lineupExtraction.errors) {
-				notify(ctx, error, "error");
-			}
+		if (!queued) {
+			await execute();
 			return;
 		}
-
-		const keepArtifactsExtraction = extractKeepArtifactsFlag(lineupExtraction.args);
-		const keepArtifacts = keepArtifactsExtraction.keepArtifacts;
-		let taskArgs = parseCommandArgs(keepArtifactsExtraction.args);
-		let compareCwd = runtime.cwd ?? prompt.cwd ?? ctx.cwd;
-		if (name === "parallel-patch-compare-at-path") {
-			if (taskArgs.length === 0) {
-				notify(ctx, "parallel-patch-compare-at-path requires a repo path as the first argument.", "error");
-				return;
-			}
-			if (runtime.cwd) {
-				notify(ctx, "--cwd is ignored for parallel-patch-compare-at-path (using first positional path).", "warning");
-			}
-			compareCwd = resolveCompareCwd(taskArgs[0]!, ctx);
-			taskArgs = taskArgs.slice(1);
-			if (taskArgs.length === 0) {
-				notify(ctx, "parallel-patch-compare-at-path requires an implementation task after the repo path.", "error");
-				return;
-			}
-		}
-
-		if (!existsSync(compareCwd)) {
-			notify(ctx, `cwd directory does not exist: ${compareCwd}`, "error");
-			return;
-		}
-		const approvalCwd = prompt.commit === "ask" ? (resolveGitRoot(compareCwd) ?? compareCwd) : compareCwd;
-
-		const baseModel = await resolveCompareBaseModel(prompt, currentModel, ctx, runtime.model);
-		if (!baseModel) return;
-
-		const rendered = renderPromptForResolvedModel(prompt, taskArgs, baseModel);
-		if (rendered.warning) notify(ctx, rendered.warning, "warning");
-		if (rendered.empty || !rendered.content) {
-			notify(ctx, rendered.empty ?? `Prompt \`${prompt.name}\` rendered to an empty message.`, "error");
-			return;
-		}
-		const sharedTask = rendered.content;
-
-		const presetLineup = await resolveBestOfNPresetLineup(prompt, runtime.preset, ctx, compareCwd);
-		if (!presetLineup) return;
-		const requestedWorkers = applyLineupActions(presetLineup.workers ?? prompt.workers, lineupExtraction.actions, "workers") ?? [];
-		const requestedReviewers = applyLineupActions(presetLineup.reviewers ?? prompt.reviewers, lineupExtraction.actions, "reviewers") ?? [];
-		const requestedFinalApplier = applyFinalApplierAction(prompt.finalApplier, lineupExtraction.actions);
-		if (requestedFinalApplier && prompt.worktree !== true) {
-			notify(ctx, "Compare prompts with finalApplier require worktree: true.", "error");
-			return;
-		}
-
-		const effectiveWorkerSlots = requestedWorkers.length > 0
-			? requestedWorkers
-			: [{ agent: DEFAULT_SUBAGENT_NAME }];
-		const effectiveReviewerSlots = requestedReviewers.length > 0
-			? requestedReviewers
-			: [{ agent: "reviewer" }];
-		const presetModelCalls = expandedLineupCallCount(effectiveWorkerSlots) + expandedLineupCallCount(effectiveReviewerSlots) + (requestedFinalApplier ? 1 : 0);
-		if (presetLineup.maxModelCalls !== undefined && presetModelCalls > presetLineup.maxModelCalls) {
-			notify(ctx, `Best-of-N preset model-call cap exceeded: requested ${presetModelCalls} model call(s), but preset allows ${presetLineup.maxModelCalls}.`, "error");
-			return;
-		}
-
-		const workerSlots = expandLineupCounts(effectiveWorkerSlots);
-		const reviewerSlots = expandLineupCounts(effectiveReviewerSlots);
-
-		const normalizedWorkers = normalizeLineupCwds(workerSlots, compareCwd, ctx);
-		if (!normalizedWorkers) return;
-		const normalizedReviewers = normalizeLineupCwds(reviewerSlots, compareCwd, ctx);
-		if (!normalizedReviewers) return;
-		const normalizedFinalApplier = requestedFinalApplier
-			? {
-				...requestedFinalApplier,
-				cwd: compareCwd,
-			}
-			: undefined;
-
-		if (prompt.worktree === true) {
-			const uniqueWorkerCwds = new Set(normalizedWorkers.map((slot) => slot.cwd));
-			if (uniqueWorkerCwds.size > 1) {
-				notify(ctx, "worktree compare runs require all worker slots to use the same cwd.", "error");
-				return;
-			}
-		}
-		const fallbackWorkers = fallbackReportLineupSlots(normalizedWorkers, sharedTask, taskArgs, baseModel);
-		const fallbackReviewers = fallbackReportLineupSlots(normalizedReviewers, sharedTask, taskArgs, baseModel);
-		const fallbackFinalApplier = normalizedFinalApplier ? fallbackReportLineupSlots([normalizedFinalApplier], sharedTask, taskArgs, baseModel)[0] : undefined;
-
-		try {
-			let workerResult;
-			try {
-				workerResult = await executeSubagentPromptStep({
-					pi,
-					ctx,
-					currentModel: baseModel,
-					signal: ctx.signal,
-					worktree: prompt.worktree === true,
-					allowPartialFailures: true,
-					parallel: normalizedWorkers.map((slot, index) => ({
-						prompt: buildComparePrompt(prompt, {
-							name: `${prompt.name}-worker-${index + 1}`,
-							agent: slot.agent,
-							task: buildLineupSlotTask(sharedTask, slot, taskArgs),
-							model: slot.model,
-							cwd: slot.cwd!,
-							inheritContext: true,
-						}),
-						args: [],
-					})),
-				});
-			} catch (error) {
-				const failureSummary = `worker phase failed before returning worker pairs: ${error instanceof Error ? error.message : String(error)}`;
-				writeCompareFailureHistory({
-					ctx,
-					compareCwd,
-					promptName: name,
-					status: "worker-failed",
-					sharedTask,
-					taskArgs,
-					presetName: runtime.preset ?? prompt.preset,
-					commitMode: prompt.commit,
-					keepArtifacts,
-					workers: fallbackWorkers,
-					reviewers: fallbackReviewers,
-					finalApplier: fallbackFinalApplier,
-					failureSummary,
-				});
-				return;
-			}
-			if (!workerResult) {
-				writeCompareFailureHistory({
-					ctx,
-					compareCwd,
-					promptName: name,
-					status: "worker-failed",
-					sharedTask,
-					taskArgs,
-					presetName: runtime.preset ?? prompt.preset,
-					commitMode: prompt.commit,
-					keepArtifacts,
-					workers: fallbackWorkers,
-					reviewers: fallbackReviewers,
-					finalApplier: fallbackFinalApplier,
-					failureSummary: "worker phase returned no result.",
-				});
-				return;
-			}
-			const workerPairs = (workerResult.parallelResults ?? []).map((result, index) => ({
-				index,
-				slot: normalizedWorkers[index]!,
-				result,
-			}));
-			const reportWorkers = buildReportLineupSlots(normalizedWorkers, workerResult.preparedTasks);
-			if (workerPairs.length === 0) {
-				writeCompareFailureHistory({
-					ctx,
-					compareCwd,
-					promptName: name,
-					status: "worker-failed",
-					sharedTask,
-					taskArgs,
-					presetName: runtime.preset ?? prompt.preset,
-					commitMode: prompt.commit,
-					keepArtifacts,
-					workers: reportWorkers,
-					reviewers: fallbackReviewers,
-					finalApplier: fallbackFinalApplier,
-					failureSummary: "worker phase produced no worker result pairs.",
-				});
-				return;
-			}
-			const successfulWorkers = workerPairs.filter((entry) => !entry.result.isError);
-			const failedWorkers = workerPairs.filter((entry) => entry.result.isError);
-			if (successfulWorkers.length === 0) {
-				writeCompareFailureHistory({
-					ctx,
-					compareCwd,
-					promptName: name,
-					status: "worker-failed",
-					sharedTask,
-					taskArgs,
-					presetName: runtime.preset ?? prompt.preset,
-					commitMode: prompt.commit,
-					keepArtifacts,
-					workers: reportWorkers,
-					reviewers: fallbackReviewers,
-					finalApplier: fallbackFinalApplier,
-					workerPairs,
-					workerFailures: formatPhaseFailureSummary("Worker", failedWorkers),
-					failureSummary: "all worker slots failed.",
-				});
-				return;
-			}
-			const successfulWorkerText = [
-				renderComparePhaseResults("Worker", successfulWorkers),
-				extractSuccessfulWorktreeChanges(workerResult.text, successfulWorkers.map((entry) => entry.index)),
-			]
-				.filter((value): value is string => Boolean(value))
-				.join("\n\n");
-			const workerFailureSummary = formatPhaseFailureSummary("Worker", failedWorkers);
-
-			const reviewerPreamble = buildReviewerPreamble(sharedTask, successfulWorkerText, workerFailureSummary);
-			let reviewerResult;
-			try {
-				reviewerResult = await executeSubagentPromptStep({
-				pi,
-				ctx,
-				currentModel: baseModel,
-				signal: ctx.signal,
-				taskPreamble: reviewerPreamble,
-				allowPartialFailures: true,
-				parallel: normalizedReviewers.map((slot, index) => ({
-					prompt: buildComparePrompt(prompt, {
-						name: `${prompt.name}-reviewer-${index + 1}`,
-						agent: slot.agent,
-						task: buildLineupSlotTask(DEFAULT_COMPARE_REVIEWER_TASK, slot, taskArgs),
-						model: slot.model,
-						cwd: slot.cwd!,
-						inheritContext: false,
-					}),
-					args: [],
-				})),
-			});
-			} catch (error) {
-				const failureSummary = `reviewer phase failed before returning review pairs: ${error instanceof Error ? error.message : String(error)}`;
-				writeCompareFailureHistory({
-					ctx,
-					compareCwd,
-					promptName: name,
-					status: "reviewer-failed",
-					sharedTask,
-					taskArgs,
-					presetName: runtime.preset ?? prompt.preset,
-					commitMode: prompt.commit,
-					keepArtifacts,
-					workers: reportWorkers,
-					reviewers: fallbackReviewers,
-					finalApplier: fallbackFinalApplier,
-					workerPairs,
-					workerSummary: successfulWorkerText,
-					workerFailures: workerFailureSummary,
-					failureSummary,
-				});
-				return;
-			}
-			if (!reviewerResult) {
-				writeCompareFailureHistory({
-					ctx,
-					compareCwd,
-					promptName: name,
-					status: "reviewer-failed",
-					sharedTask,
-					taskArgs,
-					presetName: runtime.preset ?? prompt.preset,
-					commitMode: prompt.commit,
-					keepArtifacts,
-					workers: reportWorkers,
-					reviewers: fallbackReviewers,
-					finalApplier: fallbackFinalApplier,
-					workerPairs,
-					workerSummary: successfulWorkerText,
-					workerFailures: workerFailureSummary,
-					failureSummary: "reviewer phase returned no result.",
-				});
-				return;
-			}
-			const reviewerPairs = (reviewerResult.parallelResults ?? []).map((result, index) => ({
-				index,
-				slot: normalizedReviewers[index]!,
-				result,
-			}));
-			const reportReviewers = buildReportLineupSlots(normalizedReviewers, reviewerResult.preparedTasks);
-			if (reviewerPairs.length === 0) {
-				writeCompareFailureHistory({
-					ctx,
-					compareCwd,
-					promptName: name,
-					status: "reviewer-failed",
-					sharedTask,
-					taskArgs,
-					presetName: runtime.preset ?? prompt.preset,
-					commitMode: prompt.commit,
-					keepArtifacts,
-					workers: reportWorkers,
-					reviewers: reportReviewers,
-					finalApplier: fallbackFinalApplier,
-					workerPairs,
-					workerSummary: successfulWorkerText,
-					workerFailures: workerFailureSummary,
-					failureSummary: "reviewer phase produced no review pairs.",
-				});
-				return;
-			}
-			const successfulReviewers = reviewerPairs.filter((entry) => !entry.result.isError);
-			const failedReviewers = reviewerPairs.filter((entry) => entry.result.isError);
-			const successfulReviewerText = successfulReviewers.length > 0
-				? renderComparePhaseResults("Reviewer", successfulReviewers)
-				: undefined;
-			const reviewerFailureSummary = formatPhaseFailureSummary("Reviewer", failedReviewers);
-			if (!normalizedFinalApplier) {
-				if (!successfulReviewerText) {
-					writeCompareFailureHistory({
-						ctx,
-						compareCwd,
-						promptName: name,
-						status: "reviewer-failed",
-						sharedTask,
-						taskArgs,
-						presetName: runtime.preset ?? prompt.preset,
-						commitMode: prompt.commit,
-						keepArtifacts,
-						workers: reportWorkers,
-						reviewers: reportReviewers,
-						workerPairs,
-						reviewerPairs,
-						workerSummary: successfulWorkerText,
-						workerFailures: workerFailureSummary,
-						reviewerFailures: reviewerFailureSummary,
-						failureSummary: "all reviewer slots failed and no final applier is configured.",
-					});
-					return;
-				}
-				const finalText = reviewerFailureSummary
-					? `${successfulReviewerText}\n\n${reviewerFailureSummary}`
-					: successfulReviewerText;
-				const reportPath = tryWriteBestOfNRunReport({
-					compareCwd,
-					promptName: name,
-					status: "review-complete",
-					sharedTask,
-					taskArgs,
-					presetName: runtime.preset ?? prompt.preset,
-					commitMode: undefined,
-					keepArtifacts,
-					workers: reportWorkers,
-					reviewers: reportReviewers,
-					finalApplier: undefined,
-					workerPairs,
-					reviewerPairs,
-					workerSummary: successfulWorkerText,
-					workerFailures: workerFailureSummary,
-					reviewerSummary: successfulReviewerText,
-					reviewerFailures: reviewerFailureSummary,
-				}, ctx);
-				pi.sendUserMessage(`[Compare review complete: ${name}]\n\n${formatRunReportCompletionLine(reportPath, { keepArtifacts, compareCwd, commandCwd: ctx.cwd })}\n\n${finalText}`);
-				await waitForTurnStart(ctx);
-				await ctx.waitForIdle();
-				return;
-			}
-
-			const beforeFinalApplierSnapshot = prompt.commit === "ask" ? captureGitSnapshot(approvalCwd) : undefined;
-			const finalApplierTask = buildLineupSlotTask(DEFAULT_COMPARE_FINAL_APPLIER_TASK, normalizedFinalApplier, taskArgs);
-			let finalResult;
-			try {
-				finalResult = await executeSubagentPromptStep({
-				pi,
-				ctx,
-				currentModel: baseModel,
-				signal: ctx.signal,
-				taskPreamble: buildFinalApplierPreamble(
-					sharedTask,
-					successfulWorkerText,
-					workerFailureSummary,
-					successfulReviewerText,
-					reviewerFailureSummary,
-				),
-				prompt: buildComparePrompt(prompt, {
-					name: `${prompt.name}-final-applier`,
-					agent: normalizedFinalApplier.agent,
-					task: prompt.commit === "ask" ? buildCommitAskFinalApplierTask(finalApplierTask) : finalApplierTask,
-					model: normalizedFinalApplier.model,
-					cwd: compareCwd,
-					inheritContext: false,
-				}),
-				args: [],
-			});
-			} catch (error) {
-				const failureSummary = `final applier failed before returning text: ${error instanceof Error ? error.message : String(error)}`;
-				writeCompareFailureHistory({
-					ctx,
-					compareCwd,
-					promptName: name,
-					status: "final-applier-failed",
-					sharedTask,
-					taskArgs,
-					presetName: runtime.preset ?? prompt.preset,
-					commitMode: prompt.commit,
-					keepArtifacts,
-					workers: reportWorkers,
-					reviewers: reportReviewers,
-					finalApplier: fallbackFinalApplier,
-					workerPairs,
-					reviewerPairs,
-					workerSummary: successfulWorkerText,
-					workerFailures: workerFailureSummary,
-					reviewerSummary: successfulReviewerText,
-					reviewerFailures: reviewerFailureSummary,
-					failureSummary,
-				});
-				return;
-			}
-			if (!finalResult?.text) {
-				writeCompareFailureHistory({
-					ctx,
-					compareCwd,
-					promptName: name,
-					status: "final-applier-failed",
-					sharedTask,
-					taskArgs,
-					presetName: runtime.preset ?? prompt.preset,
-					commitMode: prompt.commit,
-					keepArtifacts,
-					workers: reportWorkers,
-					reviewers: reportReviewers,
-					finalApplier: fallbackFinalApplier,
-					workerPairs,
-					reviewerPairs,
-					workerSummary: successfulWorkerText,
-					workerFailures: workerFailureSummary,
-					reviewerSummary: successfulReviewerText,
-					reviewerFailures: reviewerFailureSummary,
-					failureSummary: "final applier produced no text.",
-				});
-				return;
-			}
-			const afterFinalApplierSnapshot = prompt.commit === "ask" ? captureGitSnapshot(approvalCwd) : undefined;
-			const reportFinalApplier = buildReportLineupSlots([normalizedFinalApplier], finalResult.preparedTasks)[0];
-			const reportPath = tryWriteBestOfNRunReport({
-				compareCwd,
-				promptName: name,
-				status: "apply-complete",
-				sharedTask,
-				taskArgs,
-				presetName: runtime.preset ?? prompt.preset,
-				commitMode: prompt.commit,
-				keepArtifacts,
-				workers: reportWorkers,
-				reviewers: reportReviewers,
-				finalApplier: reportFinalApplier,
-				workerPairs,
-				reviewerPairs,
-				workerSummary: successfulWorkerText,
-				workerFailures: workerFailureSummary,
-				reviewerSummary: successfulReviewerText,
-				reviewerFailures: reviewerFailureSummary,
-				finalText: finalResult.text,
-			}, ctx);
-			const commitAsk = prompt.commit === "ask" && beforeFinalApplierSnapshot && afterFinalApplierSnapshot
-				? renderBestOfNCommitAsk({ compareCwd: approvalCwd, commandCwd: ctx.cwd, reportCwd: compareCwd, promptName: name, taskArgs, reportPath, beforeFinalApplier: beforeFinalApplierSnapshot, afterFinalApplier: afterFinalApplierSnapshot })
-				: "";
-			pi.sendUserMessage(`[Compare apply complete: ${name}]\n\n${formatRunReportCompletionLine(reportPath, { keepArtifacts, compareCwd, commandCwd: ctx.cwd })}\n\n${finalResult.text}`);
-			if (commitAsk) {
-				pi.sendMessage({
-					customType: PROMPT_TEMPLATE_COMMIT_ASK_MESSAGE_TYPE,
-					content: `[Commit approval: ${name}]`,
-					display: true,
-					details: {
-						approvalText: commitAsk,
-						promptName: name,
-						compareCwd: approvalCwd,
-						reportPath,
-						commit: "ask",
-					},
-				});
-			}
-			await waitForTurnStart(ctx);
-			await ctx.waitForIdle();
-		} catch (error) {
-			notify(ctx, error instanceof Error ? error.message : String(error), "error");
-		}
+		const currentScope = commandExecutionScope.getStore() ?? captureCommandExecutionScope(ctx);
+		const queuedScope = currentScope.skipAgentEndDrain
+			? currentScope
+			: { ...currentScope, skipAgentEndDrain: true };
+		await commandExecutionScope.run(queuedScope, execute);
 	}
 
 	async function collapseBoomerangPrompt(
-		ctx: ExtensionContext,
+		ctx: ExtensionCommandContext,
 		name: string,
 		targetId: string | null,
 		previousSummaries: string[] = [],
@@ -2058,12 +1176,12 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		subagentOverride?: SubagentOverride,
 		cwdOverride?: string,
 		promptOverrides?: Partial<Pick<PromptWithModel, "models" | "inheritContext">>,
-	) {
+	): Promise<PromptTemplatePromptStatus> {
 		refreshPrompts(ctx.cwd, ctx);
 		const initialPrompt = prompts.get(name);
 		if (!initialPrompt) {
 			notify(ctx, `Prompt "${name}" no longer exists`, "error");
-			return;
+			return "failed";
 		}
 
 		const savedModel = getCurrentModel(ctx);
@@ -2087,6 +1205,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		let lastDelegatedText: string | undefined;
 		let loopAborted = false;
 		let boomerangPreviousSummaries: string[] = [];
+		let runStatus: PromptTemplatePromptStatus = "completed";
 
 		try {
 			for (let i = 0; i < effectiveMax; i++) {
@@ -2097,6 +1216,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				const prompt = prompts.get(name);
 				if (!prompt) {
 					notify(ctx, `Prompt "${name}" no longer exists`, "error");
+					runStatus = "failed";
 					loopAborted = true;
 					break;
 				}
@@ -2136,6 +1256,12 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					loopContext,
 				);
 				if (isAbortedStepResult(stepResult)) {
+					runStatus = abortedStepStatus(stepResult, ctx);
+					loopAborted = true;
+					break;
+				}
+				if (stepResult.status && stepResult.status !== "completed") {
+					runStatus = stepResult.status;
 					loopAborted = true;
 					break;
 				}
@@ -2161,6 +1287,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					const result = await ctx.navigateTree(anchorId, { summarize: true });
 					freshCollapse = null;
 					if (result.cancelled) {
+						runStatus = "cancelled";
 						loopAborted = true;
 						notify(ctx, "Loop cancelled", "warning");
 						break;
@@ -2168,6 +1295,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				}
 			}
 		} catch (error) {
+			runStatus = isCommandAborted(ctx) ? "cancelled" : "failed";
 			loopErrorState = { hasError: true, error };
 		} finally {
 			loopErrorState = await restoreAfterExecution(
@@ -2198,9 +1326,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			const label = converged
 				? `Delegated loop converged after ${completedIterations} iteration(s): ${name}`
 				: `Delegated loop completed ${completedIterations} iteration(s): ${name}`;
-			pi.sendUserMessage(`[${label}]\n\n${lastDelegatedText}`);
-			await waitForTurnStart(ctx);
-			await ctx.waitForIdle();
+			if (!(await sendUserMessageAndWait(`[${label}]\n\n${lastDelegatedText}`, ctx))) return "cancelled";
 		}
 
 		if (!loopErrorState.hasError && !loopAborted && shouldBoomerang) {
@@ -2210,10 +1336,11 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		if (loopErrorState.hasError) {
 			throw loopErrorState.error;
 		}
+		return runStatus;
 	}
 
 	async function runSharedChainExecution(
-		steps: ChainStepOrParallel[],
+		steps: ChainStep[],
 		sharedArgs: string[],
 		totalIterations: number | null,
 		fresh: boolean,
@@ -2223,36 +1350,16 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		subagentOverride?: SubagentOverride,
 		cwdOverride?: string,
 		chainContextEnabled = false,
-		chainTemplateWorktree = false,
-		cliWorktree = false,
 		owner?: symbol,
-	) {
+	): Promise<PromptTemplatePromptStatus> {
 		if (owner !== undefined && workflowOwner !== owner) throw new Error("Prompt workflow ownership was lost before chain execution");
-		let worktreeEnabled = chainTemplateWorktree || cliWorktree;
-		if (worktreeEnabled && !steps.some(isParallelChainStep)) {
-			notify(ctx, `--worktree ignored: chain has no parallel() steps`, "warning");
-			worktreeEnabled = false;
-		}
-		const flattenChainSteps = (): ChainStep[] => {
-			const flattened: ChainStep[] = [];
-			for (const step of steps) {
-				if (isParallelChainStep(step)) {
-					flattened.push(...step.parallel);
-				} else {
-					flattened.push(step);
-				}
-			}
-			return flattened;
-		};
-
 		const validateChainSteps = (): boolean => {
-			const flattened = flattenChainSteps();
-			const missingTemplates = flattened.filter((step) => !chainPrompts.has(step.name));
+			const missingTemplates = steps.filter((step) => !chainPrompts.has(step.name));
 			if (missingTemplates.length > 0) {
 				notify(ctx, `Templates not found: ${missingTemplates.map((step) => step.name).join(", ")}`, "error");
 				return false;
 			}
-			for (const step of flattened) {
+			for (const step of steps) {
 				if (chainPrompts.get(step.name)?.inputs) {
 					notify(ctx, `Step "${step.name}" declares inputs and cannot run through a legacy chain.`, "error");
 					return false;
@@ -2260,30 +1367,6 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			}
 
 			for (const step of steps) {
-				if (isParallelChainStep(step)) {
-					for (const parallelStep of step.parallel) {
-						if (parallelStep.loopCount !== undefined) {
-							notify(ctx, `Step "${parallelStep.name}" in parallel() does not support per-task --loop.`, "error");
-							return false;
-						}
-						if (parallelStep.withContext === true) {
-							notify(ctx, `Step "${parallelStep.name}" in parallel() does not support per-task --with-context.`, "error");
-							return false;
-						}
-						const stepPrompt = chainPrompts.get(parallelStep.name);
-						if (!stepPrompt) continue;
-						if (stepPrompt.chain) {
-							notify(ctx, `Step "${parallelStep.name}" is a chain template. Chain nesting is not supported.`, "error");
-							return false;
-						}
-						if (!shouldDelegatePrompt(stepPrompt, subagentOverride)) {
-							notify(ctx, `Step "${parallelStep.name}" in parallel() must use delegated execution (subagent).`, "error");
-							return false;
-						}
-					}
-					continue;
-				}
-
 				const stepPrompt = chainPrompts.get(step.name);
 				if (!stepPrompt) continue;
 				if (stepPrompt.chain) {
@@ -2295,12 +1378,12 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			return true;
 		};
 
-		const resolveChainStepPrompts = (): PromptWithModel[] => flattenChainSteps()
+		const resolveChainStepPrompts = (): PromptWithModel[] => steps
 			.map((step) => chainPrompts.get(step.name))
 			.filter((prompt): prompt is PromptWithModel => prompt !== undefined);
 
-		if (!validateChainSteps()) return;
-		if (!(await ensureProjectPromptLibraryStepsApproved(resolveChainStepPrompts(), ctx))) return;
+		if (!validateChainSteps()) return "failed";
+		if (!(await ensureProjectPromptLibraryStepsApproved(resolveChainStepPrompts(), ctx))) return "failed";
 
 		const originalModel = getCurrentModel(ctx);
 		const chainInheritedModel = originalModel;
@@ -2313,14 +1396,13 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		const useConverge = converge;
 
 		const anchorId = fresh ? ctx.sessionManager.getLeafId() : null;
-		const chainStepNames = steps
-			.map((step) => (isParallelChainStep(step) ? `parallel(${step.parallel.map((item) => item.name).join(", ")})` : step.name))
-			.join(" -> ");
+		const chainStepNames = steps.map((step) => step.name).join(" -> ");
 		let completedIterations = 0;
 		let converged = false;
 		let chainErrorState: ExecutionErrorState = { hasError: false, error: undefined };
 		let lastDelegatedText: string | undefined;
 		let chainAborted = false;
+		let chainStatus: PromptTemplatePromptStatus = "completed";
 		if (effectiveMax > 1) {
 			loopState = { currentIteration: 1, totalIterations };
 			accumulatedSummaries = [];
@@ -2343,32 +1425,18 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					}
 				}
 
-				const templates = steps.map((step) =>
-					isParallelChainStep(step)
-						? {
-							kind: "parallel" as const,
-							tasks: step.parallel.map((item) => ({
-								name: item.name,
-								args: item.args,
-								prompt: {
-									...chainPrompts.get(item.name)!,
-									...(cwdOverride ? { cwd: cwdOverride } : {}),
-								},
-							})),
-						}
-						: {
-							kind: "single" as const,
-							singleStep: {
-								prompt: {
-									...chainPrompts.get(step.name)!,
-									...(cwdOverride ? { cwd: cwdOverride } : {}),
-								},
-								stepArgs: step.args,
-								stepLoop: step.loopCount !== undefined ? step.loopCount : 1,
-								stepWithContext: step.withContext === true,
-							},
+				const templates = steps.map((step) => ({
+					singleStep: {
+						prompt: {
+							...chainPrompts.get(step.name)!,
+							...(cwdOverride ? { cwd: cwdOverride } : {}),
 						},
-				);
+						stepArgs: step.args,
+						stepLoop: step.loopCount !== undefined ? step.loopCount : 1,
+						stepWithContext: step.withContext === true,
+					},
+				}));
+
 				const chainStepSummaries: string[] = [];
 				let aborted = false;
 				let iterationChanged = false;
@@ -2380,61 +1448,6 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 				for (const [index, stepTemplate] of templates.entries()) {
 					const stepNumber = index + 1;
-					if (stepTemplate.kind === "parallel") {
-						const stepNames = stepTemplate.tasks.map((task) => task.name).join(", ");
-						const stepLabel = `parallel(${stepNames})`;
-						notify(ctx, `${loopPrefix}Step ${stepNumber}/${templates.length}: parallel(${stepNames})`, "info");
-						if (ctx.hasUI) {
-							ctx.ui.setStatus("prompt-chain", ctx.ui.theme.fg("warning", `step ${stepNumber}/${templates.length}: parallel(${stepNames})`));
-						}
-						const stepStartId = ctx.sessionManager.getLeafId();
-						let taskPreamble: string | undefined;
-						const isForkedParallelContext = stepTemplate.tasks.some((task) => task.prompt.inheritContext === true);
-						if (chainContextEnabled && !isForkedParallelContext && chainStepSummaries.length > 0) {
-							taskPreamble = `[Previous chain steps]\n\n${chainStepSummaries.join("\n\n")}`;
-						}
-
-						if (!(await ensureProjectPromptLibraryStepsApproved(stepTemplate.tasks.map((task) => task.prompt), ctx))) {
-							aborted = true;
-							break;
-						}
-
-						let delegated;
-						try {
-							delegated = await executeSubagentPromptStep({
-								pi,
-								ctx,
-								currentModel,
-								override: subagentOverride,
-								signal: ctx.signal,
-								inheritedModel: chainInheritedModel,
-								parallel: stepTemplate.tasks.map((task) => ({
-									prompt: task.prompt,
-									args: task.args.length > 0 ? task.args : sharedArgs,
-								})),
-								taskPreamble,
-								worktree: worktreeEnabled,
-							});
-						} catch (error) {
-							notify(ctx, error instanceof Error ? error.message : String(error), "error");
-							aborted = true;
-							break;
-						}
-						if (!delegated) {
-							notify(ctx, "Parallel chain step was not delegated.", "error");
-							aborted = true;
-							break;
-						}
-						lastDelegatedText = delegated.text;
-
-						currentModel = getCurrentModel(ctx);
-						currentThinking = pi.getThinkingLevel();
-						const stepEntries = getIterationEntries(ctx, stepStartId);
-						if (delegated.changed) iterationChanged = true;
-						chainStepSummaries.push(generateChainStepSummary(stepEntries, stepLabel, stepNumber));
-						continue;
-					}
-
 					const singleStep = stepTemplate.singleStep;
 					const stepLoopTotal = singleStep.stepLoop;
 					const stepLoopMax = stepLoopTotal ?? UNLIMITED_LOOP_CAP;
@@ -2490,6 +1503,13 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 								stepLoopContext,
 							);
 							if (isAbortedStepResult(stepResult)) {
+								chainStatus = abortedStepStatus(stepResult, ctx);
+								chainAborted = true;
+								aborted = true;
+								break;
+							}
+							if (stepResult.status && stepResult.status !== "completed") {
+								chainStatus = stepResult.status;
 								chainAborted = true;
 								aborted = true;
 								break;
@@ -2573,14 +1593,13 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		}
 
 		if (lastDelegatedText && !chainErrorState.hasError && !chainAborted) {
-			pi.sendUserMessage(`[Delegated chain complete: ${chainStepNames}]\n\n${lastDelegatedText}`);
-			await waitForTurnStart(ctx);
-			await ctx.waitForIdle();
+			if (!(await sendUserMessageAndWait(`[Delegated chain complete: ${chainStepNames}]\n\n${lastDelegatedText}`, ctx))) return "cancelled";
 		}
 
 		if (chainErrorState.hasError) {
 			throw chainErrorState.error;
 		}
+		return chainAborted ? (chainStatus === "completed" ? (isCommandAborted(ctx) ? "cancelled" : "failed") : chainStatus) : "completed";
 	}
 
 	function isTuiMode(ctx: ExtensionCommandContext): boolean {
@@ -2686,14 +1705,15 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			currentModel: getCurrentModel(ctx),
 			currentModelLabel: getCurrentModelLabel(ctx),
 			modelRegistry: ctx.modelRegistry,
+			scopedModels: ctx.scopedModels,
+			projectTrusted: projectIsTrusted(ctx),
 			commands: pi.getCommands() as RuntimeSkillCommand[],
 			showSkills,
-			pathArgumentPromptName: promptName === "parallel-patch-compare-at-path" ? promptName : undefined,
 			promptCatalog: chainPrompts,
 		});
 		const plainReport = formatPromptDryRun(result);
 
-		if (result.status === "error" && !result.adaptivePreflight && !result.comparePreflight) {
+		if (result.status === "error" && !result.adaptivePreflight) {
 			for (const warning of result.warnings) notify(ctx, warning, "warning");
 			notify(ctx, result.error, "error");
 			return;
@@ -2745,9 +1765,10 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			currentModel: getCurrentModel(ctx),
 			currentModelLabel: getCurrentModelLabel(ctx),
 			modelRegistry: ctx.modelRegistry,
+			scopedModels: ctx.scopedModels,
+			projectTrusted: projectIsTrusted(ctx),
 			commands: pi.getCommands() as RuntimeSkillCommand[],
 			showSkills: parsed.showSkills,
-			pathArgumentPromptName: parsed.promptName === "parallel-patch-compare-at-path" ? parsed.promptName : undefined,
 			promptCatalog: chainPrompts,
 		});
 		const plainReport = formatPromptDryRun(result);
@@ -2758,7 +1779,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				process.stdout.write(plainReport);
 				return;
 			}
-			if ((result.comparePreflight || result.adaptivePreflight) && useTui) {
+			if (result.adaptivePreflight && useTui) {
 				const action = parsePromptDryRunInspectorAction(await openPromptDryRunInspector(ctx, result, plainReport));
 				if (action?.action === "back") {
 					const selection = await openPromptDryRunPicker(ctx, result.promptName);
@@ -2795,6 +1816,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	}
 
 	async function runAdaptivePromptCommand(name: string, args: string, ctx: ExtensionCommandContext) {
+		const scope = commandExecutionScope.getStore() ?? captureCommandExecutionScope(ctx);
+		return commandExecutionScope.run(scope, async () => {
+		if (!(await waitForCommandLifecycleBoundary(ctx))) return;
 		const owner = claimWorkflowOwner(`adaptive:${name}`);
 		if (!owner) {
 			notify(ctx, `Adaptive chain ${name} cannot start while another prompt workflow is active.`, "error");
@@ -2805,7 +1829,19 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		let savedThinking: ThinkingLevel | undefined;
 		let executionStarted = false;
 		const pendingSkillMessageAtStart = pendingSkillMessage;
+		const runId = randomUUID();
+		const startId = ctx.sessionManager.getLeafId();
+		let status: PromptTemplatePromptStatus = "failed";
+		emitPromptLifecycleEvent(pi, ctx, PROMPT_TEMPLATE_PROMPT_STARTED_EVENT, {
+			protocolVersion: PROMPT_TEMPLATE_PROMPT_PROTOCOL_VERSION,
+			runId,
+			name,
+		});
 		try {
+			if (!(await waitForCommandLifecycleBoundary(ctx))) {
+				status = "cancelled";
+				return;
+			}
 			refreshPrompts(ctx.cwd, ctx);
 			wrapper = adaptivePrompts.get(name);
 			if (!wrapper?.adaptiveChain || wrapper.hidden) {
@@ -2821,9 +1857,9 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			}
 
 			const runtimeLoop = extractLoopCount(runtime.args);
-			const unsupportedRuntime = runtime.override || runtime.fork || runtime.preset || runtimeLoop;
+			const unsupportedRuntime = runtime.override || runtime.fork || runtimeLoop;
 			if (unsupportedRuntime) {
-				notify(ctx, "Adaptive chains do not support --subagent, --fork, --preset, or --loop: these modes can expand one router action into multiple top-level model calls, and exact call reservation is not implemented.", "error");
+				notify(ctx, "Adaptive chains do not support --subagent, --fork, or --loop: these modes can expand one router action into multiple top-level model calls, and exact call reservation is not implemented.", "error");
 				return;
 			}
 
@@ -2833,6 +1869,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				currentModel: getCurrentModel(ctx),
 				currentModelLabel: getCurrentModelLabel(ctx),
 				modelRegistry: ctx.modelRegistry,
+				scopedModels: ctx.scopedModels,
+				projectTrusted: projectIsTrusted(ctx),
 				commands: pi.getCommands() as RuntimeSkillCommand[],
 				promptCatalog: chainPrompts,
 			});
@@ -2851,7 +1889,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				}
 				if (step.kind === "prompt") {
 					if (!isAdaptivePromptTarget(target)) {
-						notify(ctx, `Adaptive prompt target ${JSON.stringify(step.target)} uses a delegated, loop, boomerang, compare/final-applier, deterministic, or parallel mode. Multi-call modes are unsupported until the router can reserve their exact top-level model calls.`, "error");
+						notify(ctx, `Adaptive prompt target ${JSON.stringify(step.target)} uses a delegated, loop, boomerang, or deterministic mode. Multi-call modes are unsupported until the router can reserve their exact top-level model calls.`, "error");
 						return;
 					}
 				} else if (!target.deterministic) {
@@ -2880,7 +1918,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			const changedEvidenceSuppliers = new Set([...changedGateAnalysis.predecessors.values()].flatMap((ids) => [...ids]));
 			const freshAdaptiveTarget = (target: string) => loadPromptsWithModel(ctx.cwd, true, { includeAdaptiveChains: true, projectTrusted: projectIsTrusted(ctx) }).prompts.get(target);
 			const report = await executeAdaptiveChain(wrapper.adaptiveChain, {
-				signal: ctx.signal,
+				signal: getCommandSignal(ctx),
 				resolvePrompt(target) {
 					const prompt = freshAdaptiveTarget(target);
 					return prompt && isAdaptivePromptTarget(prompt) ? prompt : undefined;
@@ -2913,7 +1951,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				async executeRun(prompt) {
 					if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return { status: "blocked", error: new Error(`Adaptive run step ${prompt.name} was not approved`) };
 					const deterministic = { ...prompt.deterministic!, cwd: runtimeCwd ?? prompt.deterministic!.cwd ?? fallbackCwd };
-					const result = await runDeterministicStep(prompt, deterministic, ctx.cwd, ctx.signal);
+					const result = await runDeterministicStep(prompt, deterministic, ctx.cwd, getCommandSignal(ctx));
 					// Publish the same bounded result card as ordinary deterministic execution
 					// before the router can dispatch an onSuccess/onFailure prompt.
 					pi.sendMessage({
@@ -2931,9 +1969,15 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				},
 			});
 			notify(ctx, formatAdaptiveRuntimeReport(name, report), "info");
+			status = "completed";
 		} catch (error) {
-			if (error instanceof AdaptiveChainCancelledError) notify(ctx, formatAdaptiveRuntimeReport(name, error.report, "cancelled"), "warning");
-			else notify(ctx, formatAdaptiveError(name, error), "error");
+			if (error instanceof AdaptiveChainCancelledError) {
+				status = "cancelled";
+				notify(ctx, formatAdaptiveRuntimeReport(name, error.report, "cancelled"), "warning");
+			} else {
+				status = isCommandAborted(ctx) ? "cancelled" : "failed";
+				notify(ctx, formatAdaptiveError(name, error), "error");
+			}
 		} finally {
 			if (workflowOwner === owner) {
 				try {
@@ -2947,157 +1991,149 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 					releaseWorkflowOwner(owner);
 				}
 			}
+			const entries = getIterationEntries(ctx, startId);
+			const lastText = getLastAssistantText(entries);
+			emitPromptLifecycleEvent(pi, ctx, PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, {
+				protocolVersion: PROMPT_TEMPLATE_PROMPT_PROTOCOL_VERSION,
+				runId,
+				name,
+				status: isCommandAborted(ctx) && status === "completed" ? "cancelled" : status,
+				changed: didIterationMakeChanges(entries),
+				...(lastText ? { lastText } : {}),
+			});
 		}
+		});
 	}
 
-	async function runPromptCommand(name: string, args: string, ctx: ExtensionCommandContext) {
-		if (isWorkflowActive()) {
-			notify(ctx, `Prompt ${name} cannot start while an adaptive chain is active.`, "error");
-			return;
-		}
-		storedCommandCtx = ctx;
-		refreshPrompts(ctx.cwd, ctx);
-		const prompt = prompts.get(name);
+	async function executePromptCommand(
+		name: string,
+		args: string,
+		ctx: ExtensionContext,
+		resolvedPrompt?: PromptWithModel,
+	): Promise<PromptTemplatePromptStatus> {
+		if (isCommandContext(ctx)) storedCommandCtx = ctx;
+		const prompt = resolvedPrompt ?? prompts.get(name);
 		if (!prompt || prompt.hidden) {
 			notify(ctx, `Prompt "${name}" is no longer available as a slash command`, "error");
-			return;
+			return "failed";
 		}
 		const boundary = prompt.inputs ? splitRawArgsAtBoundary(args) : { before: args, after: [] };
+		const removedFlag = findRemovedLegacyRuntimeFlag(args);
+		if (removedFlag) {
+			notify(ctx, `Removed legacy runtime flag \`${removedFlag}\` is not supported. Use structured single/fork delegation or a sequential/adaptive workflow. Quote the flag when it is prompt content.`, "error");
+			return "failed";
+		}
 		const subagent = extractSubagentOverride(boundary.before);
 		const runtimeCwd = subagent.cwd ? expandCwdPath(subagent.cwd) : undefined;
 		if (subagent.cwd && !runtimeCwd) {
 			notify(ctx, `Invalid --cwd path: must be absolute`, "error");
-			return;
+			return "failed";
 		}
 		const inputModeError = inputModeEligibilityError({ ...prompt, subagent: subagent.override || subagent.fork || prompt.subagent });
 		if (inputModeError) {
 			notify(ctx, inputModeError, "error");
-			return;
+			return "failed";
 		}
 		const argsWithoutSubagent = subagent.args;
 		if (prompt.inputs && extractLoopCount(argsWithoutSubagent)) {
 			notify(ctx, "Prompt inputs are only supported on ordinary prompts without loops, chains, delegation, compare, or deterministic execution", "error");
-			return;
+			return "failed";
 		}
 		if (prompt.deterministic) {
 			if (subagent.override || subagent.fork) {
 				notify(ctx, `Deterministic prompts do not support runtime --subagent/--fork in v1`, "error");
-				return;
+				return "failed";
 			}
 			if (extractLoopCount(argsWithoutSubagent)) {
 				notify(ctx, `Deterministic prompts do not support runtime --loop in v1`, "error");
-				return;
+				return "failed";
 			}
-		}
-
-		const hasCompareLineup = prompt.workers !== undefined || prompt.reviewers !== undefined || prompt.finalApplier !== undefined || prompt.preset !== undefined;
-		if (hasCompareLineup) {
-			await runComparePrompt(
-				name,
-				prompt,
-				argsWithoutSubagent,
-				ctx,
-				getCurrentModel(ctx),
-				{
-					cwd: runtimeCwd,
-					model: subagent.model,
-					preset: subagent.preset,
-					subagentOverride: subagent.override,
-					fork: subagent.fork,
-				},
-			);
-			return;
-		}
-
-		if (subagent.preset) {
-			notify(ctx, `--preset is only supported on compare prompts (ignored)`, "warning");
 		}
 
 		if (prompt.chain) {
-			const owner = claimWorkflowOwner(`legacy:${name}`);
+			if (!isCommandContext(ctx)) return "failed";
+			const owner = claimWorkflowOwner(`legacy:${name}`, true);
 			if (!owner) {
 				notify(ctx, `Legacy chain ${name} cannot start while another prompt workflow is active.`, "error");
-				return;
+				return "failed";
 			}
 			try {
-			if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return;
-			if (subagent.model) notify(ctx, `--model is not supported on chain prompts (ignored)`, "warning");
-			if (subagent.fork) notify(ctx, `--fork is not supported on chain prompts (ignored)`, "warning");
-			const worktreeExtraction = extractWorktreeFlag(argsWithoutSubagent);
-			const extracted = extractChainContextFlag(worktreeExtraction.args);
-			const chainContextEnabled = extracted.chainContext || prompt.chainContext === "summary";
-			const cliWorktree = worktreeExtraction.worktree;
-			const loop = extractLoopCount(extracted.args);
-			let totalIterations: number | null = prompt.loop !== undefined ? prompt.loop : 1;
-			let fresh = false;
-			let converge = true;
-			let cleanedArgs = extracted.args;
+				if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return "failed";
+				if (subagent.model) notify(ctx, `--model is not supported on chain prompts (ignored)`, "warning");
+				if (subagent.fork) notify(ctx, `--fork is not supported on chain prompts (ignored)`, "warning");
+				const extracted = extractChainContextFlag(argsWithoutSubagent);
+				const chainContextEnabled = extracted.chainContext || prompt.chainContext === "summary";
+				const loop = extractLoopCount(extracted.args);
+				let totalIterations: number | null = prompt.loop !== undefined ? prompt.loop : 1;
+				let fresh = false;
+				let converge = true;
+				let cleanedArgs = extracted.args;
 
-			if (loop) {
-				totalIterations = loop.loopCount;
-				fresh = loop.fresh;
-				converge = loop.converge;
-				cleanedArgs = loop.args;
-			} else if (prompt.loop !== undefined) {
-				const flags = extractLoopFlags(extracted.args);
-				fresh = flags.fresh;
-				converge = flags.converge;
-				cleanedArgs = flags.args;
-			}
+				if (loop) {
+					totalIterations = loop.loopCount;
+					fresh = loop.fresh;
+					converge = loop.converge;
+					cleanedArgs = loop.args;
+				} else if (prompt.loop !== undefined) {
+					const flags = extractLoopFlags(extracted.args);
+					fresh = flags.fresh;
+					converge = flags.converge;
+					cleanedArgs = flags.args;
+				}
 
-			const { steps, invalidSegments } = parseChainDeclaration(prompt.chain);
-			if (invalidSegments.length > 0) {
-				notify(ctx, `Invalid chain step: ${invalidSegments[0]}`, "error");
-				return;
-			}
-			if (steps.length === 0) {
-				notify(ctx, "No templates specified", "error");
-				return;
-			}
+				const { steps, invalidSegments } = parseChainDeclaration(prompt.chain);
+				if (invalidSegments.length > 0) {
+					notify(ctx, `Invalid chain step: ${invalidSegments[0]}`, "error");
+					return "failed";
+				}
+				if (steps.length === 0) {
+					notify(ctx, "No templates specified", "error");
+					return "failed";
+				}
 
-			const cwdOverride = runtimeCwd ?? prompt.cwd;
-			await runSharedChainExecution(
-				steps,
-				parseCommandArgs(cleanedArgs),
-				totalIterations,
-				fresh || prompt.fresh === true,
-				converge && prompt.converge !== false,
-				prompt.restore,
-				ctx,
-				subagent.override,
-				cwdOverride,
-				chainContextEnabled,
-				prompt.worktree === true,
-				cliWorktree,
-				owner,
-			);
-			return;
+				const cwdOverride = runtimeCwd ?? prompt.cwd;
+				return await runSharedChainExecution(
+					steps,
+					parseCommandArgs(cleanedArgs),
+					totalIterations,
+					fresh || prompt.fresh === true,
+					converge && prompt.converge !== false,
+					prompt.restore,
+					ctx,
+					subagent.override,
+					cwdOverride,
+					chainContextEnabled,
+					owner,
+				);
 			} finally {
 				releaseWorkflowOwner(owner);
 			}
 		}
 
+		if (!isCommandContext(ctx) && (prompt.inputs || prompt.loop !== undefined || extractLoopCount(argsWithoutSubagent))) {
+			return "failed";
+		}
 		const parsedPromptArgs = [...parseCommandArgs(argsWithoutSubagent), ...(boundary.after.length ? ["--", ...boundary.after] : [])];
 		let resolvedInputs = prompt.inputs ? resolvePromptInputs(prompt.inputs, parsedPromptArgs) : undefined;
 		const repairableInputErrors = resolvedInputs?.errors.every((error) => error.startsWith("missing required input") || error.startsWith("missing value for input") || error.startsWith("invalid value for input") || error.includes("must be true or false"));
 		if (resolvedInputs?.errors.length && repairableInputErrors && prompt.inputs && ctx.mode === "tui" && ctx.hasUI && typeof (ctx.ui as { custom?: unknown }).custom === "function") {
-			const repairNames = new Set(resolvedInputs.errors.map((error) => error.match(/input ["']?([a-z][a-z0-9-]*)/)?.[1]).filter((name): name is string => Boolean(name)));
-			const repairSchema = Object.fromEntries(Object.entries(prompt.inputs).filter(([name]) => repairNames.has(name)));
-			const initialValues = Object.fromEntries(Object.entries(resolvedInputs.values).filter(([name]) => repairNames.has(name)).map(([name, input]) => [name, input.value]));
+			const repairNames = new Set(resolvedInputs.errors.map((error) => error.match(/input ["']?([a-z][a-z0-9-]*)/)?.[1]).filter((inputName): inputName is string => Boolean(inputName)));
+			const repairSchema = Object.fromEntries(Object.entries(prompt.inputs).filter(([inputName]) => repairNames.has(inputName)));
+			const initialValues = Object.fromEntries(Object.entries(resolvedInputs.values).filter(([inputName]) => repairNames.has(inputName)).map(([inputName, input]) => [inputName, input.value]));
 			const formResult = await ctx.ui.custom((tui, theme, _layout, done) => new PromptInputForm(repairSchema, initialValues, done));
 			if (formResult && typeof formResult === "object" && (formResult as { action?: string }).action === "submitted") {
 				const values = (formResult as { values: Record<string, string | boolean> }).values;
-				const flags = Object.entries(values).map(([name, value]) => typeof value === "boolean" ? (value ? `--${name}` : `--no-${name}`) : `--${name}=${value}`);
+				const flags = Object.entries(values).map(([inputName, value]) => typeof value === "boolean" ? (value ? `--${inputName}` : `--no-${inputName}`) : `--${inputName}=${value}`);
 				const repaired = resolvePromptInputs(repairSchema, flags);
 				if (repaired.errors.length) resolvedInputs = { ...resolvedInputs, errors: repaired.errors };
 				else resolvedInputs = { values: { ...resolvedInputs.values, ...repaired.values }, positional: resolvedInputs.positional, errors: [] };
-			} else return;
+			} else return "failed";
 		}
 		if (resolvedInputs?.errors.length) {
 			notify(ctx, `Invalid prompt inputs: ${resolvedInputs.errors[0]}`, "error");
-			return;
+			return "failed";
 		}
-		if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return;
+		if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return "failed";
 		const promptOverrides: Partial<Pick<PromptWithModel, "models" | "inheritContext">> = {
 			...(subagent.model ? { models: [subagent.model] } : {}),
 			...(subagent.fork ? { inheritContext: true } : {}),
@@ -3105,14 +2141,12 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 		const loop = extractLoopCount(argsWithoutSubagent);
 		if (loop) {
-			await runPromptLoop(name, loop.args, loop.loopCount, loop.fresh, loop.converge, ctx, subagent.override, runtimeCwd, promptOverrides);
-			return;
+			return await runPromptLoop(name, loop.args, loop.loopCount, loop.fresh, loop.converge, ctx as ExtensionCommandContext, subagent.override, runtimeCwd, promptOverrides);
 		}
 
 		if (prompt.loop !== undefined) {
 			const flags = extractLoopFlags(argsWithoutSubagent);
-			await runPromptLoop(name, flags.args, prompt.loop, flags.fresh, flags.converge, ctx, subagent.override, runtimeCwd, promptOverrides);
-			return;
+			return await runPromptLoop(name, flags.args, prompt.loop, flags.fresh, flags.converge, ctx as ExtensionCommandContext, subagent.override, runtimeCwd, promptOverrides);
 		}
 
 		const effectivePrompt = {
@@ -3125,7 +2159,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			...promptOverrides,
 		};
 		const savedModel = getCurrentModel(ctx);
-		await executeOrdinaryPrompt(
+		const result = await executeOrdinaryPrompt(
 			name,
 			effectivePrompt,
 			resolvedInputs?.positional ?? parsedPromptArgs,
@@ -3136,12 +2170,118 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			undefined,
 			true,
 		);
+		if (isAbortedStepResult(result)) return abortedStepStatus(result, ctx);
+		return result.status ?? (result.aborted || isCommandAborted(ctx) ? "cancelled" : "completed");
+	}
+
+	async function runPromptCommand(
+		name: string,
+		args: string,
+		ctx: ExtensionContext,
+		options: {
+			runId?: string;
+			activeAlready?: boolean;
+			resolvedPrompt?: PromptWithModel;
+			skipAgentEndDrain?: boolean;
+			allowPromptActive?: boolean;
+			scope?: CommandExecutionScope;
+		} = {},
+	): Promise<void> {
+		const scope = options.scope ?? commandExecutionScope.getStore() ?? captureCommandExecutionScope(ctx);
+		return commandExecutionScope.run(scope, async () => {
+		let activityOwned = options.activeAlready === true;
+		let prompt = options.resolvedPrompt;
+		const runId = options.runId ?? randomUUID();
+		let lifecycleStarted = false;
+		let startId: string | null = null;
+		let status: PromptTemplatePromptStatus = "completed";
+		try {
+			if (options.activeAlready && prompt) {
+				startId = ctx.sessionManager.getLeafId();
+				emitPromptLifecycleEvent(pi, ctx, PROMPT_TEMPLATE_PROMPT_STARTED_EVENT, {
+					protocolVersion: PROMPT_TEMPLATE_PROMPT_PROTOCOL_VERSION,
+					runId,
+					name,
+				});
+				lifecycleStarted = true;
+			}
+
+			if (!(await waitForCommandLifecycleBoundary(ctx, { skipAgentEndDrain: options.skipAgentEndDrain }))) {
+				status = "cancelled";
+				return;
+			}
+
+			if (!options.activeAlready) {
+				if (isWorkflowActive() || (isPromptActive() && !options.allowPromptActive)) {
+					notify(ctx, `Prompt ${name} cannot start while another prompt workflow is active.`, "error");
+					return;
+				}
+				refreshPrompts(ctx.cwd, ctx);
+				prompt = options.resolvedPrompt ?? prompts.get(name);
+				if (!prompt || prompt.hidden) {
+					notify(ctx, `Prompt "${name}" is no longer available as a slash command`, "error");
+					return;
+				}
+				promptActivityCount++;
+				activityOwned = true;
+				startId = ctx.sessionManager.getLeafId();
+				emitPromptLifecycleEvent(pi, ctx, PROMPT_TEMPLATE_PROMPT_STARTED_EVENT, {
+					protocolVersion: PROMPT_TEMPLATE_PROMPT_PROTOCOL_VERSION,
+					runId,
+					name,
+				});
+				lifecycleStarted = true;
+			}
+
+			if (!(await waitForCommandLifecycleBoundary(ctx, { skipAgentEndDrain: options.skipAgentEndDrain }))) {
+				status = "cancelled";
+				return;
+			}
+
+			if (!prompt) return;
+			status = await executePromptCommand(name, args, ctx, prompt);
+		} catch (error) {
+			status = isCommandAborted(ctx) ? "cancelled" : "failed";
+			throw error;
+		} finally {
+			if (activityOwned) {
+				promptActivityCount = Math.max(0, promptActivityCount - 1);
+				activityOwned = false;
+			}
+			if (lifecycleStarted) {
+				const entries = getIterationEntries(ctx, startId);
+				const lastText = getLastAssistantText(entries);
+				emitPromptLifecycleEvent(pi, ctx, PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, {
+					protocolVersion: PROMPT_TEMPLATE_PROMPT_PROTOCOL_VERSION,
+					runId,
+					name,
+					status: isCommandAborted(ctx) && status === "completed" ? "cancelled" : status,
+					changed: didIterationMakeChanges(entries),
+					...(lastText ? { lastText } : {}),
+				});
+			}
+		}
+		});
 	}
 
 	function resetSessionScopedState(ctx: ExtensionContext) {
+		sessionAbortController.abort(new Error("Prompt workflow session was replaced"));
+		sessionAbortController = new AbortController();
+		sessionGeneration++;
+		sessionActive = true;
+		invocationCtx = ctx;
+		finishCompactionGeneration(activeCompactionGeneration, "reset");
+		completeCompactionBarrier();
+		queuedAgentSettledDrainPending = false;
+		queuedAgentSettledDrainGenerationBaseline = null;
+		pendingPromptTurn?.resolveStarted();
+		pendingPromptTurn?.resolveSettled();
+		pendingPromptTurn = null;
+		clearAgentEndDrain();
 		storedCommandCtx = null;
+		promptActivityCount = 0;
+		workflowOwner = null;
 		approvedProjectPromptLibraryCwds.clear();
-		approvedProjectPresetCwds.clear();
 		pendingSkillMessage = undefined;
 		previousModel = undefined;
 		previousThinking = undefined;
@@ -3151,8 +2291,39 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		refreshPrompts(ctx.cwd, ctx);
 	}
 
+	getExtensionEvents(pi)?.on(PROMPT_TEMPLATE_PROMPT_INVOKE_REQUEST_EVENT, (payload) => {
+		handlePromptInvocation(payload);
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
 		resetSessionScopedState(ctx);
+	});
+
+	pi.on("session_before_compact", async (event, ctx) => {
+		if (!beginCompactionBarrier(event.signal, ctx)) return { cancel: true };
+	});
+
+	pi.on("session_compact", async () => {
+		handleCompactionTerminal();
+	});
+
+	pi.on("session_shutdown", async () => {
+		sessionAbortController.abort(new Error("Prompt workflow session shut down"));
+		sessionGeneration++;
+		sessionActive = false;
+		invocationCtx = null;
+		finishCompactionGeneration(activeCompactionGeneration, "reset");
+		completeCompactionBarrier();
+		queuedAgentSettledDrainPending = false;
+		queuedAgentSettledDrainGenerationBaseline = null;
+		pendingPromptTurn?.resolveStarted();
+		pendingPromptTurn?.resolveSettled();
+		pendingPromptTurn = null;
+		clearAgentEndDrain();
+		storedCommandCtx = null;
+		toolManager.clearQueue();
+		promptActivityCount = 0;
+		workflowOwner = null;
 	});
 
 	pi.on("model_select", async (event) => {
@@ -3160,6 +2331,15 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", async (event) => {
+		const pending = pendingPromptTurn;
+		if (pending && pending.generation === sessionGeneration && event.prompt === pending.content) {
+			pending.started = true;
+			pending.resolveStarted();
+		}
+		finishCompactionGeneration(activeCompactionGeneration, "turn_start");
+		// Pi cannot start a turn until any prior compaction attempt has returned,
+		// so an accepted prompt is a safe resynchronization point after a fallback.
+		compactionTerminalCorrelationLost = false;
 		let systemPrompt = event.systemPrompt;
 
 		if (toolManager.isEnabled() && !loopState && !isWorkflowActive()) {
@@ -3189,25 +2369,81 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {
-		if (isWorkflowActive()) return;
-		if (loopState) return;
+		enterAgentEndDrain();
+		let retainedForSettledQueue = false;
+		try {
+			await waitForPendingCompaction();
+			if (isWorkflowActive() || loopState) return;
+			await waitForPendingCompaction();
+			if (isWorkflowActive() || loopState) return;
 
-		const restoreModel = previousModel;
-		const restoreThinking = previousThinking;
-		if (!restoreModel && restoreThinking === undefined && !toolManager.hasQueuedCommand()) return;
-
-		runtimeModel = ctx.model;
-		previousModel = undefined;
-		previousThinking = undefined;
-
-		const restoreFn = async () => {
-			if (restoreModel || restoreThinking !== undefined) {
-				await restoreSessionState(ctx, restoreModel, restoreThinking, getCurrentModel(ctx), pi.getThinkingLevel());
+			if (toolManager.hasQueuedCommand()) {
+				if (!queuedAgentSettledDrainPending) {
+					queuedAgentSettledDrainPending = true;
+					queuedAgentSettledDrainGenerationBaseline = nextCompactionGeneration;
+					retainedForSettledQueue = true;
+				}
+				return;
 			}
-		};
-		const processed = await toolManager.processQueue(ctx, restoreFn);
-		if (processed) return;
-		await restoreFn();
+
+			const restoreModel = previousModel;
+			const restoreThinking = previousThinking;
+			if (!restoreModel && restoreThinking === undefined) return;
+
+			runtimeModel = ctx.model;
+			previousModel = undefined;
+			previousThinking = undefined;
+			await restoreSessionState(ctx, restoreModel, restoreThinking, getCurrentModel(ctx), pi.getThinkingLevel());
+		} finally {
+			if (!retainedForSettledQueue) leaveAgentEndDrain();
+		}
+	});
+
+	pi.on("agent_settled", async (_event, ctx) => {
+		const pendingTurn = pendingPromptTurn;
+		if (pendingTurn?.started && pendingTurn.generation === sessionGeneration) {
+			pendingTurn.settled = true;
+			pendingTurn.resolveSettled();
+		}
+		if (!queuedAgentSettledDrainPending) return;
+		const compactionGenerationBaseline = queuedAgentSettledDrainGenerationBaseline ?? nextCompactionGeneration;
+		queuedAgentSettledDrainPending = false;
+		queuedAgentSettledDrainGenerationBaseline = null;
+		try {
+			await waitForPendingCompaction();
+			const postTurnCompactionFellBack = [...compactionReleaseReasons.entries()].some(
+				([generation, reason]) => generation > compactionGenerationBaseline && reason === "fallback",
+			);
+
+			const restoreModel = previousModel;
+			const restoreThinking = previousThinking;
+			runtimeModel = ctx.model;
+			previousModel = undefined;
+			previousThinking = undefined;
+
+			const restoreFn = async () => {
+				if (restoreModel || restoreThinking !== undefined) {
+					await restoreSessionState(ctx, restoreModel, restoreThinking, getCurrentModel(ctx), pi.getThinkingLevel());
+				}
+			};
+			if (postTurnCompactionFellBack) {
+				const command = toolManager.clearQueue();
+				await restoreFn();
+				if (command) {
+					notify(
+						ctx,
+						`Queued prompt command \`${command}\` was cancelled because the post-turn compaction barrier reached its fallback without a terminal event. Run the command again after compaction is healthy.`,
+						"error",
+					);
+				}
+				return;
+			}
+			const processed = await toolManager.processQueue(ctx, restoreFn);
+			if (!processed) await restoreFn();
+		} finally {
+			queuedAgentSettledDrainGenerationBaseline = null;
+			leaveAgentEndDrain();
+		}
 	});
 
 	pi.on("session_before_tree", async (event) => {
@@ -3238,204 +2474,62 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		};
 	});
 
-	async function runChainCommand(args: string, ctx: ExtensionCommandContext) {
-		const owner = claimWorkflowOwner("legacy:chain-prompts");
+	async function runChainCommand(
+		args: string,
+		ctx: ExtensionCommandContext,
+		options: { skipAgentEndDrain?: boolean; allowPromptActive?: boolean } = {},
+	) {
+		if (!(await waitForCommandLifecycleBoundary(ctx, { skipAgentEndDrain: options.skipAgentEndDrain }))) return;
+		const owner = claimWorkflowOwner("legacy:chain-prompts", options.allowPromptActive);
 		if (!owner) {
 			notify(ctx, "A legacy chain cannot start while another prompt workflow is active.", "error");
 			return;
 		}
 		try {
-		storedCommandCtx = ctx;
-		refreshPrompts(ctx.cwd, ctx);
+			storedCommandCtx = ctx;
+			refreshPrompts(ctx.cwd, ctx);
 
-		const subagent = extractSubagentOverride(args);
-		const runtimeCwd = subagent.cwd ? expandCwdPath(subagent.cwd) : undefined;
-		if (subagent.cwd && !runtimeCwd) {
-			notify(ctx, `Invalid --cwd path: must be absolute`, "error");
-			return;
-		}
-		const worktreeExtraction = extractWorktreeFlag(subagent.args);
-		const extracted = extractChainContextFlag(worktreeExtraction.args);
-		const loop = extractLoopCount(extracted.args);
-		const cleanedArgs = loop ? loop.args : extracted.args;
+			const removedFlag = findRemovedLegacyRuntimeFlag(args);
+			if (removedFlag) {
+				notify(ctx, `Removed legacy runtime flag \`${removedFlag}\` is not supported. Use structured single/fork delegation or a sequential/adaptive workflow. Quote the flag when it is prompt content.`, "error");
+				return;
+			}
+			const subagent = extractSubagentOverride(args);
+			const runtimeCwd = subagent.cwd ? expandCwdPath(subagent.cwd) : undefined;
+			if (subagent.cwd && !runtimeCwd) {
+				notify(ctx, `Invalid --cwd path: must be absolute`, "error");
+				return;
+			}
+			const extracted = extractChainContextFlag(subagent.args);
+			const loop = extractLoopCount(extracted.args);
+			const cleanedArgs = loop ? loop.args : extracted.args;
 
-		const { steps, sharedArgs, invalidSegments } = parseChainSteps(cleanedArgs);
-		if (invalidSegments.length > 0) {
-			notify(ctx, `Invalid chain step: ${invalidSegments[0]}`, "error");
-			return;
-		}
-		if (steps.length === 0) {
-			notify(ctx, "No templates specified", "error");
-			return;
-		}
+			const { steps, sharedArgs, invalidSegments } = parseChainSteps(cleanedArgs);
+			if (invalidSegments.length > 0) {
+				notify(ctx, `Invalid chain step: ${invalidSegments[0]}`, "error");
+				return;
+			}
+			if (steps.length === 0) {
+				notify(ctx, "No templates specified", "error");
+				return;
+			}
 
-		await runSharedChainExecution(
-			steps,
-			sharedArgs,
-			loop ? loop.loopCount : 1,
-			loop?.fresh === true,
-			loop?.converge ?? true,
-			true,
-			ctx,
-			subagent.override,
-			runtimeCwd,
-			extracted.chainContext,
-			false,
-			worktreeExtraction.worktree,
-			owner,
-		);
+			await runSharedChainExecution(
+				steps,
+				sharedArgs,
+				loop ? loop.loopCount : 1,
+				loop?.fresh === true,
+				loop?.converge ?? true,
+				true,
+				ctx,
+				subagent.override,
+				runtimeCwd,
+				extracted.chainContext,
+				owner,
+			);
 		} finally {
 			releaseWorkflowOwner(owner);
 		}
-	}
-
-	function parseCompareRunPickerAction(value: unknown, history: BestOfNRunHistoryResult): CompareRunHistoryTuiResult | undefined {
-		const action = getOwnStringProperty(value, "action");
-		if (action === "closed") return { action: "closed" };
-		if (action === "back") return { action: "back" };
-		if (action === "refresh") return { action: "refresh" };
-		if (action !== "selected") return undefined;
-		const runId = getOwnStringProperty(value, "runId");
-		if (!runId) return undefined;
-		if (!history.entries.some((entry) => entry.name === runId)) return undefined;
-		return { action: "selected", runId };
-	}
-
-	function formatMissingCompareRunMessage(history: BestOfNRunHistoryResult, cwd: string, runId: string): string {
-		return [
-			history.diagnostics[0] ?? `Compare run ${JSON.stringify(runId)} was not found in the current run history.`,
-			`Searched root: ${history.root}`,
-			`Command cwd: ${cwd}`,
-			"Recovery: run /compare-runs to browse recent runs, copy the exact Run id, or rerun the compare prompt from the same cwd.",
-			"If you need raw worker/reviewer outputs, rerun with --keep-artifacts.",
-		].join("\n");
-	}
-
-	function formatStaleCompareRunMessage(history: BestOfNRunHistoryResult, cwd: string, runId: string): string {
-		return [
-			`Compare run ${JSON.stringify(runId)} vanished or is no longer readable; refreshed run history.`,
-			`Searched root: ${history.root}`,
-			`Command cwd: ${cwd}`,
-			"Recovery: press r or reopen /compare-runs, then select a current Run id. If files were manually cleaned up, rerun the compare prompt from the same cwd.",
-		].join("\n");
-	}
-
-	async function openCompareRunPicker(ctx: ExtensionCommandContext, history: BestOfNRunHistoryResult, initialRunId?: string): Promise<CompareRunHistoryTuiResult | undefined> {
-		const ui = (ctx as ExtensionCommandContext & {
-			ui: { custom: (factory: (...args: any[]) => unknown, options?: unknown) => Promise<CompareRunHistoryTuiResult | unknown> | CompareRunHistoryTuiResult | unknown };
-		}).ui;
-		const result = await ui.custom((tui, theme, _layout, done) => new CompareRunPicker(buildCompareRunCatalog(history), initialRunId, tui, theme, done));
-		return parseCompareRunPickerAction(result, history);
-	}
-
-	async function openCompareRunInspector(ctx: ExtensionCommandContext, history: BestOfNRunHistoryResult, runId: string): Promise<CompareRunHistoryTuiResult | undefined> {
-		const run = history.entries.find((entry) => entry.name === runId);
-		if (!run) return undefined;
-		const ui = (ctx as ExtensionCommandContext & {
-			ui: { custom: (factory: (...args: any[]) => unknown, options?: unknown) => Promise<CompareRunHistoryTuiResult | unknown> | CompareRunHistoryTuiResult | unknown };
-		}).ui;
-		const result = await ui.custom((tui, theme, _layout, done) => new CompareRunDetailInspector(createCompareRunDetailViewModel(history, run, { commandCwd: ctx.cwd }), tui, theme, done));
-		return parseCompareRunPickerAction(result, history);
-	}
-
-	async function inspectCompareRunInTui(ctx: ExtensionCommandContext, options: ReturnType<typeof parseBestOfNRunHistoryArgs>, runId: string, historyCwd: string): Promise<CompareRunHistoryTuiResult | undefined> {
-		const latest = collectBestOfNRunHistory(historyCwd, { ...options, runId });
-		if (!latest.entries.some((entry) => entry.name === runId)) {
-			notify(ctx, formatStaleCompareRunMessage(latest, historyCwd, runId), "error");
-			return { action: "refresh" };
-		}
-		return openCompareRunInspector(ctx, latest, runId);
-	}
-
-	async function runCompareRunsCommand(args: string, ctx: ExtensionCommandContext) {
-		storedCommandCtx = ctx;
-		const options = parseBestOfNRunHistoryArgs(args);
-		const historyCwd = options.cwd ? expandCwdPath(options.cwd) : ctx.cwd;
-		if (options.cwd && !historyCwd) options.errors?.push(`Invalid --cwd ${JSON.stringify(options.cwd)}: expected an absolute path or ~/ path.`);
-		if (options.errors?.length) {
-			const message = [`Invalid /compare-runs arguments:`, ...options.errors.map((error) => `- ${error}`), "Usage: /compare-runs [--plain] [--tui] [--cwd <absolute-path>] [--id <run-id>] [--limit <positive-integer>]."].join("\n");
-			if (options.plain || !ctx.hasUI) process.stdout.write(`${message}\n`);
-			else notify(ctx, message, "error");
-			return;
-		}
-		const searchCwd = historyCwd ?? ctx.cwd;
-		const history = collectBestOfNRunHistory(searchCwd, options);
-		const pickerOptions = { ...options, runId: undefined };
-		const selectedRun = options.runId ? history.entries.find((entry) => entry.name === options.runId) : undefined;
-		const missingRunMessage = options.runId && !selectedRun ? formatMissingCompareRunMessage(history, searchCwd, options.runId) : undefined;
-		if (options.plain) {
-			process.stdout.write(selectedRun ? formatBestOfNRunDetail(history, selectedRun, { commandCwd: ctx.cwd }) : missingRunMessage ?? formatBestOfNRunHistory(history, { commandCwd: ctx.cwd }));
-			return;
-		}
-		if ((options.tui || isTuiMode(ctx)) && hasCustomUi(ctx)) {
-			let currentHistory = history;
-			if (options.runId) {
-				if (!selectedRun) {
-					notify(ctx, missingRunMessage ?? "Compare run was not found in the current run history.", "error");
-					return;
-				}
-				let currentRun = selectedRun;
-				for (;;) {
-					const detailAction = await inspectCompareRunInTui(ctx, options, currentRun.name, searchCwd);
-					if (detailAction?.action === "refresh") {
-						currentHistory = collectBestOfNRunHistory(searchCwd, pickerOptions);
-						const refreshedRun = currentHistory.entries.find((entry) => entry.name === currentRun.name);
-						if (!refreshedRun) {
-							notify(ctx, `Compare run ${currentRun.name} vanished or is no longer readable; refreshed run history.`, "warning");
-							break;
-						}
-						currentRun = refreshedRun;
-						continue;
-					}
-					if (detailAction?.action === "back") break;
-					return;
-				}
-				currentHistory = collectBestOfNRunHistory(searchCwd, pickerOptions);
-			}
-			for (;;) {
-				const selection = await openCompareRunPicker(ctx, currentHistory);
-				if (selection?.action === "refresh") {
-					currentHistory = collectBestOfNRunHistory(searchCwd, pickerOptions);
-					continue;
-				}
-				if (selection?.action !== "selected") break;
-				let detailAction = await inspectCompareRunInTui(ctx, options, selection.runId, searchCwd);
-				while (detailAction?.action === "refresh") {
-					currentHistory = collectBestOfNRunHistory(searchCwd, pickerOptions);
-					if (!currentHistory.entries.some((entry) => entry.name === selection.runId)) {
-						notify(ctx, `Compare run ${selection.runId} vanished or is no longer readable; refreshed run history.`, "warning");
-						break;
-					}
-					detailAction = await inspectCompareRunInTui(ctx, options, selection.runId, searchCwd);
-				}
-				if (detailAction?.action === "back" || detailAction?.action === "refresh") {
-					currentHistory = collectBestOfNRunHistory(searchCwd, pickerOptions);
-					continue;
-				}
-				break;
-			}
-			return;
-		}
-		if (options.tui) {
-			notify(ctx, "--tui compare run history is not available without Pi TUI custom UI; showing a notification report instead.", "warning");
-		}
-		notify(ctx, selectedRun ? formatBestOfNRunDetail(history, selectedRun, { commandCwd: ctx.cwd }) : missingRunMessage ?? formatBestOfNRunHistory(history, { commandCwd: ctx.cwd }), selectedRun || !options.runId ? "info" : "error");
-	}
-
-	function parseComparePresetsArgs(args: string): { plain: boolean } {
-		return { plain: args.split(/\s+/).some((arg) => arg === "--plain") };
-	}
-
-	async function runComparePresetsCommand(args: string, ctx: ExtensionCommandContext) {
-		storedCommandCtx = ctx;
-		const options = parseComparePresetsArgs(args);
-		const catalog = loadBestOfNPresetCatalog(ctx.cwd);
-		const output = formatBestOfNPresetCatalog(catalog, ctx.cwd);
-		if (options.plain) {
-			process.stdout.write(output);
-			return;
-		}
-		notify(ctx, output, catalog.diagnostics.length > 0 ? "warning" : "info");
 	}
 
 	if (toolManager.isEnabled()) toolManager.ensureRegistered();
@@ -3457,30 +2551,6 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				return;
 			}
 			notify(ctx, output, validation.ok ? "info" : "error");
-		},
-	});
-	pi.registerCommand("compare-runs", {
-		description: "List recent best-of-N compare run reports and retained artifacts",
-		handler: async (args, ctx) => {
-			await runCompareRunsCommand(args, ctx);
-		},
-	});
-	pi.registerCommand("compare-presets", {
-		description: "List available best-of-N compare presets without approving or running them",
-		handler: async (args, ctx) => {
-			await runComparePresetsCommand(args, ctx);
-		},
-	});
-	pi.registerCommand("best-of-n-runs", {
-		description: "Alias for /compare-runs",
-		handler: async (args, ctx) => {
-			await runCompareRunsCommand(args, ctx);
-		},
-	});
-	pi.registerCommand("best-of-n-presets", {
-		description: "Alias for /compare-presets",
-		handler: async (args, ctx) => {
-			await runComparePresetsCommand(args, ctx);
 		},
 	});
 	pi.registerCommand("print-prompt", {

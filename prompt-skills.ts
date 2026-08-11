@@ -1,10 +1,131 @@
-import { discoverFilesystemSkills, readSkillContent, resolveSkillPath, type PromptWithModel } from "./prompt-loader.js";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
+import { discoverFilesystemSkills, readSkillContent, resolveSkillPath, type PromptWithModel, type ResolveSkillPathOptions } from "./prompt-loader.js";
 import type { SkillLoadedDetails } from "./skill-loaded-renderer.js";
 
 export interface RuntimeSkillCommand {
 	name: string;
 	source?: string;
 	sourceInfo?: { path?: string };
+}
+
+export interface PromptSkillResolutionOptions extends ResolveSkillPathOptions {}
+
+export interface DelegatedCwdInspection {
+	sessionCwd: string;
+	effectiveCwd: string;
+	nestedProjectRoot?: string;
+}
+
+export type DelegatedCwdInspectionResult =
+	| { kind: "ready"; value: DelegatedCwdInspection }
+	| { kind: "error"; error: string };
+
+function isDirectory(path: string): boolean {
+	try {
+		return statSync(path).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
+function packageDeclaresSubagents(directory: string): boolean {
+	const packagePath = join(directory, "package.json");
+	if (!existsSync(packagePath)) return false;
+	try {
+		const parsed = JSON.parse(readFileSync(packagePath, "utf8")) as Record<string, unknown>;
+		const direct = parsed["pi-subagents"];
+		if (direct && typeof direct === "object" && !Array.isArray(direct)) return true;
+		const pi = parsed.pi;
+		const nested = pi && typeof pi === "object" && !Array.isArray(pi)
+			? (pi as Record<string, unknown>).subagents
+			: undefined;
+		return !!nested && typeof nested === "object" && !Array.isArray(nested);
+	} catch {
+		// An unreadable nested manifest is not safe to trust implicitly.
+		return true;
+	}
+}
+
+function findNestedProjectRoot(sessionCwd: string, effectiveCwd: string): string | undefined {
+	let current = effectiveCwd;
+	while (current !== sessionCwd) {
+		if (
+			isDirectory(join(current, ".pi"))
+			|| isDirectory(join(current, ".agents"))
+			|| existsSync(join(current, ".git"))
+			|| packageDeclaresSubagents(current)
+		) {
+			return current;
+		}
+		const parent = dirname(current);
+		if (parent === current) break;
+		current = parent;
+	}
+	return undefined;
+}
+
+export function inspectDelegatedCwd(
+	sessionCwd: string,
+	effectiveCwd: string,
+	sessionTrusted: boolean,
+): DelegatedCwdInspectionResult {
+	if (!sessionTrusted) {
+		return {
+			kind: "error",
+			error: `Delegated execution is blocked because project trust is not active for the session cwd \`${sessionCwd}\`. Approve project trust in that cwd before delegation.`,
+		};
+	}
+
+	let canonicalSessionCwd: string;
+	let canonicalEffectiveCwd: string;
+	try {
+		canonicalSessionCwd = realpathSync(sessionCwd);
+		canonicalEffectiveCwd = realpathSync(effectiveCwd);
+	} catch {
+		return {
+			kind: "error",
+			error: `Cannot verify delegated cwd \`${effectiveCwd}\` against trusted session root \`${sessionCwd}\`.`,
+		};
+	}
+
+	const childPath = relative(canonicalSessionCwd, canonicalEffectiveCwd);
+	if (childPath === ".." || childPath.startsWith(`..${sep}`) || isAbsolute(childPath)) {
+		return {
+			kind: "error",
+			error: `Delegated cwd \`${effectiveCwd}\` is outside the trusted session root \`${sessionCwd}\`. Start Pi in that cwd and approve project trust before delegation.`,
+		};
+	}
+
+	return {
+		kind: "ready",
+		value: {
+			sessionCwd: canonicalSessionCwd,
+			effectiveCwd: canonicalEffectiveCwd,
+			...(childPath ? { nestedProjectRoot: findNestedProjectRoot(canonicalSessionCwd, canonicalEffectiveCwd) } : {}),
+		},
+	};
+}
+
+export function getDelegatedCwdTrustError(
+	sessionCwd: string,
+	effectiveCwd: string,
+	sessionTrusted: boolean,
+): string | undefined {
+	const inspected = inspectDelegatedCwd(sessionCwd, effectiveCwd, sessionTrusted);
+	if (inspected.kind === "error") return inspected.error;
+	if (inspected.value.nestedProjectRoot) {
+		return `Separate approval is required for nested project configuration at \`${inspected.value.nestedProjectRoot}\` before delegated execution can use it.`;
+	}
+	return undefined;
+}
+
+export function canResolveProjectSkills(
+	sessionCwd: string,
+	effectiveCwd: string,
+	sessionTrusted: boolean,
+): boolean {
+	return getDelegatedCwdTrustError(sessionCwd, effectiveCwd, sessionTrusted) === undefined;
 }
 
 export interface PendingSkillMessage {
@@ -102,7 +223,12 @@ function discoverRegisteredWildcardMatches(prefix: string, commands: RuntimeSkil
 		.sort((a, b) => lexicalCompare(a.skillName, b.skillName));
 }
 
-function expandWildcardSelector(selector: string, cwd: string, commands: RuntimeSkillCommand[]): SkillResolution | { kind: "matches"; skills: ExpandedSkill[] } {
+function expandWildcardSelector(
+	selector: string,
+	cwd: string,
+	commands: RuntimeSkillCommand[],
+	options: PromptSkillResolutionOptions,
+): SkillResolution | { kind: "matches"; skills: ExpandedSkill[] } {
 	if (!isValidSuffixWildcardSelector(selector)) {
 		return { kind: "error", error: invalidWildcardError(selector) };
 	}
@@ -114,7 +240,7 @@ function expandWildcardSelector(selector: string, cwd: string, commands: Runtime
 		seen.add(skill.skillName);
 		matches.push(skill);
 	}
-	for (const skill of discoverFilesystemSkills(cwd)) {
+	for (const skill of discoverFilesystemSkills(cwd, options)) {
 		if (!skill.skillName.startsWith(prefix)) continue;
 		if (seen.has(skill.skillName)) continue;
 		seen.add(skill.skillName);
@@ -126,7 +252,12 @@ function expandWildcardSelector(selector: string, cwd: string, commands: Runtime
 	return { kind: "matches", skills: matches };
 }
 
-function expandRequestedSkillNames(skillNames: string[], cwd: string, commands: RuntimeSkillCommand[]): SkillResolution | { kind: "expanded"; skills: ExpandedSkill[] } {
+function expandRequestedSkillNames(
+	skillNames: string[],
+	cwd: string,
+	commands: RuntimeSkillCommand[],
+	options: PromptSkillResolutionOptions,
+): SkillResolution | { kind: "expanded"; skills: ExpandedSkill[] } {
 	const expanded: ExpandedSkill[] = [];
 	const seen = new Set<string>();
 	for (const skillName of skillNames) {
@@ -135,7 +266,7 @@ function expandRequestedSkillNames(skillNames: string[], cwd: string, commands: 
 			return { kind: "error", error: `Skill "${skillName}" not found` };
 		}
 		if (isWildcardSelector(normalizedSkillName)) {
-			const wildcard = expandWildcardSelector(normalizedSkillName, cwd, commands);
+			const wildcard = expandWildcardSelector(normalizedSkillName, cwd, commands, options);
 			if (wildcard.kind !== "matches") return wildcard;
 			for (const matchedSkill of wildcard.skills) {
 				if (seen.has(matchedSkill.skillName)) continue;
@@ -154,17 +285,22 @@ function expandRequestedSkillNames(skillNames: string[], cwd: string, commands: 
 	return { kind: "expanded", skills: expanded };
 }
 
-export function resolvePromptSkills(skillNames: string[], cwd: string, commands: RuntimeSkillCommand[]): SkillResolution {
+export function resolvePromptSkills(
+	skillNames: string[],
+	cwd: string,
+	commands: RuntimeSkillCommand[],
+	options: PromptSkillResolutionOptions = {},
+): SkillResolution {
 	if (skillNames.length === 0) {
 		return { kind: "none" };
 	}
 
-	const expandedSkillNames = expandRequestedSkillNames(skillNames, cwd, commands);
+	const expandedSkillNames = expandRequestedSkillNames(skillNames, cwd, commands, options);
 	if (expandedSkillNames.kind !== "expanded") return expandedSkillNames;
 
 	const loadedSkills: LoadedPromptSkill[] = [];
 	for (const skill of expandedSkillNames.skills) {
-		const skillPath = skill.skillPath ?? resolveRegisteredSkillPath(skill.skillName, commands) ?? (isPathResolvableSkillName(skill.skillName) ? resolveSkillPath(skill.skillName, cwd) : undefined);
+		const skillPath = skill.skillPath ?? resolveRegisteredSkillPath(skill.skillName, commands) ?? (isPathResolvableSkillName(skill.skillName) ? resolveSkillPath(skill.skillName, cwd, options) : undefined);
 		if (!skillPath) {
 			return { kind: "error", error: `Skill "${skill.skillName}" not found` };
 		}

@@ -1,10 +1,10 @@
 import type { ChainGate, ChainOutcome, StructuredChainStep } from "./chain-parser.js";
 import type { PromptWithModel } from "./prompt-loader.js";
 import { getRequestedSkills } from "./prompt-skills.js";
-import { buildSkillLoadedMessage, resolvePromptSkills, type LoadedPromptSkill, type RuntimeSkillCommand } from "./prompt-skills.js";
+import { buildSkillLoadedMessage, canResolveProjectSkills, resolvePromptSkills, type LoadedPromptSkill, type RuntimeSkillCommand } from "./prompt-skills.js";
 import { checkPromptExecutionBudget, preparePromptExecution } from "./prompt-execution.js";
 import type { Model } from "@earendil-works/pi-ai";
-import { getModelCandidates, type RegistryLike } from "./model-selection.js";
+import { getModelCandidates, type ModelSelectionOptions, type RegistryLike } from "./model-selection.js";
 import { capSanitizedText } from "./render-safe.js";
 import { estimatePromptTokens, PROMPT_TOKEN_ESTIMATE_METHOD } from "./prompt-budget.js";
 import { createAdaptiveChainState, routeAdaptiveChain, type ChainObservation } from "./adaptive-chain.js";
@@ -140,31 +140,28 @@ function analyzeCalls(steps: readonly StructuredChainStep[], maxSteps: number, m
 }
 export function isAdaptivePromptTarget(target: PromptWithModel | undefined): boolean {
 	return !!target && !target.chain && !target.adaptiveChain && !target.deterministic
-		&& !target.inputs && !target.subagent && !target.inheritContext && !target.parallel
-		&& target.loop === undefined && !target.boomerang && !target.workers
-		&& !target.reviewers && !target.finalApplier && !target.preset;
+		&& !target.inputs && !target.subagent && !target.inheritContext
+		&& target.loop === undefined && !target.boomerang;
 }
 
 export function isAdaptiveRunTarget(target: PromptWithModel | undefined): target is PromptWithModel & { deterministic: NonNullable<PromptWithModel["deterministic"]> } {
 	return !!target && !target.chain && !target.adaptiveChain
 		&& !!target.deterministic && target.deterministic.handoff === "never"
-		&& getRequestedSkills(target).length === 0
-		&& !target.workers && !target.reviewers && !target.finalApplier && !target.preset;
+		&& getRequestedSkills(target).length === 0;
 }
 
 function targetIssues(step: StructuredChainStep, target: PromptWithModel | undefined): string[] {
 	if (!target) return [`Missing ${step.kind} target.`];
-	if (target.chain || target.adaptiveChain) return ["Nested/adaptive/parallel chain targets are unsupported."];
+	if (target.chain || target.adaptiveChain) return ["Nested or adaptive chain targets are unsupported."];
 	if (step.kind === "run") {
 		if (!target.deterministic) return ["Kind mismatch: run target is not deterministic."];
 		if (getRequestedSkills(target).length) return ["Adaptive run targets cannot declare skills because deterministic execution does not consume skill context."];
-		if (target.workers || target.reviewers || target.finalApplier || target.preset) return ["Adaptive run targets cannot declare compare/best-of-N fields."];
 		return isAdaptiveRunTarget(target) ? [] : ["Deterministic handoff can add a model call and is unsupported."];
 	}
 	if (isAdaptivePromptTarget(target)) return [];
 	return target.deterministic
 		? ["Kind mismatch: prompt target is deterministic."]
-		: ["Delegated, loop, boomerang, compare/final-applier, deterministic, or parallel target mode can expand one router action into multiple top-level model calls and is runtime-rejected."];
+		: ["Delegated, loop, boomerang, or deterministic target mode can expand one router action into multiple top-level model calls and is runtime-rejected."];
 }
 export function createAdaptivePreflight(wrapper: PromptWithModel, catalog: ReadonlyMap<string, PromptWithModel>, cwd: string, runtimeCwd?: string): AdaptivePreflight {
 	if (!wrapper.adaptiveChain) throw new Error("Adaptive preflight requires a structured chain");
@@ -184,7 +181,7 @@ export function createAdaptivePreflight(wrapper: PromptWithModel, catalog: Reado
 	return { status: diagnostics.length ? "blocked" : "ready", name: wrapper.name, limits, steps, targets, warnings: [], callBounds: analysis.bounds, promptCostBounds: analysis.costs, pathAnalysis: analysis.pathAnalysis, analysis: analysis.analysis, diagnostics };
 }
 
-export async function prepareAdaptivePreflight(wrapper: PromptWithModel, catalog: ReadonlyMap<string, PromptWithModel>, options: { cwd: string; runtimeCwd?: string; args: string[]; modelOverride?: string; currentModel?: Model<any>; modelRegistry: RegistryLike; commands?: RuntimeSkillCommand[] }): Promise<AdaptivePreflight> {
+export async function prepareAdaptivePreflight(wrapper: PromptWithModel, catalog: ReadonlyMap<string, PromptWithModel>, options: { cwd: string; runtimeCwd?: string; args: string[]; modelOverride?: string; currentModel?: Model<any>; modelRegistry: RegistryLike; scopedModels?: ModelSelectionOptions["scopedModels"]; projectTrusted?: boolean; commands?: RuntimeSkillCommand[] }): Promise<AdaptivePreflight> {
 	const base = createAdaptivePreflight(wrapper, catalog, options.cwd, options.runtimeCwd);
 	const diagnostics = [...base.diagnostics];
 	const modelKey = (model: Model<any> | undefined) => model ? `${model.provider}/${model.id}` : "";
@@ -194,7 +191,7 @@ export async function prepareAdaptivePreflight(wrapper: PromptWithModel, catalog
 		const target = catalog.get(step.target);
 		return target ? (options.modelOverride ? [options.modelOverride] : target.models) : [];
 	}));
-	for (const spec of selectableSpecs) for (const model of getModelCandidates(spec, options.modelRegistry)) activeModels.set(modelKey(model), model);
+	for (const spec of selectableSpecs) for (const model of getModelCandidates(spec, options.modelRegistry, { scopedModels: options.scopedModels })) activeModels.set(modelKey(model), model);
 	const promptStepCount = base.steps.filter((step, index) => step.kind === "prompt" && !!catalog.get(step.target) && base.targets[index]!.issues.length === 0).length;
 	const preparationProduct = promptStepCount * activeModels.size;
 	if (!Number.isSafeInteger(preparationProduct) || preparationProduct > MAX_ADAPTIVE_PREFLIGHT_STATES) {
@@ -205,7 +202,7 @@ export async function prepareAdaptivePreflight(wrapper: PromptWithModel, catalog
 	const targets = await Promise.all(base.targets.map(async (summary, index) => {
 		const step = base.steps[index]!; const target = catalog.get(step.target);
 		if (!target || step.kind !== "prompt" || summary.issues.length) return summary;
-		const skills = resolvePromptSkills(getRequestedSkills(target), options.cwd, options.commands ?? []);
+		const skills = resolvePromptSkills(getRequestedSkills(target), summary.cwd, options.commands ?? [], { includeProjectSkills: canResolveProjectSkills(options.cwd, summary.cwd, options.projectTrusted !== false) });
 		if (skills.kind === "error") {
 			const issue = capSanitizedText(skills.error, 500);
 			targetIndependentIssues[index] = issue;
@@ -218,7 +215,7 @@ export async function prepareAdaptivePreflight(wrapper: PromptWithModel, catalog
 		const skillPromptCost = loaded.length ? estimatePromptTokens(buildSkillLoadedMessage(loaded).content) : undefined;
 		const resolvedSkillSummary = { skills: loaded.map((skill) => skill.skillName), skillPromptCost };
 		const effective = { ...target, ...(options.modelOverride ? { models: [options.modelOverride] } : {}) };
-		const prepared = await preparePromptExecution(effective, options.args, options.currentModel, options.modelRegistry);
+		const prepared = await preparePromptExecution(effective, options.args, options.currentModel, options.modelRegistry, { scopedModels: options.scopedModels });
 		if (!prepared || "message" in prepared) {
 			const issue = capSanitizedText(prepared && "message" in prepared ? prepared.message : `No available model from: ${effective.models.join(", ")}`, 500);
 			return { ...summary, ...resolvedSkillSummary, status: "blocked" as const, issues: [...summary.issues, issue] };
@@ -235,7 +232,7 @@ export async function prepareAdaptivePreflight(wrapper: PromptWithModel, catalog
 	// resolves to a concrete `provider/b` route state rather than being compared
 	// literally with the qualified registry key and silently omitted.
 	for (const spec of selectableSpecs) {
-		for (const model of getModelCandidates(spec, options.modelRegistry)) activeModels.set(modelKey(model), model);
+		for (const model of getModelCandidates(spec, options.modelRegistry, { scopedModels: options.scopedModels })) activeModels.set(modelKey(model), model);
 	}
 	if (activeModels.size > MAX_ADAPTIVE_PREFLIGHT_STATES) {
 		const diagnostic = `analysis inconclusive: ${activeModels.size} selectable model states exceed state limit ${MAX_ADAPTIVE_PREFLIGHT_STATES}`;
@@ -250,7 +247,7 @@ export async function prepareAdaptivePreflight(wrapper: PromptWithModel, catalog
 			// Runtime restores the saved chain-start model for model-less targets;
 			// only an explicit target (or runtime override) inherits then-active state.
 			const preparationModel = effective.models.length ? activeModel : options.currentModel;
-			const prepared = await preparePromptExecution(effective, options.args, preparationModel, options.modelRegistry);
+			const prepared = await preparePromptExecution(effective, options.args, preparationModel, options.modelRegistry, { scopedModels: options.scopedModels });
 			if (!prepared || "message" in prepared) {
 				const issue = capSanitizedText(prepared && "message" in prepared ? prepared.message : `No available model from: ${effective.models.join(", ")}`, 500);
 				routes.set(activeKey, { cost: 0, selected: activeKey, issue });

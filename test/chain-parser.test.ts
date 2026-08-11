@@ -20,20 +20,6 @@ test("parseChainDeclaration keeps quoted --loop tokens as step args", () => {
 	assert.deepEqual(parsed.steps, [{ name: "worker", args: ["--loop", "2"], loopCount: undefined }]);
 });
 
-test("parseChainDeclaration parses parallel() groups into parallel steps", () => {
-	const parsed = parseChainDeclaration("parallel(scan-fe, scan-be) -> review");
-	assert.deepEqual(parsed.invalidSegments, []);
-	assert.deepEqual(parsed.steps, [
-		{
-			parallel: [
-				{ name: "scan-fe", args: [], loopCount: undefined },
-				{ name: "scan-be", args: [], loopCount: undefined },
-			],
-		},
-		{ name: "review", args: [], loopCount: undefined },
-	]);
-});
-
 test("parseChainDeclaration rejects empty parallel() groups", () => {
 	const parsed = parseChainDeclaration("parallel() -> review");
 	assert.deepEqual(parsed.steps, [{ name: "review", args: [], loopCount: undefined }]);
@@ -44,21 +30,6 @@ test("parseChainDeclaration rejects nested parallel() groups", () => {
 	const parsed = parseChainDeclaration("parallel(scan-fe, parallel(scan-be, scan-infra)) -> review");
 	assert.deepEqual(parsed.steps, [{ name: "review", args: [], loopCount: undefined }]);
 	assert.deepEqual(parsed.invalidSegments, ["parallel(scan-fe, parallel(scan-be, scan-infra))"]);
-});
-
-test("parseChainSteps splits chain separators outside parallel() groups", () => {
-	const parsed = parseChainSteps("parallel(scan-fe --loop 2, scan-be) -> review -- --global --flag");
-	assert.deepEqual(parsed.invalidSegments, []);
-	assert.deepEqual(parsed.steps, [
-		{
-			parallel: [
-				{ name: "scan-fe", args: [], loopCount: 2 },
-				{ name: "scan-be", args: [], loopCount: undefined },
-			],
-		},
-		{ name: "review", args: [], loopCount: undefined },
-	]);
-	assert.deepEqual(parsed.sharedArgs, ["--global", "--flag"]);
 });
 
 test("parseChainDeclaration parses and strips per-step --with-context", () => {

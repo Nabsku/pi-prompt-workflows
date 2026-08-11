@@ -200,10 +200,10 @@ test("run-prompt rejects queueing when stored command context is missing", async
 
 		const tool = pi.tools.get("run-prompt");
 		assert.ok(tool);
-		const result = await tool.execute("tool-call", { command: "example" });
-
-		assert.equal(result.content[0].text, "No command context. Run any prompt command first to initialize.");
-		assert.equal(result.isError, true);
+		await assert.rejects(
+			() => tool.execute("tool-call", { command: "example" }),
+			/No command context\. Run any prompt command first to initialize\./,
+		);
 	});
 });
 
@@ -227,10 +227,38 @@ test("run-prompt treats non-string command payloads as typed input errors", asyn
 
 		const tool = pi.tools.get("run-prompt");
 		assert.ok(tool);
-		const result = await tool.execute("tool-call", { command: 123 as never });
+		await assert.rejects(
+			() => tool.execute("tool-call", { command: 123 as never }),
+			/No command specified\./,
+		);
+	});
+});
 
-		assert.equal(result.content[0].text, "No command specified.");
-		assert.equal(result.isError, true);
+test("run-prompt rejects a second queued command as a tool error", async () => {
+	await withTempHome(async () => {
+		const pi = new FakePi();
+		let storedCtx: any = {};
+		const manager = createToolManager(pi as never, {
+			isActive: () => false,
+			getStoredCtx: () => storedCtx,
+			setStoredCtx: (ctx) => {
+				storedCtx = ctx;
+			},
+			executeCommand: async () => {},
+		});
+		manager.registerCommand();
+
+		const command = pi.commands.get("prompt-tool");
+		assert.ok(command);
+		await command.handler("on", createNotifyCtx([]));
+
+		const tool = pi.tools.get("run-prompt");
+		assert.ok(tool);
+		await tool.execute("tool-call", { command: "first" });
+		await assert.rejects(
+			() => tool.execute("tool-call", { command: "second" }),
+			/A prompt command is already queued\. Wait for it to execute\./,
+		);
 	});
 });
 

@@ -7,77 +7,56 @@ import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { captureStepExecutionOutcome, checkPromptExecutionBudget, preparePromptExecution, PromptBudgetExceededError, type StepExecutionOutcome } from "./prompt-execution.js";
 import type { PromptWithModel } from "./prompt-loader.js";
 import { notify } from "./notifications.js";
-import { buildSkillLoadedMessage, getRequestedSkills, resolvePromptSkills, type RuntimeSkillCommand } from "./prompt-skills.js";
+import { buildSkillLoadedMessage, getRequestedSkills, inspectDelegatedCwd, resolvePromptSkills, type RuntimeSkillCommand } from "./prompt-skills.js";
 import {
 	DEFAULT_SUBAGENT_NAME,
 	appendDelegatedLiveOutput,
 	clearDelegatedLiveState,
-	getDelegatedLiveState,
 	PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT,
 	PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE,
 	PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT,
 	PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT,
 	PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT,
 	PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT,
-	resolveDelegatedAgent,
 	updateDelegatedLiveState,
-	type DelegatedSubagentParallelResult,
 	type DelegatedSubagentRequest,
 	type DelegatedSubagentResponse,
-	type DelegatedSubagentTask,
-	type DelegatedSubagentTaskProgress,
+	type DelegatedSubagentStatus,
 	type DelegatedSubagentUpdate,
+	type DelegatedSubagentUsage,
 } from "./subagent-runtime.js";
 import type { SubagentOverride } from "./args.js";
 import { createDelegatedProgressWidget, DELEGATED_WIDGET_KEY } from "./subagent-widget.js";
+import {
+	captureGitWorktreeSnapshot,
+	compareGitWorktreeSnapshots,
+	type GitWorktreeSnapshot,
+} from "./git-worktree-snapshot.js";
 
-interface DelegatedPromptBaseOptions {
+interface DelegatedPromptOptions {
 	pi: ExtensionAPI;
 	ctx: ExtensionContext;
 	currentModel: Model<any> | undefined;
+	prompt: PromptWithModel;
+	args: string[];
 	override?: SubagentOverride;
 	signal?: AbortSignal;
 	inheritedModel?: Model<any>;
 	taskPreamble?: string;
-	worktree?: boolean;
-	allowPartialFailures?: boolean;
-}
-
-interface DelegatedSinglePromptOptions extends DelegatedPromptBaseOptions {
-	prompt: PromptWithModel;
-	args: string[];
-	parallel?: never;
-}
-
-interface DelegatedParallelTaskInput {
-	prompt: PromptWithModel;
-	args: string[];
-	taskPrefix?: string;
-}
-
-interface DelegatedParallelPromptOptions extends DelegatedPromptBaseOptions {
-	parallel: DelegatedParallelTaskInput[];
-	prompt?: never;
-	args?: never;
-}
-
-type DelegatedPromptOptions = DelegatedSinglePromptOptions | DelegatedParallelPromptOptions;
-
-export interface DelegatedPromptParallelResult {
-	agent: string;
-	text: string;
-	messages: Message[];
-	isError: boolean;
-	errorText?: string;
 }
 
 export interface DelegatedPromptOutcome {
 	changed: boolean;
 	text: string;
 	agent: string;
-	preparedTasks: PreparedDelegatedTask[];
-	parallelResults?: DelegatedPromptParallelResult[];
 	messages?: Message[];
+}
+
+export class DelegatedPromptCancelledError extends Error {
+	constructor(message = "Delegated prompt cancelled.") {
+		super(message);
+		this.name = "DelegatedPromptCancelledError";
+	}
 }
 
 function extractTextFromBlocks(content: AssistantMessage["content"]): string {
@@ -101,49 +80,126 @@ function extractDelegatedText(messages: Message[]): string {
 	return "";
 }
 
-function delegatedMessagesChanged(messages: Message[]): boolean {
-	for (const message of messages) {
-		if (message.role !== "assistant") continue;
-		for (const block of (message as AssistantMessage).content) {
-			if (block.type !== "toolCall") continue;
-			if (block.name === "write" || block.name === "edit") return true;
-		}
-	}
-	return false;
-}
-
-function coerceMessages(messages: unknown[]): Message[] {
+function coerceMessages(messages: unknown[] | undefined): Message[] {
 	if (!Array.isArray(messages)) return [];
 	return messages as Message[];
 }
 
-function coerceParallelResults(parallelResults: DelegatedSubagentParallelResult[] | undefined): DelegatedPromptParallelResult[] {
-	if (!Array.isArray(parallelResults)) return [];
-	return parallelResults.map((result) => {
-		const messages = coerceMessages(result.messages);
-		return {
-			agent: result.agent,
-			text: extractDelegatedText(messages),
-			messages,
-			isError: result.isError === true,
-			errorText: result.errorText,
-		};
-	});
+function buildAssistantTextMessage(text: string): Message[] {
+	const trimmed = text.trim();
+	if (!trimmed) return [];
+	return [{ role: "assistant", content: [{ type: "text", text: trimmed }] }] as Message[];
 }
 
-function renderParallelDelegatedText(
-	results: Array<{
-		agent: string;
-		messages: Message[];
-	}>,
-): string {
-	return results
-		.map((result, index) => {
-			const text = extractDelegatedText(result.messages);
-			const body = text || "(no assistant text)";
-			return `=== Parallel Task ${index + 1} (${result.agent}) ===\n${body}`;
-		})
-		.join("\n\n");
+interface NormalizedDelegatedResponse {
+	requestId: string;
+	agent: string;
+	context: "fresh" | "fork";
+	model: string;
+	cwd: string;
+	messages: Message[];
+	status: DelegatedSubagentStatus;
+	failed: boolean;
+	usage?: DelegatedSubagentUsage;
+	error?: string;
+}
+
+const DELEGATED_SUBAGENT_STATUSES = new Set<DelegatedSubagentStatus>([
+	"completed",
+	"failed",
+	"timed_out",
+	"cancelled",
+	"interrupted",
+	"turn_budget_exhausted",
+	"tool_budget_exhausted",
+	"structured_output_failed",
+	"acceptance_failed",
+	"invalid_request",
+	"unavailable_context",
+	"duplicate_node",
+]);
+
+function normalizeDelegatedUsage(value: unknown): DelegatedSubagentUsage | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const usage = value as Record<string, unknown>;
+	const fields = ["input", "output", "cacheRead", "cacheWrite", "cost", "turns", "toolCalls", "durationMs"] as const;
+	if (!fields.every((field) => typeof usage[field] === "number" && Number.isFinite(usage[field]))) return undefined;
+	return {
+		input: usage.input as number,
+		output: usage.output as number,
+		cacheRead: usage.cacheRead as number,
+		cacheWrite: usage.cacheWrite as number,
+		cost: usage.cost as number,
+		turns: usage.turns as number,
+		toolCalls: usage.toolCalls as number,
+		durationMs: usage.durationMs as number,
+	};
+}
+
+function normalizeDelegatedResponse(
+	data: unknown,
+	request: DelegatedSubagentRequest,
+): NormalizedDelegatedResponse | undefined {
+	if (!data || typeof data !== "object") return undefined;
+	const payload = data as Partial<DelegatedSubagentResponse>;
+	if (payload.requestId !== request.requestId) return undefined;
+	if (typeof payload.status !== "string" || !DELEGATED_SUBAGENT_STATUSES.has(payload.status as DelegatedSubagentStatus)) return undefined;
+	if (payload.ownerRunId !== request.ownerRunId || payload.nodeId !== request.nodeId) return undefined;
+	const status = payload.status as DelegatedSubagentStatus;
+	const output = payload.result?.kind === "text" && typeof payload.result.text === "string"
+		? payload.result.text
+		: "";
+	const failed = status !== "completed";
+	return {
+		requestId: payload.requestId,
+		agent: payload.agent ?? request.agent,
+		context: request.context,
+		model: payload.model ?? request.model,
+		cwd: request.cwd,
+		messages: buildAssistantTextMessage(output),
+		status,
+		failed,
+		usage: normalizeDelegatedUsage(payload.usage),
+		error: payload.error ?? (failed ? status : undefined),
+	};
+}
+
+function captureDelegatedGitSnapshot(cwd: string): GitWorktreeSnapshot | undefined {
+	try {
+		return captureGitWorktreeSnapshot(cwd);
+	} catch {
+		return undefined;
+	}
+}
+
+function delegatedRunChanged(
+	before: GitWorktreeSnapshot | undefined,
+	cwd: string,
+	toolCalls: number,
+): boolean {
+	if (!before) {
+		// The structured bridge does not expose tool names. Outside an observable
+		// Git worktree, any tool call is conservatively treated as a change so a
+		// convergence loop does not stop before delegated work is complete.
+		return toolCalls > 0;
+	}
+	const after = captureDelegatedGitSnapshot(cwd);
+	if (!after) return true;
+	try {
+		return compareGitWorktreeSnapshots(before, after).changed;
+	} catch {
+		return true;
+	}
+}
+
+function delegatedCancelPayload(
+	request: DelegatedSubagentRequest,
+): Record<string, string> {
+	return {
+		requestId: request.requestId,
+		ownerRunId: request.ownerRunId,
+		nodeId: request.nodeId,
+	};
 }
 
 function resolveDelegationName(prompt: PromptWithModel, override?: SubagentOverride): string | undefined {
@@ -155,7 +211,7 @@ function resolveDelegationName(prompt: PromptWithModel, override?: SubagentOverr
 	return undefined;
 }
 
-export interface PreparedDelegatedTask {
+interface PreparedDelegatedTask {
 	promptName: string;
 	agent: string;
 	task: string;
@@ -164,8 +220,30 @@ export interface PreparedDelegatedTask {
 	cwd: string;
 }
 
+const approvedNestedProjectsBySession = new WeakMap<object, Set<string>>();
+
+async function approveNestedDelegatedProject(ctx: ExtensionContext, projectRoot: string): Promise<void> {
+	const sessionKey = ctx.sessionManager as object;
+	const approvedProjects = approvedNestedProjectsBySession.get(sessionKey);
+	if (approvedProjects?.has(projectRoot)) return;
+
+	const message =
+		`Separate approval is required for nested project configuration at \`${projectRoot}\`. ` +
+		"pi-subagents can load project-local agents, settings, skills, and extensions from this directory.";
+	if (!ctx.hasUI || typeof ctx.ui.confirm !== "function") {
+		throw new Error(`${message} Run this delegation in an interactive Pi session to approve it.`);
+	}
+	const approved = await ctx.ui.confirm("Approve nested delegated project", message, { timeout: 30_000 });
+	if (!approved) throw new Error(`${message} Approval was not granted.`);
+
+	const nextApprovedProjects = approvedProjects ?? new Set<string>();
+	nextApprovedProjects.add(projectRoot);
+	if (!approvedProjects) approvedNestedProjectsBySession.set(sessionKey, nextApprovedProjects);
+}
+
 async function prepareDelegatedTask(
-	task: DelegatedParallelTaskInput,
+	prompt: PromptWithModel,
+	args: string[],
 	ctx: ExtensionContext,
 	commands: RuntimeSkillCommand[],
 	currentModel: Model<any> | undefined,
@@ -173,56 +251,79 @@ async function prepareDelegatedTask(
 	inheritedModel: Model<any> | undefined,
 	taskPreamble: string | undefined,
 ): Promise<PreparedDelegatedTask> {
-	const requestedAgent = resolveDelegationName(task.prompt, override);
+	const requestedAgent = resolveDelegationName(prompt, override);
 	if (!requestedAgent) {
-		throw new Error(`Prompt \`${task.prompt.name}\` is not configured for delegated execution.`);
+		throw new Error(`Prompt \`${prompt.name}\` is not configured for delegated execution.`);
 	}
-	const effectiveCwd = task.prompt.cwd ?? ctx.cwd;
-	if (effectiveCwd !== ctx.cwd && !existsSync(effectiveCwd)) {
-		throw new Error(`cwd directory does not exist: ${effectiveCwd}`);
+	const requestedCwd = prompt.cwd ?? ctx.cwd;
+	if (!existsSync(requestedCwd)) {
+		throw new Error(`cwd directory does not exist: ${requestedCwd}`);
 	}
+	const inspectedCwd = inspectDelegatedCwd(ctx.cwd, requestedCwd, ctx.isProjectTrusted?.() !== false);
+	if (inspectedCwd.kind === "error") throw new Error(inspectedCwd.error);
+	if (inspectedCwd.value.nestedProjectRoot) {
+		await approveNestedDelegatedProject(ctx, inspectedCwd.value.nestedProjectRoot);
+	}
+	const verifiedCwd = inspectDelegatedCwd(ctx.cwd, requestedCwd, ctx.isProjectTrusted?.() !== false);
+	if (verifiedCwd.kind === "error") throw new Error(verifiedCwd.error);
+	if (
+		verifiedCwd.value.effectiveCwd !== inspectedCwd.value.effectiveCwd
+		|| verifiedCwd.value.nestedProjectRoot !== inspectedCwd.value.nestedProjectRoot
+	) {
+		throw new Error("Delegated cwd changed while project trust was being verified; refusing execution.");
+	}
+	const effectiveCwd = verifiedCwd.value.effectiveCwd;
 	const agent = requestedAgent;
-	const preparationOptions = inheritedModel === undefined ? undefined : { inheritedModel };
+	const preparationOptions = inheritedModel === undefined
+		? { scopedModels: ctx.scopedModels }
+		: { inheritedModel, scopedModels: ctx.scopedModels };
 	const prepared = await preparePromptExecution(
-		task.prompt,
-		task.args,
+		prompt,
+		args,
 		currentModel,
 		ctx.modelRegistry,
 		preparationOptions,
 	);
 	if (!prepared) {
-		throw new Error(`No available model from: ${task.prompt.models.join(", ")}`);
+		throw new Error(`No available model from: ${prompt.models.join(", ")}`);
 	}
 	if ("message" in prepared) {
 		if (prepared.warning) notify(ctx, prepared.warning, "warning");
 		throw new Error(prepared.message);
 	}
 	if (prepared.warning) notify(ctx, prepared.warning, "warning");
-	const requestedSkills = getRequestedSkills(task.prompt);
-	const skillResolution = resolvePromptSkills(requestedSkills, ctx.cwd, commands);
+	const requestedSkills = getRequestedSkills(prompt);
+	const skillResolution = resolvePromptSkills(
+		requestedSkills,
+		effectiveCwd,
+		commands,
+		{ includeProjectSkills: true },
+	);
 	if (skillResolution.kind === "error") {
 		throw new Error(skillResolution.error);
 	}
-	const skillPreamble = skillResolution.kind === "ready" ? buildSkillLoadedMessage(skillResolution.skills).content : undefined;
+	const resolvedSkills = skillResolution.kind === "ready" ? skillResolution.skills : [];
+	const resolvedSkillPreamble = resolvedSkills.length > 0
+		? buildSkillLoadedMessage(resolvedSkills).content
+		: undefined;
 	let taskText = prepared.content;
-	if (!task.prompt.inheritContext && taskPreamble) {
+	if (!prompt.inheritContext && taskPreamble) {
 		taskText = `${taskPreamble}\n\n---\n\n${prepared.content}`;
 	}
-	if (skillPreamble) {
-		taskText = `${skillPreamble}\n\n---\n\n${taskText}`;
+	if (resolvedSkillPreamble) {
+		// Bind the exact content that the host validated, trust-filtered, and budgeted.
+		// Sending names would let the child resolve a same-name project skill instead.
+		taskText = `${resolvedSkillPreamble}\n\n---\n\n${taskText}`;
 	}
-	if (task.taskPrefix) {
-		taskText = `${task.taskPrefix}\n\n${taskText}`;
-	}
-	const budgetCheck = checkPromptExecutionBudget(task.prompt, taskText);
+	const budgetCheck = checkPromptExecutionBudget(prompt, taskText);
 	if (budgetCheck.warning) notify(ctx, budgetCheck.warning, "warning");
 	if (budgetCheck.message) throw new PromptBudgetExceededError(budgetCheck.message);
 
 	return {
-		promptName: task.prompt.name,
+		promptName: prompt.name,
 		agent,
 		task: taskText,
-		context: task.prompt.inheritContext ? "fork" : "fresh",
+		context: prompt.inheritContext ? "fork" : "fresh",
 		model: `${prepared.selectedModel.model.provider}/${prepared.selectedModel.model.id}`,
 		cwd: effectiveCwd,
 	};
@@ -232,113 +333,15 @@ function formatProgressStatus(update: DelegatedSubagentUpdate): string | undefin
 	if (update.currentTool) {
 		return `running ${update.currentTool}${update.currentToolArgs ? ` ${update.currentToolArgs}` : ""}`;
 	}
-	if (update.taskProgress?.some((task) => task.status === "running")) {
-		return "running";
-	}
 	if (update.toolCount && update.toolCount > 0) {
 		return `completed ${update.toolCount} tool${update.toolCount === 1 ? "" : "s"}`;
 	}
 	return undefined;
 }
 
-function formatParallelProgressStatus(update: DelegatedSubagentUpdate): string | undefined {
-	if (!update.taskProgress || update.taskProgress.length === 0) return undefined;
-	const completed = update.taskProgress.filter((task) => task.status === "completed").length;
-	return `parallel ${completed}/${update.taskProgress.length} running`;
-}
-
-function hasOwn<T extends object>(value: T, key: PropertyKey): boolean {
-	return Object.prototype.hasOwnProperty.call(value, key);
-}
-
 function sanitizeOutputLines(lines: string[] | undefined): string[] {
 	if (!lines || lines.length === 0) return [];
-	return lines.filter((line): line is string => typeof line === "string" && line.trim() && line.trim() !== "(running...)");
-}
-
-function collectNewOutputLines(previous: string[] | undefined, next: string[] | undefined): string[] {
-	const previousLines = sanitizeOutputLines(previous);
-	const nextLines = sanitizeOutputLines(next);
-	if (nextLines.length === 0) return [];
-	if (previousLines.length === 0) return nextLines;
-
-	const overlapLimit = Math.min(previousLines.length, nextLines.length);
-	for (let overlap = overlapLimit; overlap > 0; overlap--) {
-		let matches = true;
-		for (let index = 0; index < overlap; index++) {
-			if (previousLines[previousLines.length - overlap + index] !== nextLines[index]) {
-				matches = false;
-				break;
-			}
-		}
-		if (matches) {
-			return nextLines.slice(overlap);
-		}
-	}
-
-	return nextLines;
-}
-
-function mergeTaskProgress(
-	requestTasks: DelegatedSubagentTask[] | undefined,
-	existingProgress: DelegatedSubagentTaskProgress[] | undefined,
-	incomingProgress: DelegatedSubagentTaskProgress[] | undefined,
-): DelegatedSubagentTaskProgress[] | undefined {
-	if (!requestTasks || requestTasks.length === 0) return incomingProgress;
-
-	const merged = requestTasks.map((task, index) => {
-		const existing =
-			existingProgress?.find((entry) => entry.index === index) ??
-			existingProgress?.[index] ??
-			existingProgress?.find((entry) => entry.agent === task.agent);
-		return {
-			index,
-			agent: task.agent,
-			status: existing?.status ?? "pending",
-			currentTool: existing?.currentTool,
-			currentToolArgs: existing?.currentToolArgs,
-			recentOutput: existing?.recentOutput,
-			recentOutputLines: existing?.recentOutputLines,
-			recentTools: existing?.recentTools,
-			model: existing?.model ?? task.model,
-			toolCount: existing?.toolCount,
-			durationMs: existing?.durationMs,
-			tokens: existing?.tokens,
-		};
-	});
-
-	if (!incomingProgress || incomingProgress.length === 0) return merged;
-
-	const consumed = new Set<number>();
-	for (const entry of incomingProgress) {
-		let targetIndex =
-			typeof entry.index === "number" && entry.index >= 0 && entry.index < merged.length
-				? entry.index
-				: -1;
-
-		if (targetIndex < 0) {
-			targetIndex = merged.findIndex((task, index) => task.agent === entry.agent && !consumed.has(index));
-		}
-		if (targetIndex < 0) continue;
-		consumed.add(targetIndex);
-		const current = merged[targetIndex]!;
-		merged[targetIndex] = {
-			index: targetIndex,
-			agent: current.agent,
-			status: entry.status ?? current.status,
-			currentTool: hasOwn(entry, "currentTool") ? entry.currentTool : current.currentTool,
-			currentToolArgs: hasOwn(entry, "currentToolArgs") ? entry.currentToolArgs : current.currentToolArgs,
-			recentOutput: entry.recentOutput ?? current.recentOutput,
-			recentOutputLines: entry.recentOutputLines ?? current.recentOutputLines,
-			recentTools: entry.recentTools ?? current.recentTools,
-			model: entry.model ?? current.model,
-			toolCount: entry.toolCount ?? current.toolCount,
-			durationMs: entry.durationMs ?? current.durationMs,
-			tokens: entry.tokens ?? current.tokens,
-		};
-	}
-
-	return merged;
+	return lines.filter((line): line is string => typeof line === "string" && line.trim().length > 0 && line.trim() !== "(running...)");
 }
 
 async function requestDelegatedRun(
@@ -346,68 +349,21 @@ async function requestDelegatedRun(
 	ctx: ExtensionContext,
 	request: DelegatedSubagentRequest,
 	signal?: AbortSignal,
-): Promise<DelegatedSubagentResponse> {
+): Promise<NormalizedDelegatedResponse> {
+	if (signal?.aborted) throw new DelegatedPromptCancelledError();
 	return await new Promise((resolve, reject) => {
-		const requestLabel = request.tasks && request.tasks.length > 0 ? `parallel(${request.tasks.length})` : request.agent;
+		const requestLabel = request.agent;
 		let done = false;
 		let started = false;
-		const startTimeoutMs = Number(process.env.PI_PROMPT_SUBAGENT_START_TIMEOUT_MS ?? "15000");
-		const effectiveTimeout = Number.isFinite(startTimeoutMs) && startTimeoutMs > 0 ? startTimeoutMs : 15_000;
-		const startTimeout = setTimeout(() => {
-			finish(() => reject(new Error(`Delegated subagent \`${requestLabel}\` did not start within ${Math.round(effectiveTimeout / 1000)}s. Check that the subagent extension is loaded.`)));
-		}, effectiveTimeout);
-
-		const onStarted = (data: unknown) => {
-			if (done || !data || typeof data !== "object") return;
-			const requestId = (data as { requestId?: unknown }).requestId;
-			if (requestId !== request.requestId) return;
-			started = true;
-			clearTimeout(startTimeout);
-			updateDelegatedLiveState(request.requestId, {
-				status: "running...",
-				toolCount: 0,
-				recentOutput: [],
-				taskProgress: request.tasks?.map((task, index) => ({ index, agent: task.agent, status: "pending" })) ?? [],
-			});
-			showWidget();
-		};
-
-		const onResponse = (data: unknown) => {
-			if (done || !data || typeof data !== "object") return;
-			const payload = data as Partial<DelegatedSubagentResponse>;
-			if (payload.requestId !== request.requestId) return;
-			clearTimeout(startTimeout);
-			updateDelegatedLiveState(request.requestId, {
-				status: payload.isError ? "failed" : "completed",
-				taskProgress: payload.parallelResults?.map((result, index) => ({
-					index,
-					agent: result.agent,
-					status: result.isError ? "failed" : "completed",
-				})),
-			});
-			clearWidget();
-			finish(() => resolve(payload as DelegatedSubagentResponse));
-		};
-
 		let lastProgressStatus = "";
 		let widgetSet = false;
 		let refreshTimer: ReturnType<typeof setInterval> | null = null;
-
-		const showWidget = () => {
-			if (!ctx.hasUI || widgetSet) return;
-			widgetSet = true;
-			ctx.ui.setWidget(
-				DELEGATED_WIDGET_KEY,
-				(_tui, theme) => createDelegatedProgressWidget(request.requestId, request.agent, request.context, request.task, request.tasks, theme, request.model),
-				{ placement: "aboveEditor" },
-			);
-			// Force TUI repaints every second so the elapsed timer ticks during idle periods
-			refreshTimer = setInterval(() => {
-				if (done) return;
-				const statusLine = lastProgressStatus || "running...";
-				ctx.ui.setStatus("prompt-subagent", `delegating to ${requestLabel} · ${statusLine}`);
-			}, 1000);
-		};
+		let startTimeout: ReturnType<typeof setTimeout>;
+		let onAbort: (() => void) | undefined;
+		let onTerminalInput: (() => void) | undefined;
+		let unsubscribeStarted = () => {};
+		let unsubscribeResponse = () => {};
+		let unsubscribeUpdate = () => {};
 
 		const clearWidget = () => {
 			if (refreshTimer) {
@@ -419,92 +375,6 @@ async function requestDelegatedRun(
 				widgetSet = false;
 			}
 		};
-
-		const onUpdate = (data: unknown) => {
-			if (done || !data || typeof data !== "object") return;
-			const update = data as DelegatedSubagentUpdate;
-			if (update.requestId !== request.requestId) return;
-
-			const previousTaskProgress = getDelegatedLiveState(request.requestId)?.taskProgress;
-			const mergedTaskProgress = mergeTaskProgress(
-				request.tasks,
-				previousTaskProgress,
-				update.taskProgress,
-			);
-			const isParallel = (request.tasks?.length ?? 0) > 0;
-			const progressStatus = isParallel
-				? formatParallelProgressStatus({
-					...update,
-					taskProgress: mergedTaskProgress,
-				}) ?? formatProgressStatus(update)
-				: formatProgressStatus(update);
-			if (progressStatus) {
-				lastProgressStatus = progressStatus;
-			}
-
-			updateDelegatedLiveState(request.requestId, {
-				status: progressStatus ?? (lastProgressStatus || "running..."),
-				currentTool: update.currentTool,
-				currentToolArgs: update.currentToolArgs,
-				recentTools: update.recentTools,
-				model: update.model,
-				toolCount: update.toolCount,
-				durationMs: update.durationMs,
-				tokens: update.tokens,
-				taskProgress: mergedTaskProgress,
-			});
-
-			if (!isParallel) {
-				if (update.recentOutputLines && update.recentOutputLines.length > 0) {
-					updateDelegatedLiveState(request.requestId, {
-						recentOutput: sanitizeOutputLines(update.recentOutputLines),
-					});
-				} else {
-					appendDelegatedLiveOutput(request.requestId, update.recentOutput);
-				}
-			}
-
-			if (isParallel && mergedTaskProgress) {
-				for (const task of mergedTaskProgress) {
-					const previousTask =
-						previousTaskProgress?.find((entry) => entry.index === task.index) ??
-						previousTaskProgress?.find((entry) => entry.agent === task.agent);
-
-					const newOutputLines = collectNewOutputLines(previousTask?.recentOutputLines, task.recentOutputLines);
-					if (newOutputLines.length > 0) {
-						for (const line of newOutputLines) {
-							appendDelegatedLiveOutput(request.requestId, line);
-						}
-						continue;
-					}
-
-					if (!task.recentOutput || task.recentOutput === previousTask?.recentOutput) {
-						continue;
-					}
-					appendDelegatedLiveOutput(request.requestId, task.recentOutput);
-				}
-			}
-			if (!ctx.hasUI) return;
-			const statusLine = progressStatus ?? (lastProgressStatus || "running...");
-			ctx.ui.setStatus("prompt-subagent", `delegating to ${requestLabel} · ${statusLine}`);
-		};
-
-		const onTerminalInput = ctx.hasUI
-			? ctx.ui.onTerminalInput((input) => {
-				if (!matchesKey(input, Key.escape)) return undefined;
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT, {
-					requestId: request.requestId,
-					reason: "escape",
-				});
-				finish(() => reject(new Error("Delegated prompt cancelled.")));
-				return { consume: true };
-			})
-			: undefined;
-
-		const unsubscribeStarted = pi.events.on(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, onStarted);
-		const unsubscribeResponse = pi.events.on(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, onResponse);
-		const unsubscribeUpdate = pi.events.on(PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT, onUpdate);
-		let onAbort: (() => void) | undefined;
 
 		const finish = (next: () => void) => {
 			if (done) return;
@@ -519,16 +389,108 @@ async function requestDelegatedRun(
 			next();
 		};
 
-		onAbort = () => {
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT, {
-				requestId: request.requestId,
-				reason: "abort",
+		const startTimeoutMs = Number(process.env.PI_PROMPT_SUBAGENT_START_TIMEOUT_MS ?? "15000");
+		const effectiveTimeout = Number.isFinite(startTimeoutMs) && startTimeoutMs > 0 ? startTimeoutMs : 15_000;
+		startTimeout = setTimeout(() => {
+			finish(() => reject(new Error(`Delegated subagent \`${requestLabel}\` did not start within ${Math.round(effectiveTimeout / 1000)}s. Check that the subagent extension is loaded.`)));
+		}, effectiveTimeout);
+
+		const showWidget = () => {
+			if (!ctx.hasUI || widgetSet) return;
+			widgetSet = true;
+			ctx.ui.setWidget(
+				DELEGATED_WIDGET_KEY,
+				(_tui, theme) => createDelegatedProgressWidget(request.requestId, request.agent, request.context, request.task, theme, request.model),
+				{ placement: "aboveEditor" },
+			);
+			refreshTimer = setInterval(() => {
+				if (done) return;
+				const statusLine = lastProgressStatus || "running...";
+				ctx.ui.setStatus("prompt-subagent", `delegating to ${requestLabel} · ${statusLine}`);
+			}, 1000);
+		};
+
+		const matchesIdentity = (data: unknown): data is { requestId: string; ownerRunId: string; nodeId: string } => {
+			if (!data || typeof data !== "object" || Array.isArray(data)) return false;
+			const value = data as Record<string, unknown>;
+			return value.requestId === request.requestId
+				&& value.ownerRunId === request.ownerRunId
+				&& value.nodeId === request.nodeId;
+		};
+
+		const onStarted = (data: unknown) => {
+			if (done || !matchesIdentity(data)) return;
+			started = true;
+			clearTimeout(startTimeout);
+			updateDelegatedLiveState(request.requestId, {
+				status: "running...",
+				toolCount: 0,
+				recentOutput: [],
 			});
-			finish(() => reject(new Error("Delegated prompt cancelled.")));
+			showWidget();
+		};
+
+		const onResponse = (data: unknown) => {
+			if (done || !data || typeof data !== "object") return;
+			const payload = normalizeDelegatedResponse(data, request);
+			if (!payload) return;
+			clearTimeout(startTimeout);
+			updateDelegatedLiveState(request.requestId, {
+				status: payload.failed ? "failed" : "completed",
+			});
+			clearWidget();
+			finish(() => resolve(payload));
+		};
+
+		const onUpdate = (data: unknown) => {
+			if (done || !matchesIdentity(data)) return;
+			const update = data as DelegatedSubagentUpdate;
+			const progressStatus = formatProgressStatus(update);
+			if (progressStatus) lastProgressStatus = progressStatus;
+
+			updateDelegatedLiveState(request.requestId, {
+				status: progressStatus ?? (lastProgressStatus || "running..."),
+				currentTool: update.currentTool,
+				currentToolArgs: update.currentToolArgs,
+				recentTools: update.recentTools,
+				model: update.model,
+				toolCount: update.toolCount,
+				durationMs: update.durationMs,
+				tokens: update.tokens,
+			});
+			if (update.recentOutputLines && update.recentOutputLines.length > 0) {
+				updateDelegatedLiveState(request.requestId, {
+					recentOutput: sanitizeOutputLines(update.recentOutputLines),
+				});
+			} else {
+				appendDelegatedLiveOutput(request.requestId, update.recentOutput);
+			}
+
+			if (!ctx.hasUI) return;
+			const statusLine = progressStatus ?? (lastProgressStatus || "running...");
+			ctx.ui.setStatus("prompt-subagent", `delegating to ${requestLabel} · ${statusLine}`);
+		};
+
+		onTerminalInput = ctx.mode === "tui"
+			? ctx.ui.onTerminalInput((input) => {
+				if (!matchesKey(input, Key.escape)) return undefined;
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT, delegatedCancelPayload(request));
+				finish(() => reject(new DelegatedPromptCancelledError()));
+				return { consume: true };
+			})
+			: undefined;
+
+		unsubscribeStarted = pi.events.on(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, onStarted);
+		unsubscribeResponse = pi.events.on(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, onResponse);
+		unsubscribeUpdate = pi.events.on(PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT, onUpdate);
+
+		onAbort = () => {
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT, delegatedCancelPayload(request));
+			finish(() => reject(new DelegatedPromptCancelledError()));
 		};
 		if (signal) {
 			if (signal.aborted) {
-				onAbort();
+				finish(() => reject(new DelegatedPromptCancelledError()));
 				return;
 			}
 			signal.addEventListener("abort", onAbort, { once: true });
@@ -536,173 +498,96 @@ async function requestDelegatedRun(
 
 		pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, request);
 
-		// The bridge emits STARTED_EVENT synchronously during the REQUEST_EVENT
-		// emit (all sync before the first await in the async handler chain).
-		// If started is still false, no bridge received the request.
-		if (!started && done) return; // already finished (e.g. response came synchronously)
+		// The bridge emits STARTED_EVENT synchronously during REQUEST_EVENT.
+		if (!started && done) return;
 		if (!started) {
 			finish(() => reject(new Error(
 				`No loaded pi-subagents bridge responded for \`${requestLabel}\`. ` +
 				`Ensure the subagent extension is loaded and has no name conflicts with other extensions.`,
 			)));
-			return;
 		}
 	});
 }
 
-export async function executeSubagentPromptStep(options: DelegatedPromptOptions): Promise<DelegatedPromptOutcome | undefined> {
-	const { pi, ctx, currentModel, override, signal, inheritedModel, taskPreamble, allowPartialFailures } = options;
-	const commands = typeof (pi as { getCommands?: () => RuntimeSkillCommand[] }).getCommands === "function" ? (pi as { getCommands: () => RuntimeSkillCommand[] }).getCommands() : [];
-	const isParallelRequest = "parallel" in options;
-
-	const tasks = isParallelRequest
-		? options.parallel
-		: [{ prompt: options.prompt, args: options.args }];
-	if (tasks.length === 0) return undefined;
-
-	const preparedTasks: PreparedDelegatedTask[] = [];
-	for (const task of tasks) {
-		const preparedTask = await prepareDelegatedTask(task, ctx, commands, currentModel, override, inheritedModel, taskPreamble);
-		preparedTasks.push(preparedTask);
-	}
-
-	const requestContext = preparedTasks[0]!.context;
-	const requestCwd = preparedTasks[0]!.cwd;
-	for (const preparedTask of preparedTasks) {
-		if (preparedTask.context !== requestContext) {
-			throw new Error("Parallel delegated prompts must share the same inheritContext setting.");
-		}
-		if (options.worktree === true && preparedTask.cwd !== requestCwd) {
-			throw new Error("Parallel delegated prompts with worktree enabled must share the same cwd setting.");
-		}
-	}
-
-	const request: DelegatedSubagentRequest = {
-		requestId: randomUUID(),
-		agent: preparedTasks[0]!.agent,
-		task: preparedTasks[0]!.task,
-		...(isParallelRequest
-			? {
-				tasks: preparedTasks.map<DelegatedSubagentTask>((task) => ({
-					agent: task.agent,
-					task: task.task,
-					model: task.model,
-					cwd: task.cwd,
-				})),
-			}
-			: {}),
-		context: requestContext,
-		model: preparedTasks[0]!.model,
-		cwd: requestCwd,
-		...(options.worktree ? { worktree: true } : {}),
-	};
-
-	const promptLabel = preparedTasks.map((task) => task.promptName).join(", ");
-	const statusLabel = isParallelRequest ? `parallel(${preparedTasks.length})` : preparedTasks[0]!.agent;
-	if (ctx.hasUI) {
-		ctx.ui.setStatus("prompt-subagent", `delegating to ${statusLabel}`);
-		ctx.ui.setWorkingMessage(isParallelRequest ? `Running delegated parallel prompts with ${statusLabel}...` : `Running delegated prompt with ${statusLabel}...`);
-	}
-	notify(
+export async function executeSubagentPromptStep(options: DelegatedPromptOptions): Promise<DelegatedPromptOutcome> {
+	const { pi, ctx, currentModel, prompt, args, override, signal, inheritedModel, taskPreamble } = options;
+	if (signal?.aborted) throw new DelegatedPromptCancelledError();
+	const commands = typeof (pi as { getCommands?: () => RuntimeSkillCommand[] }).getCommands === "function"
+		? (pi as { getCommands: () => RuntimeSkillCommand[] }).getCommands()
+		: [];
+	const preparedTask = await prepareDelegatedTask(
+		prompt,
+		args,
 		ctx,
-		isParallelRequest
-			? `Delegating parallel prompts (${promptLabel})`
-			: `Delegating prompt \`${preparedTasks[0]!.promptName}\` to subagent \`${preparedTasks[0]!.agent}\``,
-		"info",
+		commands,
+		currentModel,
+		override,
+		inheritedModel,
+		taskPreamble,
 	);
+	if (signal?.aborted) throw new DelegatedPromptCancelledError();
+
+	const requestId = randomUUID();
+	const request: DelegatedSubagentRequest = {
+		requestId,
+		ownerRunId: requestId,
+		nodeId: "single",
+		agent: preparedTask.agent,
+		task: preparedTask.task,
+		context: preparedTask.context,
+		model: preparedTask.model,
+		cwd: preparedTask.cwd,
+		result: { kind: "text" },
+	};
+	const beforeSnapshot = captureDelegatedGitSnapshot(preparedTask.cwd);
+
+	if (ctx.hasUI) {
+		ctx.ui.setStatus("prompt-subagent", `delegating to ${preparedTask.agent}`);
+		ctx.ui.setWorkingMessage(`Running delegated prompt with ${preparedTask.agent}...`);
+	}
+	notify(ctx, `Delegating prompt \`${preparedTask.promptName}\` to subagent \`${preparedTask.agent}\``, "info");
 
 	try {
 		const response = await requestDelegatedRun(pi, ctx, request, signal);
-		if (response.isError) {
-			throw new Error(
-				`Delegated prompt execution failed: ${response.errorText || "unknown delegated error"}`,
-			);
+		if (response.status === "cancelled" || response.status === "interrupted") {
+			throw new DelegatedPromptCancelledError(`Delegated prompt ${response.status}.`);
 		}
-
-		if (isParallelRequest) {
-			const parallelResults = coerceParallelResults(response.parallelResults);
-			if (parallelResults.length === 0) {
-				throw new Error("Delegated parallel execution returned no results.");
-			}
-			const failures = parallelResults.filter((result) => result.isError);
-			if (!allowPartialFailures && failures.length > 0) {
-				const failureText = failures
-					.map((failure) => `${failure.agent}: ${failure.errorText || "unknown delegated error"}`)
-					.join("; ");
-				throw new Error(`Delegated parallel execution failed: ${failureText}`);
-			}
-
-			const text = response.contentText?.trim() || renderParallelDelegatedText(parallelResults);
-			const changed =
-				parallelResults.some((result) => delegatedMessagesChanged(result.messages))
-				|| text.includes("=== Worktree Changes ===");
-			pi.sendMessage({
-				customType: PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE,
-				content: text,
-				display: true,
-				details: {
-					requestId: response.requestId,
-					agent: request.agent,
-					task: preparedTasks.map((task) => task.task).join("\n\n"),
-					context: response.context,
-					model: response.model,
-					messages: [],
-					parallelResults,
-					text,
-					changed,
-					isError: false,
-					errorText: response.errorText,
-				},
-			});
-
-			return {
-				changed,
-				text,
-				agent: request.agent,
-				preparedTasks,
-				parallelResults,
-			};
+		if (response.failed) {
+			throw new Error(`Delegated prompt execution failed: ${response.error || response.status}`);
 		}
 
 		const messages = coerceMessages(response.messages);
 		const text = extractDelegatedText(messages);
-		if (!text) {
-			throw new Error("Delegated subagent returned no assistant text.");
-		}
+		if (!text) throw new Error("Delegated subagent returned no assistant text.");
 
-		const changed = delegatedMessagesChanged(messages);
+		const changed = delegatedRunChanged(beforeSnapshot, preparedTask.cwd, response.usage?.toolCalls ?? 0);
 		pi.sendMessage({
 			customType: PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE,
 			content: text,
 			display: true,
 			details: {
 				requestId: response.requestId,
-				agent: preparedTasks[0]!.agent,
+				agent: preparedTask.agent,
 				task: request.task,
 				context: response.context,
 				model: response.model,
 				messages,
+				usage: response.usage,
 				text,
 				changed,
-				isError: false,
-				errorText: response.errorText,
 			},
 		});
 
 		return {
 			changed,
 			text,
-			agent: preparedTasks[0]!.agent,
-			preparedTasks,
+			agent: preparedTask.agent,
 			messages,
 		};
 	} catch (error) {
+		if (error instanceof DelegatedPromptCancelledError) throw error;
 		const cause = error instanceof Error ? error : new Error(String(error));
-		const responseText = cause.message;
-		if (isParallelRequest) {
-			throw new Error(`Parallel delegated prompts (${promptLabel}) failed: ${responseText}`, { cause });
-		}
-		throw new Error(`Prompt \`${preparedTasks[0]!.promptName}\` delegated subagent \`${preparedTasks[0]!.agent}\` failed: ${responseText}`, { cause });
+		throw new Error(`Prompt \`${preparedTask.promptName}\` delegated subagent \`${preparedTask.agent}\` failed: ${cause.message}`, { cause });
 	} finally {
 		clearDelegatedLiveState(request.requestId);
 		if (ctx.hasUI) {
@@ -712,7 +597,7 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 	}
 }
 
-/** Adaptive-runtime adapter; executeSubagentPromptStep keeps its legacy throw semantics. */
+/** Adaptive-runtime adapter; executeSubagentPromptStep keeps its existing throw semantics. */
 export async function executeSubagentPromptStepOutcome(
 	options: DelegatedPromptOptions,
 ): Promise<StepExecutionOutcome<DelegatedPromptOutcome | undefined>> {

@@ -4,7 +4,6 @@ import { PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE } from "./subagent-runtime.js";
 
 interface DelegatedMessageDetails {
 	messages?: Message[];
-	parallelResults?: Array<{ messages?: Message[] }>;
 	text?: string;
 	changed?: boolean;
 }
@@ -66,12 +65,8 @@ function collectSummaryData(entries: SessionEntry[]): CollectedSummaryData {
 
 		const delegated = delegatedDetails(entry);
 		if (!delegated) continue;
-		const messageGroups =
-			delegated.parallelResults && delegated.parallelResults.length > 0
-				? delegated.parallelResults.map((result) => result.messages ?? [])
-				: delegated.messages ? [delegated.messages] : [];
-		for (const messages of messageGroups) {
-			const collected = collectAssistantActions(messages, filesRead, filesWritten);
+		if (delegated.messages) {
+			const collected = collectAssistantActions(delegated.messages, filesRead, filesWritten);
 			commandCount += collected.commandCount;
 			if (collected.lastText) lastAssistantText = collected.lastText;
 		}
@@ -127,6 +122,11 @@ export function generateChainStepSummary(entries: SessionEntry[], stepLabel: str
 	return formatSummary(`Step ${stepNumber} — ${stepLabel}:`, entries);
 }
 
+export function getLastAssistantText(entries: SessionEntry[]): string | undefined {
+	const { lastAssistantText } = collectSummaryData(entries);
+	return lastAssistantText || undefined;
+}
+
 export function didIterationMakeChanges(entries: SessionEntry[]): boolean {
 	for (const entry of entries) {
 		if (entry.type === "message") {
@@ -141,17 +141,11 @@ export function didIterationMakeChanges(entries: SessionEntry[]): boolean {
 		const delegated = delegatedDetails(entry);
 		if (!delegated) continue;
 		if (delegated.changed === true) return true;
-		const delegatedGroups =
-			delegated.parallelResults && delegated.parallelResults.length > 0
-				? delegated.parallelResults.map((result) => result.messages ?? [])
-				: [delegated.messages ?? []];
-		for (const messages of delegatedGroups) {
-			for (const message of messages) {
-				if (message.role !== "assistant") continue;
-				for (const block of (message as AssistantMessage).content) {
-					if (block.type !== "toolCall") continue;
-					if (block.name === "write" || block.name === "edit") return true;
-				}
+		for (const message of delegated.messages ?? []) {
+			if (message.role !== "assistant") continue;
+			for (const block of (message as AssistantMessage).content) {
+				if (block.type !== "toolCall") continue;
+				if (block.name === "write" || block.name === "edit") return true;
 			}
 		}
 	}

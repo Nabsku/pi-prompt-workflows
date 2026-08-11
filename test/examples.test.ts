@@ -32,12 +32,9 @@ test("packaged examples load as prompt commands", () => {
 		const diagnostics = result.diagnostics.map((item) => item.message).join("\n");
 
 		assert.equal(diagnostics, "");
-		assert.deepEqual([...result.prompts.keys()].sort(), ["adaptive-review", "adaptive-status", "adaptive-test", "adaptive-validate", "best-of-n", "best-of-n-smoke", "hello", "interactive-inputs", "review"]);
+		assert.deepEqual([...result.prompts.keys()].sort(), ["adaptive-review", "adaptive-status", "adaptive-test", "adaptive-validate", "hello", "interactive-inputs", "review"]);
 		assert.deepEqual(result.prompts.get("hello")?.models, []);
 		assert.deepEqual(result.prompts.get("review")?.models, []);
-		assert.equal(result.prompts.get("best-of-n-smoke")?.workers?.length, 1);
-		assert.equal(result.prompts.get("best-of-n-smoke")?.reviewers?.length, 1);
-		assert.equal(result.prompts.get("best-of-n-smoke")?.finalApplier, undefined);
 	});
 });
 

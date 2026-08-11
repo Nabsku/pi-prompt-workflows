@@ -1,3 +1,5 @@
+import { REMOVED_LEGACY_RUNTIME_FLAGS } from "./args.js";
+
 export type PromptInputType = "string" | "choice" | "boolean";
 
 export interface PromptInputDefinition {
@@ -27,10 +29,10 @@ const INPUT_NAME = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 
 // This is deliberately explicit. Add a spelling here when a runtime extractor is added.
 export const RUNTIME_FLAG_ALIASES = new Set([
-	"--loop", "--fresh", "--converge", "--no-converge", "--chain-context", "--worktree",
-	"--subagent", "--fork", "--cwd", "--model", "--preset", "--plain",
-	"--tui", "--show-skills", "--keep-artifacts", "--id", "--run",
-	"--limit", "--with-context", "--workers", "--workers-append", "--reviewers", "--reviewers-append", "--final-applier", "--final-applier-append",
+	"--loop", "--fresh", "--converge", "--no-converge", "--chain-context",
+	"--subagent", "--fork", "--cwd", "--model", "--plain",
+	"--tui", "--show-skills", "--id", "--run", "--limit", "--with-context",
+	...REMOVED_LEGACY_RUNTIME_FLAGS,
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -127,17 +129,12 @@ export function inputModeEligibilityError(prompt: {
 	inputs?: PromptInputSchema;
 	chain?: unknown;
 	loop?: unknown;
-	workers?: unknown;
-	reviewers?: unknown;
-	finalApplier?: unknown;
-	preset?: unknown;
 	deterministic?: unknown;
 	subagent?: unknown;
-	parallel?: unknown;
 }): string | undefined {
 	if (!prompt.inputs) return undefined;
-	if (prompt.chain || prompt.loop !== undefined || prompt.workers || prompt.reviewers || prompt.finalApplier || prompt.preset || prompt.deterministic || prompt.subagent || prompt.parallel) {
-		return "Prompt inputs are only supported on ordinary prompts without loops, chains, delegation, compare, or deterministic execution";
+	if (prompt.chain || prompt.loop !== undefined || prompt.deterministic || prompt.subagent) {
+		return "Prompt inputs are only supported on ordinary prompts without loops, chains, delegation, or deterministic execution";
 	}
 	return undefined;
 }
@@ -196,7 +193,7 @@ export function validatePromptInputReferences(content: string, schema: PromptInp
 	}
 	for (const match of content.matchAll(/<if-input\s+name="([^"]*)"\s+is="([^"]*)"/g)) {
 		const definition = schema[match[1]];
-		if (definition?.type === "choice" && !definition.options.includes(match[2])) errors.push(`input conditional ${JSON.stringify(match[1])} has impossible value ${JSON.stringify(match[2])}`);
+		if (definition?.type === "choice" && !definition.options?.includes(match[2])) errors.push(`input conditional ${JSON.stringify(match[1])} has impossible value ${JSON.stringify(match[2])}`);
 		if (definition?.type === "boolean" && match[2] !== "true" && match[2] !== "false") errors.push(`input conditional ${JSON.stringify(match[1])} has invalid boolean value ${JSON.stringify(match[2])}`);
 	}
 	if (content.includes("<if-input") && !content.includes("</if-input>")) errors.push("missing closing </if-input> tag");

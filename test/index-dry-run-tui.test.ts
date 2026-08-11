@@ -306,7 +306,7 @@ test("TUI /dry-run-prompt carries the real include graph into the inspector Incl
 
 		assert.equal(pi.customCalls.length, 1);
 		const inspector = pi.customComponents.at(-1) as { handleInput(data: string): void; render(width: number): string[] };
-		inspector.handleInput("6");
+		inspector.handleInput("5");
 		const rendered = inspector.render(1000).join("\n");
 		assert.match(rendered, /\[Includes\]/);
 		assert.match(rendered, /- review \[ok\] .*\.pi\/prompts\/review\.md/);
@@ -325,11 +325,11 @@ test("TUI /dry-run-prompt keeps a permanent Includes pane with No includes for p
 
 		assert.equal(pi.customCalls.length, 1);
 		const inspector = pi.customComponents.at(-1) as { handleInput(data: string): void; render(width: number): string[] };
-		inspector.handleInput("6");
+		inspector.handleInput("5");
 		const rendered = inspector.render(100).join("\n");
 		assert.match(rendered, /\[Includes\]/);
 		assert.match(rendered, /No includes\./);
-		assert.match(rendered, /pane 6\/9/);
+		assert.match(rendered, /pane 5\/8/);
 		assertNoExecutionSideEffects(pi);
 	});
 });
@@ -416,31 +416,6 @@ test("TUI picker unsupported selection surfaces dry-run diagnostic without execu
 		assert.equal(pi.customCalls.length, 1);
 		assert.equal(pi.notifications.at(-1)?.type, "error");
 		assert.match(pi.notifications.at(-1)?.message ?? "", /deterministic prompts is not supported/i);
-		assertNoExecutionSideEffects(pi);
-	});
-});
-
-test("TUI picker and inspector support preset-only compare prompts", async () => {
-	await setup("tui", async (cwd, pi, ctx) => {
-		mkdirSync(join(cwd, ".pi"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "best-of-n-presets.json"), `${JSON.stringify({ presets: { quick: { workers: [{ agent: "worker" }], reviewers: [{ agent: "reviewer" }] } } })}\n`);
-		writePrompt(cwd, "compare-preset", "---\nmodel: anthropic/claude-sonnet-4-20250514\nbestOfN:\n  preset: quick\n---\nReview $@");
-		await pi.emit("session_start", {}, ctx);
-		pi.customResults.push({ action: "selected", templateName: "compare-preset" });
-
-		await pi.commands.get("dry-run-prompt")!.handler!("", ctx);
-
-		assert.equal(pi.customCalls.length, 2, JSON.stringify(pi.notifications));
-		const picker = pi.customComponents.at(-2) as { render(width: number): string[] };
-		const rendered = picker.render(1000).join("\n");
-		assert.match(rendered, /compare-preset\s+project/);
-		assert.doesNotMatch(rendered, /compare-preset[\s\S]*unsupported|unsupported[\s\S]*compare-preset/);
-		const inspector = pi.customComponents.at(-1) as { handleInput(data: string): void; render(width: number): string[] };
-		inspector.handleInput("4");
-		const inspected = inspector.render(1000).join("\n");
-		assert.match(inspected, /\[Compare\]/);
-		assert.match(inspected, /Preset: quick \(project-approval-required\)/);
-		assert.match(inspected, /worker 1: agent=worker/);
 		assertNoExecutionSideEffects(pi);
 	});
 });
