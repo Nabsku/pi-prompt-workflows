@@ -1204,6 +1204,62 @@ test("refuses invalid, unknown, busy, and workflow prompt invocation requests", 
 	});
 });
 
+test("refuses unsafe prompt invocation paths before acknowledgement", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "unsafe.md"), "---\nrun: node -e 'setTimeout(() => {}, 1000)'\nhandoff: never\n---\nunsafe");
+		writeFileSync(join(cwd, ".pi", "prompts", "delegated.md"), `---\nmodel: ${MODEL_ID}\nsubagent: true\n---\ndelegated`);
+		writeFileSync(join(cwd, ".pi", "prompts", "plain.md"), `---\nmodel: ${MODEL_ID}\n---\nplain`);
+
+		const pi = new FakePi();
+		const acknowledgements: any[] = [];
+		const lifecycle: any[] = [];
+		let resolvePlainFinished!: (payload: any) => void;
+		const plainFinished = new Promise<any>((resolve) => { resolvePlainFinished = resolve; });
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_INVOKE_ACK_EVENT, (payload) => acknowledgements.push(payload));
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_STARTED_EVENT, (payload) => lifecycle.push(payload));
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, (payload) => {
+			lifecycle.push(payload);
+			if (payload.name === "plain") resolvePlainFinished(payload);
+		});
+		promptModelExtension(pi as never);
+		const { ctx } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+
+		for (const request of [
+			{ requestId: "unsafe-deterministic", name: "unsafe" },
+			{ requestId: "frontmatter-delegated", name: "delegated" },
+			{ requestId: "runtime-subagent", name: "plain", args: "--subagent worker" },
+			{ requestId: "runtime-fork", name: "plain", args: "--fork" },
+			{ requestId: "removed-legacy", name: "plain", args: "--workers 2" },
+		]) {
+			pi.events.emit(PROMPT_TEMPLATE_PROMPT_INVOKE_REQUEST_EVENT, {
+				protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION,
+				...request,
+			});
+		}
+
+		assert.deepEqual(acknowledgements.map((ack) => [ack.requestId, ack.accepted, ack.reason]), [
+			["unsafe-deterministic", false, "unsupported-context"],
+			["frontmatter-delegated", false, "unsupported-context"],
+			["runtime-subagent", false, "unsupported-context"],
+			["runtime-fork", false, "unsupported-context"],
+			["removed-legacy", false, "unsupported-context"],
+		]);
+		assert.deepEqual(lifecycle, []);
+
+		pi.events.emit(PROMPT_TEMPLATE_PROMPT_INVOKE_REQUEST_EVENT, {
+			protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION,
+			requestId: "plain-after-unsafe",
+			name: "plain",
+		});
+		const finished = await plainFinished;
+		assert.equal(finished.status, "completed");
+		assert.equal(acknowledgements.at(-1)?.accepted, true);
+	});
+});
+
 test("direct prompt command waits for tracked compaction before sending a user message", async () => {
 	await withTempHome(async (root) => {
 		const cwd = join(root, "project");
