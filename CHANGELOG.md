@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.2](https://github.com/Nabsku/pi-prompt-workflows/compare/v0.18.1...v0.18.2) (2026-08-25)
+
+
+### Bug Fixes
+
+* sync upstream safety and progress safeguards ([d57fa87](https://github.com/Nabsku/pi-prompt-workflows/commit/d57fa87a9447a45dacc3ac6d2f7f26f98972b32c))
+
 ## [Unreleased]
 
 ### Bug Fixes
