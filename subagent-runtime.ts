@@ -73,6 +73,14 @@ export interface DelegatedSubagentResultSpec {
 	kind: "text";
 }
 
+export interface DelegatedSubagentStarted {
+	requestId: string;
+	ownerRunId?: string;
+	nodeId?: string;
+	backend?: string;
+	ownsProgress?: boolean;
+}
+
 export interface DelegatedSubagentRequest {
 	requestId: string;
 	ownerRunId: string;

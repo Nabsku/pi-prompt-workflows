@@ -824,6 +824,45 @@ test("executeSubagentPromptStep ignores terminal input outside TUI mode", async 
 	});
 });
 
+test("executeSubagentPromptStep respects producer-owned progress widgets", async () => {
+	for (const scenario of [
+		{ label: "true", ownsProgress: true, suppress: true },
+		{ label: "false", ownsProgress: false, suppress: false },
+		{ label: "missing", suppress: false },
+		{ label: "non-boolean", ownsProgress: "true", suppress: false },
+	]) {
+		await withDelegationBridge(async (root) => {
+			const pi = createPi();
+			const ctx = createCtx(root);
+			ctx.hasUI = true;
+			const widgetCalls: unknown[][] = [];
+			ctx.ui.setWidget = (...args: unknown[]) => {
+				widgetCalls.push(args);
+			};
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+				const request = data as any;
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, {
+					requestId: request.requestId,
+					ownerRunId: request.ownerRunId,
+					nodeId: request.nodeId,
+					...(scenario.ownsProgress === undefined ? {} : { ownsProgress: scenario.ownsProgress }),
+				});
+				emitCompleted(pi, request, "Done.");
+			});
+
+			await executeSubagentPromptStep({
+				pi,
+				prompt,
+				args: [],
+				ctx,
+				currentModel: ctx.model,
+			});
+
+			assert.equal(widgetCalls.length, scenario.suppress ? 0 : 2, scenario.label);
+		});
+	}
+});
+
 test("executeSubagentPromptStep keeps single-task status running between tool calls", async () => {
 	await withDelegationBridge(async (root) => {
 		const pi = createPi();

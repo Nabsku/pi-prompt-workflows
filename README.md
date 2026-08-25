@@ -53,6 +53,7 @@ This package is an enhanced fork of [`pi-prompt-template-model`](https://github.
 - Duplicate prompt and prompt-library precedence is deterministic and reported with diagnostics.
 - Runtime flags are scoped to prompt types that support them. Removed `--worktree`, `--preset`, `--workers`, `--workers-append`, `--reviewers`, `--reviewers-append`, `--final-applier`, and `--keep-artifacts` controls fail before execution and dry-run instead of degrading silently. Quote a runtime-looking flag when it is prompt content.
 - Delegated execution accepts only a trusted session cwd or one of its child directories. The pi-subagents bridge loads child-local agent definitions and extensions from the delegated cwd. To delegate into another project root, start Pi in that root and approve project trust there.
+- Prompt invocation events fail closed for execution paths without a bounded completion contract. Deterministic prompts need `timeout`; delegated prompts, runtime `--subagent`/`--fork`, and removed legacy runtime flags are refused with `accepted: false` and `reason: "unsupported-context"`.
 
 ### Breaking or migration notes
 

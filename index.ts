@@ -729,6 +729,16 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			});
 			return;
 		}
+		if (promptInvocationRequiresUnsupportedContext(prompt, request.args ?? "")) {
+			emitPromptInvocationAcknowledgement(pi, ctx ?? undefined, {
+				protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION,
+				requestId: request.requestId,
+				name: request.name,
+				accepted: false,
+				reason: "unsupported-context",
+			});
+			return;
+		}
 
 		const scope = captureCommandExecutionScope(ctx);
 		const runId = randomUUID();
@@ -775,6 +785,20 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 
 	function shouldDelegatePrompt(prompt: PromptWithModel, override?: SubagentOverride): boolean {
 		return prompt.subagent !== undefined || override?.enabled === true;
+	}
+
+	function promptInvocationRequiresUnsupportedContext(
+		prompt: Pick<PromptWithModel, "deterministic" | "subagent">,
+		args: string,
+	): boolean {
+		const subagent = extractSubagentOverride(args);
+		return (
+			(prompt.deterministic !== undefined && prompt.deterministic.timeoutMs === undefined)
+			|| prompt.subagent !== undefined
+			|| subagent.override !== undefined
+			|| subagent.fork === true
+			|| findRemovedLegacyRuntimeFlag(args) !== undefined
+		);
 	}
 
 	function terminalAssistantMessage(messages: readonly Message[]): AssistantMessage | undefined {

@@ -21,6 +21,7 @@ import {
 	updateDelegatedLiveState,
 	type DelegatedSubagentRequest,
 	type DelegatedSubagentResponse,
+	type DelegatedSubagentStarted,
 	type DelegatedSubagentStatus,
 	type DelegatedSubagentUpdate,
 	type DelegatedSubagentUsage,
@@ -420,6 +421,7 @@ async function requestDelegatedRun(
 
 		const onStarted = (data: unknown) => {
 			if (done || !matchesIdentity(data)) return;
+			const startedPayload = data as Partial<DelegatedSubagentStarted>;
 			started = true;
 			clearTimeout(startTimeout);
 			updateDelegatedLiveState(request.requestId, {
@@ -427,7 +429,7 @@ async function requestDelegatedRun(
 				toolCount: 0,
 				recentOutput: [],
 			});
-			showWidget();
+			if (startedPayload.ownsProgress !== true) showWidget();
 		};
 
 		const onResponse = (data: unknown) => {
