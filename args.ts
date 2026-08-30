@@ -1,3 +1,4 @@
+import { expandCwdPath } from "./cwd-utils.js";
 import type { DelegationLineupSlot } from "./prompt-loader.js";
 
 export interface LoopExtraction {
@@ -450,11 +451,17 @@ function parseLineupOverrideSlots(
 				errors.push(`Invalid ${label}: slot ${index + 1} "${key}" must be a non-empty string.`);
 				return undefined;
 			}
-			if (key === "cwd" && !slot[key].startsWith("/")) {
-				errors.push(`Invalid ${label}: slot ${index + 1} "cwd" must be absolute.`);
-				return undefined;
+			const value = slot[key].trim();
+			if (key === "cwd") {
+				const expanded = expandCwdPath(value);
+				if (!expanded) {
+					errors.push(`Invalid ${label}: slot ${index + 1} "cwd" must be absolute.`);
+					return undefined;
+				}
+				normalized.cwd = expanded;
+				continue;
 			}
-			normalized[key] = slot[key].trim();
+			normalized[key] = value;
 		}
 		if (slot.count !== undefined) {
 			if (target === "finalApplier" || typeof slot.count !== "number" || !Number.isSafeInteger(slot.count) || slot.count < 1) {

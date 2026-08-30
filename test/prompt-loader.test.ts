@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildPromptCommandDescription, collectPromptSourceRecords, loadPromptsWithModel, RESERVED_COMMAND_NAMES, resolveSkillPath, selectEffectivePromptSourceRecords } from "../prompt-loader.js";
+import { buildPromptCommandDescription, collectPromptSourceRecords, loadPromptsWithModel, MAX_BEST_OF_N_REQUESTS, RESERVED_COMMAND_NAMES, resolveSkillPath, selectEffectivePromptSourceRecords } from "../prompt-loader.js";
 
 function withTempHome(run: (root: string) => void) {
 	const root = mkdtempSync(join(tmpdir(), "pi-prompt-workflows-"));
@@ -2555,6 +2555,20 @@ test("bestOfN rejects unsupported nested fields instead of silently ignoring the
 		const result = loadPromptsWithModel(cwd);
 		assert.equal(result.prompts.has("compare"), false);
 		assert.equal(result.diagnostics.some((item) => item.code === "invalid-best-of-n" && /unsupported field.*worktree/i.test(item.message)), true);
+	});
+});
+
+test("bestOfN rejects static request counts above the configured limit", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "compare.md"),
+			`---\nbestOfN:\n  workers:\n    - agent: delegate\n      count: ${MAX_BEST_OF_N_REQUESTS}\n  reviewers:\n    - agent: reviewer\n---\ncompare this`,
+		);
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.has("compare"), false);
+		assert.equal(result.diagnostics.some((item) => item.code === "invalid-best-of-n" && /requests exceed.*32/i.test(item.message)), true);
 	});
 });
 

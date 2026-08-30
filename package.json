@@ -34,6 +34,8 @@
     "adaptive-runtime.ts",
     "adaptive-preflight.ts",
     "adaptive-renderer.ts",
+    "best-of-n.ts",
+    "cwd-utils.ts",
     "git-worktree-snapshot.ts",
     "git-environment.ts",
     "loop-utils.ts",
