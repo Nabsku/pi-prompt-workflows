@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import {
 	extractChainContextFlag,
 	extractLoopCount,
@@ -80,6 +82,12 @@ test("extractLineupOverrides accepts the documented subagent slot alias", () => 
 	const result = extractLineupOverrides(`--workers=${JSON.stringify([{ subagent: "worker" }])} --reviewers=${JSON.stringify([{ subagent: true }])}`);
 	assert.equal(result.errors.length, 0);
 	assert.deepEqual(result.actions.map((action) => action.slots[0].agent), ["worker", "reviewer"]);
+});
+
+test("extractLineupOverrides expands home-relative slot cwds", () => {
+	const result = extractLineupOverrides(`--workers=${JSON.stringify([{ agent: "worker", cwd: "~/delegated" }])}`);
+	assert.equal(result.errors.length, 0);
+	assert.equal(result.actions[0]?.slots[0]?.cwd, join(homedir(), "delegated"));
 });
 
 test("extractLineupOverrides rejects invalid slot JSON and unsupported final-applier count", () => {

@@ -1,17 +1,13 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
 import { executeSubagentPromptStep, DelegatedPromptCancelledError, type DelegatedPromptOutcome } from "./subagent-step.js";
-import type { BestOfNConfig, DelegationLineupSlot, PromptWithModel } from "./prompt-loader.js";
+import { MAX_BEST_OF_N_REQUESTS, type BestOfNConfig, type DelegationLineupSlot, type PromptWithModel } from "./prompt-loader.js";
 import type { SubagentOverride } from "./args.js";
 import { type LineupOverrideAction } from "./args.js";
 import { notify } from "./notifications.js";
 import { PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE, type DelegatedSubagentUsage } from "./subagent-runtime.js";
 
-/**
- * Protects the host and the bridge from unbounded fan-out. The limit applies
- * to all worker, reviewer, and final-applier requests in one invocation.
- */
-export const MAX_BEST_OF_N_REQUESTS = 32;
+export { MAX_BEST_OF_N_REQUESTS } from "./prompt-loader.js";
 
 export function applyLineupOverrides(config: BestOfNConfig, actions: LineupOverrideAction[]): BestOfNConfig {
 	const result: BestOfNConfig = {
@@ -227,7 +223,7 @@ function aggregateModel(results: PhaseResult[]): string | undefined {
 	return models.size === 1 ? [...models][0] : undefined;
 }
 
-function notifyResult(options: BestOfNRunOptions, body: string, details?: { model?: string; usage?: DelegatedSubagentUsage; changed?: boolean }): void {
+function notifyResult(options: BestOfNRunOptions, body: string, details?: { model?: string; usage?: DelegatedSubagentUsage; text?: string; changed?: boolean }): void {
 	options.pi.sendMessage({
 		customType: PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE,
 		content: body,
@@ -275,6 +271,7 @@ export async function executeBestOfNPrompt(options: BestOfNRunOptions): Promise<
 		const usage = aggregateUsage(allResults);
 		const model = aggregateModel(allResults);
 		notifyResult(options, `${body}${suffix}`, {
+			text: body,
 			changed: allResults.some((result) => result.outcome?.changed === true),
 			...(model ? { model } : {}),
 			...(usage ? { usage } : {}),
