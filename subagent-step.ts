@@ -6,6 +6,7 @@ import type { Model } from "@earendil-works/pi-ai";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { captureStepExecutionOutcome, checkPromptExecutionBudget, preparePromptExecution, PromptBudgetExceededError, renderPromptForDeferredModel, type StepExecutionOutcome } from "./prompt-execution.js";
 import type { PromptWithModel } from "./prompt-loader.js";
+import { hasValidModelConditionals } from "./template-conditionals.js";
 import { notify } from "./notifications.js";
 import { buildSkillLoadedMessage, getRequestedSkills, inspectDelegatedCwd, resolvePromptSkills, type RuntimeSkillCommand } from "./prompt-skills.js";
 import {
@@ -53,6 +54,8 @@ export interface DelegatedPromptOutcome {
 	text: string;
 	agent: string;
 	messages?: Message[];
+	usage?: DelegatedSubagentUsage;
+	model?: string;
 }
 
 export class DelegatedPromptCancelledError extends Error {
@@ -224,24 +227,38 @@ interface PreparedDelegatedTask {
 }
 
 const approvedNestedProjectsBySession = new WeakMap<object, Set<string>>();
+const pendingNestedProjectApprovalsBySession = new WeakMap<object, Map<string, Promise<void>>>();
 
 async function approveNestedDelegatedProject(ctx: ExtensionContext, projectRoot: string): Promise<void> {
 	const sessionKey = ctx.sessionManager as object;
 	const approvedProjects = approvedNestedProjectsBySession.get(sessionKey);
 	if (approvedProjects?.has(projectRoot)) return;
+	const pendingApprovals = pendingNestedProjectApprovalsBySession.get(sessionKey);
+	const pending = pendingApprovals?.get(projectRoot);
+	if (pending) return pending;
 
 	const message =
 		`Separate approval is required for nested project configuration at \`${projectRoot}\`. ` +
 		"pi-subagents can load project-local agents, settings, skills, and extensions from this directory.";
-	if (!ctx.hasUI || typeof ctx.ui.confirm !== "function") {
-		throw new Error(`${message} Run this delegation in an interactive Pi session to approve it.`);
-	}
-	const approved = await ctx.ui.confirm("Approve nested delegated project", message, { timeout: 30_000 });
-	if (!approved) throw new Error(`${message} Approval was not granted.`);
+	const approval = (async () => {
+		if (!ctx.hasUI || typeof ctx.ui.confirm !== "function") {
+			throw new Error(`${message} Run this delegation in an interactive Pi session to approve it.`);
+		}
+		const approved = await ctx.ui.confirm("Approve nested delegated project", message, { timeout: 30_000 });
+		if (!approved) throw new Error(`${message} Approval was not granted.`);
 
-	const nextApprovedProjects = approvedProjects ?? new Set<string>();
-	nextApprovedProjects.add(projectRoot);
-	if (!approvedProjects) approvedNestedProjectsBySession.set(sessionKey, nextApprovedProjects);
+		const nextApprovedProjects = approvedProjects ?? new Set<string>();
+		nextApprovedProjects.add(projectRoot);
+		if (!approvedProjects) approvedNestedProjectsBySession.set(sessionKey, nextApprovedProjects);
+	})();
+	const nextPendingApprovals = pendingApprovals ?? new Map<string, Promise<void>>();
+	nextPendingApprovals.set(projectRoot, approval);
+	if (!pendingApprovals) pendingNestedProjectApprovalsBySession.set(sessionKey, nextPendingApprovals);
+	try {
+		await approval;
+	} finally {
+		if (nextPendingApprovals.get(projectRoot) === approval) nextPendingApprovals.delete(projectRoot);
+	}
 }
 
 async function prepareDelegatedTask(
@@ -282,6 +299,9 @@ async function prepareDelegatedTask(
 	let preparedContent: string;
 	let preparedModel: string | undefined;
 	if (deferModelSelection) {
+		if (hasValidModelConditionals(prompt.content)) {
+			throw new Error(`Prompt \`${prompt.name}\` uses <if-model> conditionals but its delegated target model is selected by pi-subagents. Configure a model or remove the model conditional.`);
+		}
 		const deferred = renderPromptForDeferredModel(prompt, args);
 		if (deferred.warning) notify(ctx, deferred.warning, "warning");
 		if (deferred.empty) throw new Error(deferred.empty);
@@ -604,6 +624,8 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 			text,
 			agent: preparedTask.agent,
 			messages,
+			...(response.usage ? { usage: response.usage } : {}),
+			...(response.model ? { model: response.model } : {}),
 		};
 	} catch (error) {
 		if (error instanceof DelegatedPromptCancelledError) throw error;

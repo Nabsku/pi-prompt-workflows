@@ -967,6 +967,21 @@ test("validatePromptTemplates includes delegated skill payloads in static budget
 	});
 });
 
+test("validatePromptTemplates includes best-of-N delegated skills in static budgets", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const promptsDir = join(cwd, ".pi", "prompts");
+		const skillDir = join(cwd, ".pi", "skills", "large");
+		mkdirSync(promptsDir, { recursive: true });
+		mkdirSync(skillDir, { recursive: true });
+		writeFileSync(join(skillDir, "SKILL.md"), "this best-of-N skill payload is deliberately large");
+		writeFileSync(join(promptsDir, "compare.md"), "---\nmodel: openai/gpt-test\nbestOfN:\n  workers:\n    - agent: delegate\nskill: large\nbudget:\n  maxTokens: 3\n---\nx");
+
+		const result = validatePromptTemplates(cwd);
+		assert.equal(result.diagnostics.some((item) => item.code === "prompt-budget-exceeded"), true);
+	});
+});
+
 test("validatePromptTemplates rejects guaranteed conditional overages", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
