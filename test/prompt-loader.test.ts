@@ -2571,3 +2571,33 @@ test("bestOfN rejects inherited context because evidence must be explicit", () =
 		assert.equal(result.diagnostics.some((item) => item.code === "invalid-best-of-n-mode" && /inheritContext/.test(item.message)), true);
 	});
 });
+
+test("bestOfN rejects deterministic shorthand modes", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "compare.md"),
+			"---\nbestOfN:\n  workers:\n    - agent: delegate\nrun: echo hi\n---\ncompare this",
+		);
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.has("compare"), false);
+		assert.equal(result.diagnostics.some((item) => item.code === "invalid-best-of-n-mode" && /deterministic/i.test(item.message)), true);
+	});
+});
+
+test("bestOfN accepts a finalApplier cwd", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		mkdirSync(join(cwd, "apply"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "compare.md"),
+			"---\nbestOfN:\n  workers:\n    - agent: delegate\n  finalApplier:\n    agent: applier\n    cwd: " + join(cwd, "apply") + "\n---\ncompare this",
+		);
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.has("compare"), true);
+		assert.equal(result.diagnostics.some((item) => item.code === "invalid-finalApplier"), false);
+		assert.equal(result.prompts.get("compare")?.bestOfN?.finalApplier?.cwd, join(cwd, "apply"));
+	});
+});

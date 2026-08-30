@@ -348,7 +348,8 @@ function validateAdaptiveChains(cwd: string, result: PromptValidationResult, pro
 }
 
 function promptSkillResolutionCwd(prompt: PromptWithModel, cwd: string): string {
-	return prompt.subagent !== undefined ? (prompt.cwd ?? cwd) : cwd;
+	if (prompt.subagent !== undefined || prompt.bestOfN !== undefined) return prompt.cwd ?? cwd;
+	return cwd;
 }
 
 function validatePromptSkills(cwd: string, result: PromptValidationResult, prompts: ReturnType<typeof loadPromptsWithModel>["prompts"], options: PromptValidationOptions) {
@@ -356,7 +357,7 @@ function validatePromptSkills(cwd: string, result: PromptValidationResult, promp
 
 	for (const prompt of prompts.values()) {
 		const skillCwd = promptSkillResolutionCwd(prompt, cwd);
-		const delegatedCwdTrustError = prompt.subagent !== undefined
+		const delegatedCwdTrustError = prompt.subagent !== undefined || prompt.bestOfN !== undefined
 			? getDelegatedCwdTrustError(cwd, skillCwd, options.projectTrusted !== false)
 			: undefined;
 		if (delegatedCwdTrustError) {
@@ -526,7 +527,7 @@ export function validatePromptTemplates(cwd: string, options: PromptValidationOp
 		if (!prompt.budget) continue;
 		const substitutedBody = substituteArgs(prompt.content, []);
 		let skillPreamble: string | undefined;
-		if (prompt.subagent) {
+		if (prompt.subagent || prompt.bestOfN) {
 			const commands = (options.registeredSkills ?? []).map((skill) => ({ name: skill.skillName, source: "skill", sourceInfo: { path: skill.skillPath } }));
 			const skillCwd = promptSkillResolutionCwd(prompt, cwd);
 			const resolved = resolvePromptSkills(getRequestedSkills(prompt), skillCwd, commands, { includeProjectSkills: canResolveProjectSkills(cwd, skillCwd, options.projectTrusted !== false) });

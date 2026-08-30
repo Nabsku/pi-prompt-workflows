@@ -792,13 +792,14 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	}
 
 	function promptInvocationRequiresUnsupportedContext(
-		prompt: Pick<PromptWithModel, "deterministic" | "subagent">,
+		prompt: Pick<PromptWithModel, "deterministic" | "subagent" | "bestOfN">,
 		args: string,
 	): boolean {
 		const subagent = extractSubagentOverride(args);
 		return (
 			(prompt.deterministic !== undefined && prompt.deterministic.timeoutMs === undefined)
 			|| prompt.subagent !== undefined
+			|| prompt.bestOfN !== undefined
 			|| subagent.override !== undefined
 			|| subagent.fork === true
 			|| findRemovedLegacyRuntimeFlag(args) !== undefined
@@ -2104,12 +2105,17 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			return "failed";
 		}
 		const boundary = prompt.inputs ? splitRawArgsAtBoundary(args) : { before: args, after: [] };
+		const lineup = extractLineupOverrides(boundary.before);
+		if (lineup.errors.length > 0) {
+			notify(ctx, lineup.errors.join(" "), "error");
+			return "failed";
+		}
 		const removedFlag = findRemovedLegacyRuntimeFlag(args);
 		if (removedFlag) {
 			notify(ctx, `Removed legacy runtime flag \`${removedFlag}\` is not supported. Use structured single/fork delegation or a sequential/adaptive workflow. Quote the flag when it is prompt content.`, "error");
 			return "failed";
 		}
-		const subagent = extractSubagentOverride(boundary.before);
+		const subagent = extractSubagentOverride(lineup.args);
 		const runtimeCwd = subagent.cwd ? expandCwdPath(subagent.cwd) : undefined;
 		if (subagent.cwd && !runtimeCwd) {
 			notify(ctx, `Invalid --cwd path: must be absolute`, "error");
@@ -2121,11 +2127,6 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			return "failed";
 		}
 		const argsWithoutSubagent = subagent.args;
-		const lineup = extractLineupOverrides(argsWithoutSubagent);
-		if (lineup.errors.length > 0) {
-			notify(ctx, lineup.errors.join(" "), "error");
-			return "failed";
-		}
 		if (prompt.bestOfN !== undefined || lineup.actions.length > 0) {
 			if (prompt.bestOfN === undefined) {
 				notify(ctx, "Lineup overrides require a prompt with bestOfN configuration.", "error");

@@ -292,9 +292,13 @@ function containsConditional(nodes: Node[]): boolean {
 	return nodes.some((node) => node.type === "if");
 }
 
+function containsModelConditional(nodes: Node[]): boolean {
+	return nodes.some((node) => node.type === "if" && (node.kind === "model" || containsModelConditional(node.truthy) || containsModelConditional(node.falsy)));
+}
+
 export function hasValidModelConditionals(content: string): boolean {
 	const parsed = parseNodes(content);
-	return parsed.ok && containsConditional(parsed.nodes);
+	return parsed.ok && containsModelConditional(parsed.nodes);
 }
 
 function collectConditionalModelParts(nodes: Node[], providers: Set<string>, ids: Set<string>): void {
