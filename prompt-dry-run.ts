@@ -14,7 +14,7 @@ import {
 } from "./args.js";
 import type { ModelSelectionOptions, RegistryLike } from "./model-selection.js";
 import { evaluatePromptBudget, estimatePromptTokens, type PromptBudgetResult, type PromptBudgetSourceEstimate } from "./prompt-budget.js";
-import { preparePromptExecution } from "./prompt-execution.js";
+import { preparePromptExecution, renderPromptForDeferredModel } from "./prompt-execution.js";
 import { applyLineupOverrides, MAX_BEST_OF_N_REQUESTS } from "./best-of-n.js";
 import { expandCwdPath, type PromptWithModel } from "./prompt-loader.js";
 import { stripPromptPartialFrontmatter, type PromptIncludeGraph } from "./prompt-includes.js";
@@ -79,6 +79,8 @@ export interface PromptDryRunSuccess {
 	args: string[];
 	model?: Model<any>;
 	modelAlreadyActive: boolean;
+	/** Set when a model-less delegated request lets pi-subagents resolve its model. */
+	modelResolution?: "deferred";
 	warnings: string[];
 	budget: PromptBudgetResult;
 	skills: PromptDryRunSkillPreview[];
@@ -465,31 +467,47 @@ export async function createPromptDryRun(
 	const loopRotation = applyRepresentativeLoopRotation(effectivePrompt, runtime);
 	effectivePrompt = loopRotation.prompt;
 
-	const prepared = await preparePromptExecution(
-		effectivePrompt,
-		resolvedPositional,
-		options.currentModel,
-		options.modelRegistry,
-		{ scopedModels: options.scopedModels },
-	);
-	if (!prepared) {
-		return errorResult(prompt, `No available model from: ${effectivePrompt.models.join(", ")}`, warnings, runtime);
-	}
-	if ("message" in prepared) {
+	const deferModelSelection = delegated && effectivePrompt.models.length === 0;
+	let preparedContent: string;
+	let preparedModel: Model<any> | undefined;
+	let modelAlreadyActive = false;
+	let modelResolution: "deferred" | undefined;
+	if (deferModelSelection) {
+		const deferred = renderPromptForDeferredModel(effectivePrompt, resolvedPositional);
+		if (deferred.warning) warnings.push(deferred.warning);
+		if (deferred.empty) return errorResult(prompt, deferred.empty, warnings, runtime);
+		preparedContent = deferred.content ?? "";
+		modelResolution = "deferred";
+	} else {
+		const prepared = await preparePromptExecution(
+			effectivePrompt,
+			resolvedPositional,
+			options.currentModel,
+			options.modelRegistry,
+			{ scopedModels: options.scopedModels },
+		);
+		if (!prepared) {
+			return errorResult(prompt, `No available model from: ${effectivePrompt.models.join(", ")}`, warnings, runtime);
+		}
+		if ("message" in prepared) {
+			if (prepared.warning) warnings.push(prepared.warning);
+			return errorResult(prompt, prepared.message, warnings, runtime);
+		}
 		if (prepared.warning) warnings.push(prepared.warning);
-		return errorResult(prompt, prepared.message, warnings, runtime);
+		preparedContent = prepared.content;
+		preparedModel = prepared.selectedModel.model;
+		modelAlreadyActive = prepared.selectedModel.alreadyActive;
 	}
-	if (prepared.warning) warnings.push(prepared.warning);
 
 	const resolvedSkills = skillResolution.kind === "ready" ? skillResolution.skills : [];
 	const skillPreviews = previewSkills(resolvedSkills, options.showSkills === true);
-	let content = prepared.content;
+	let content = preparedContent;
 	let budgetContent = content;
 	const skillPreamble = resolvedSkills.length > 0 ? buildSkillLoadedMessage(resolvedSkills).content : undefined;
 	if (delegated && skillPreamble) {
 		budgetContent = `${skillPreamble}\n\n---\n\n${content}`;
 	} else if (runtime.loop && !delegated) {
-		content = `[${representativeLoopContext(runtime.loop, loopRotation.rotationLabel)}]\n\n${prepared.content}`;
+		content = `[${representativeLoopContext(runtime.loop, loopRotation.rotationLabel)}]\n\n${preparedContent}`;
 		budgetContent = content;
 	}
 
@@ -498,8 +516,9 @@ export async function createPromptDryRun(
 		promptName: prompt.name,
 		content,
 		args: resolvedPositional,
-		model: prepared.selectedModel.model,
-		modelAlreadyActive: prepared.selectedModel.alreadyActive,
+		...(preparedModel ? { model: preparedModel } : {}),
+		modelAlreadyActive,
+		...(modelResolution ? { modelResolution } : {}),
 		warnings,
 		budget: evaluateDryRunBudget(budgetContent, prompt, resolvedSkills),
 		skills: skillPreviews,

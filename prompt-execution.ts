@@ -4,7 +4,7 @@ import { getResolvedModelRef, selectModelCandidate, type ModelSelectionOptions, 
 import type { PromptWithModel } from "./prompt-loader.js";
 import { evaluatePromptBudget } from "./prompt-budget.js";
 import { renderPromptInputValues } from "./prompt-inputs.js";
-import { renderTemplateConditionals, renderTemplateConditionalsWithInputs } from "./template-conditionals.js";
+import { deferTemplateConditionals, renderTemplateConditionals, renderTemplateConditionalsWithInputs } from "./template-conditionals.js";
 
 export interface PreparedPromptExecution {
 	selectedModel: SelectedModelCandidate;
@@ -121,6 +121,26 @@ export function renderPromptForResolvedModel(
 	const protectedArgs = args.map((arg) => arg.replace(/\$\{input\./g, "\uE000pi-input."));
 	const substituted = substituteArgs(rendered.content, protectedArgs);
 	const content = inputValues ? renderPromptInputValues(substituted, inputValues).replace(/\uE000pi-input\./g, "${input.") : substituted.replace(/\uE000pi-input\./g, "${input.");
+	if (content.trim().length === 0) {
+		return {
+			empty: `Prompt \`${prompt.name}\` rendered to an empty message.`,
+			warning: rendered.error,
+		};
+	}
+	return {
+		content,
+		warning: rendered.error,
+	};
+}
+
+/** Render only model-independent prompt content; delegated agents resolve the model later. */
+export function renderPromptForDeferredModel(
+	prompt: Pick<PromptWithModel, "name" | "content">,
+	args: string[],
+): RenderedPrompt {
+	const rendered = deferTemplateConditionals(prompt.content, prompt.name);
+	const protectedArgs = args.map((arg) => arg.replace(/\$\{input\./g, "\uE000pi-input."));
+	const content = substituteArgs(rendered.content, protectedArgs).replace(/\uE000pi-input\./g, "${input.");
 	if (content.trim().length === 0) {
 		return {
 			empty: `Prompt \`${prompt.name}\` rendered to an empty message.`,

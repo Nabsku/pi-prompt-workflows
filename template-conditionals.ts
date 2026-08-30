@@ -375,3 +375,19 @@ export function renderTemplateConditionals(
 		error: `Invalid <if-model> markup${label}: ${error.message}`,
 	};
 }
+
+/** Validate conditional markup without selecting a model or rendering a branch. */
+export function deferTemplateConditionals(content: string, commandName?: string): RenderConditionalsResult {
+	if (!content.includes("<if-input") && !content.includes("</if-input") && !content.includes("<if-model") && !content.includes("</if-model") && !content.includes("<else")) {
+		return { content };
+	}
+
+	const parsed = parseNodes(content);
+	if (parsed.ok) return { content };
+
+	const label = commandName ? ` in prompt \`${commandName}\`` : "";
+	return {
+		content,
+		error: `Invalid conditional markup${label}: ${(parsed as ParseFailure).error.message}`,
+	};
+}

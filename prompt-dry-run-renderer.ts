@@ -112,8 +112,9 @@ export function formatPromptDryRun(result: PromptDryRunResult): string {
 	}
 
 	lines.push("", "## Metadata");
-	lines.push(`- Model: ${result.model !== undefined ? sanitizeInline(modelLabel(result.model)) : "none"}`);
-	lines.push(`- Model already active: ${formatScalar(result.modelAlreadyActive)}`);
+	const deferredModel = result.modelResolution === "deferred";
+	lines.push(`- Model: ${deferredModel ? "deferred (delegated agent resolves)" : result.model !== undefined ? sanitizeInline(modelLabel(result.model)) : "none"}`);
+	lines.push(`- Model already active: ${deferredModel ? "unknown (delegated agent resolves)" : formatScalar(result.modelAlreadyActive)}`);
 	formatRuntime(result.runtime, lines);
 	if (result.adaptivePreflight) lines.push("", formatAdaptivePreflight(result.adaptivePreflight));
 	appendWarnings(lines, result.warnings);
