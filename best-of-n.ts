@@ -2,8 +2,10 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { Model } from "@earendil-works/pi-ai";
 import { executeSubagentPromptStep, DelegatedPromptCancelledError, type DelegatedPromptOutcome } from "./subagent-step.js";
 import type { BestOfNConfig, DelegationLineupSlot, PromptWithModel } from "./prompt-loader.js";
+import type { SubagentOverride } from "./args.js";
 import { type LineupOverrideAction } from "./args.js";
 import { notify } from "./notifications.js";
+import { PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE } from "./subagent-runtime.js";
 
 /**
  * Protects the host and the bridge from unbounded fan-out. The limit applies
@@ -39,6 +41,8 @@ export interface BestOfNRunOptions {
 	currentModel: Model<any> | undefined;
 	runtimeModel?: string;
 	runtimeCwd?: string;
+	runtimeOverride?: SubagentOverride;
+	runtimeFork?: boolean;
 	signal?: AbortSignal;
 }
 
@@ -76,14 +80,17 @@ function expandSlots(slots: DelegationLineupSlot[], label: string): DelegationLi
 
 function appendEvidence(preamble: string, label: string, results: PhaseResult[]): string {
 	const successful = results.filter((result) => result.outcome && !result.error && result.outcome.text.trim());
-	if (successful.length === 0) return preamble;
 	const evidence = successful
 		.map((result, index) => {
 			const outcome = result.outcome!;
 			return `\n\n--- ${label} ${index + 1} (${result.slot.agent}) ---\n${outcome.text.trim()}`;
 		})
 		.join("");
-	return `${preamble}${evidence}`;
+	const failures = results
+		.filter((result) => result.error)
+		.map((result) => `\n\n--- ${label} ${result.index + 1} (${result.slot.agent}) failed ---\n${result.error}`)
+		.join("");
+	return `${preamble}${evidence}${failures}`;
 }
 
 function phasePreamble(
@@ -104,6 +111,7 @@ function slotPrompt(
 	base: PromptWithModel,
 	slot: DelegationLineupSlot,
 	runtimeModel: string | undefined,
+	runtimeFork: boolean,
 ): PromptWithModel {
 	const models = slot.model ? [slot.model] : runtimeModel ? [runtimeModel] : base.models;
 	return {
@@ -113,7 +121,20 @@ function slotPrompt(
 		models,
 		subagent: slot.agent,
 		cwd: slot.cwd ?? base.cwd,
+		...(runtimeFork ? { inheritContext: true } : {}),
 		bestOfN: undefined,
+	};
+}
+
+function createCancellationScope(parentSignal: AbortSignal | undefined): { controller: AbortController; cleanup: () => void } {
+	const controller = new AbortController();
+	if (!parentSignal) return { controller, cleanup: () => {} };
+	const abort = () => controller.abort();
+	if (parentSignal.aborted) controller.abort();
+	else parentSignal.addEventListener("abort", abort, { once: true });
+	return {
+		controller,
+		cleanup: () => parentSignal.removeEventListener("abort", abort),
 	};
 }
 
@@ -123,23 +144,30 @@ async function runPhase(
 	slots: DelegationLineupSlot[],
 	runtimeModel: string | undefined,
 	evidence: string,
+	cancellation: AbortController,
 ): Promise<PhaseResult[]> {
-	return Promise.all(slots.map(async (slot, index): Promise<PhaseResult> => {
+	let cancellationError: DelegatedPromptCancelledError | undefined;
+	const results = await Promise.all(slots.map(async (slot, index): Promise<PhaseResult> => {
 		try {
 			const effectivePrompt = options.runtimeCwd ? { ...options.prompt, cwd: options.runtimeCwd } : options.prompt;
 			const outcome = await executeSubagentPromptStep({
 				pi: options.pi,
 				ctx: options.ctx,
 				currentModel: options.currentModel,
-				prompt: slotPrompt(effectivePrompt, slot, runtimeModel),
+				prompt: slotPrompt(effectivePrompt, slot, runtimeModel, options.runtimeFork === true),
 				args: options.args,
-				signal: options.signal,
+				signal: cancellation.signal,
+				override: options.runtimeOverride,
 				taskPreamble: phasePreamble(phase, slot, evidence),
+				includeTaskPreambleWithFork: options.runtimeFork === true,
 				emitResult: false,
 			});
 			return { phase, slot, index, outcome };
 		} catch (error) {
-			if (error instanceof DelegatedPromptCancelledError) throw error;
+			if (error instanceof DelegatedPromptCancelledError) {
+				cancellationError ??= error;
+				cancellation.abort();
+			}
 			return {
 				phase,
 				slot,
@@ -148,6 +176,8 @@ async function runPhase(
 			};
 		}
 	}));
+	if (cancellationError) throw cancellationError;
+	return results;
 }
 
 function resultText(results: PhaseResult[], title: string): string {
@@ -169,13 +199,14 @@ function summarizeFailures(results: PhaseResult[]): string[] {
 
 function notifyResult(options: BestOfNRunOptions, body: string): void {
 	options.pi.sendMessage({
-		customType: "pi-prompt-template-subagent",
+		customType: PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE,
 		content: body,
 		display: true,
 	});
 }
 
 export async function executeBestOfNPrompt(options: BestOfNRunOptions): Promise<"completed" | "failed" | "cancelled"> {
+	const cancellation = createCancellationScope(options.signal);
 	try {
 		const workerCount = requestedSlotCount(options.config.workers ?? []);
 		const reviewerCount = options.config.reviewers ? requestedSlotCount(options.config.reviewers) : 0;
@@ -188,7 +219,7 @@ export async function executeBestOfNPrompt(options: BestOfNRunOptions): Promise<
 		const workerSlots = expandSlots(options.config.workers ?? [], "workers");
 		const reviewerSlots = options.config.reviewers ? expandSlots(options.config.reviewers, "reviewers") : [];
 
-		const workers = await runPhase(options, "worker", workerSlots, options.runtimeModel, "");
+		const workers = await runPhase(options, "worker", workerSlots, options.runtimeModel, "", cancellation.controller);
 		const workerEvidence = appendEvidence("\n\nCandidate answers:", "Candidate", workers);
 		const workerSuccesses = workers.filter((result) => result.outcome && !result.error);
 		if (workerSuccesses.length === 0) {
@@ -197,11 +228,11 @@ export async function executeBestOfNPrompt(options: BestOfNRunOptions): Promise<
 		}
 
 		const reviewers = reviewerSlots.length > 0
-			? await runPhase(options, "reviewer", reviewerSlots, options.runtimeModel, workerEvidence)
+			? await runPhase(options, "reviewer", reviewerSlots, options.runtimeModel, workerEvidence, cancellation.controller)
 			: [];
 		const reviewEvidence = appendEvidence("\n\nReviewer findings:", "Review", reviewers);
 		const finalResults = options.config.finalApplier
-			? await runPhase(options, "final-applier", [options.config.finalApplier], options.runtimeModel, `${workerEvidence}${reviewEvidence}`)
+			? await runPhase(options, "final-applier", [options.config.finalApplier], options.runtimeModel, `${workerEvidence}${reviewEvidence}`, cancellation.controller)
 			: [];
 		const finalText = resultText(finalResults, "Final answer");
 		const reviewText = resultText(reviewers, "Review");
@@ -218,5 +249,7 @@ export async function executeBestOfNPrompt(options: BestOfNRunOptions): Promise<
 		}
 		notify(options.ctx, `bestOfN failed: ${error instanceof Error ? error.message : String(error)}`, "error");
 		return "failed";
+	} finally {
+		cancellation.cleanup();
 	}
 }

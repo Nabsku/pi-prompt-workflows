@@ -14,6 +14,7 @@ import {
 	PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT,
 	getDelegatedLiveState,
 } from "../subagent-runtime.ts";
+import { DELEGATED_WIDGET_KEY } from "../subagent-widget.ts";
 
 function withDelegationBridge(run: (root: string) => Promise<void>) {
 	const root = mkdtempSync(join(tmpdir(), "pi-prompt-subagent-step-"));
@@ -972,7 +973,7 @@ test("executeSubagentPromptStep keeps single-task status running between tool ca
 		ctx.hasUI = true;
 		const statusLines: string[] = [];
 		ctx.ui.setStatus = (key: string, value?: string) => {
-			if (key === "prompt-subagent" && value) statusLines.push(value);
+			if (key.startsWith(`${DELEGATED_WIDGET_KEY}:`) && value) statusLines.push(value);
 		};
 
 		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {

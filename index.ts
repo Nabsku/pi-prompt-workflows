@@ -2142,6 +2142,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				currentModel: getCurrentModel(ctx),
 				runtimeModel: subagent.model,
 				runtimeCwd,
+				runtimeOverride: subagent.override,
+				runtimeFork: subagent.fork === true,
 				signal: getCommandSignal(ctx),
 			});
 		}
