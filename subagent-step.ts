@@ -44,6 +44,7 @@ export interface DelegatedPromptOptions {
 	signal?: AbortSignal;
 	inheritedModel?: Model<any>;
 	taskPreamble?: string;
+	includeTaskPreambleWithFork?: boolean;
 	emitResult?: boolean;
 }
 
@@ -252,6 +253,7 @@ async function prepareDelegatedTask(
 	override: SubagentOverride | undefined,
 	inheritedModel: Model<any> | undefined,
 	taskPreamble: string | undefined,
+	includeTaskPreambleWithFork: boolean,
 ): Promise<PreparedDelegatedTask> {
 	const requestedAgent = resolveDelegationName(prompt, override);
 	if (!requestedAgent) {
@@ -321,7 +323,7 @@ async function prepareDelegatedTask(
 		? buildSkillLoadedMessage(resolvedSkills).content
 		: undefined;
 	let taskText = preparedContent;
-	if (!prompt.inheritContext && taskPreamble) {
+	if ((!prompt.inheritContext || includeTaskPreambleWithFork) && taskPreamble) {
 		taskText = `${taskPreamble}\n\n---\n\n${preparedContent}`;
 	}
 	if (resolvedSkillPreamble) {
@@ -374,6 +376,7 @@ async function requestDelegatedRun(
 		let startTimeout: ReturnType<typeof setTimeout>;
 		let onAbort: (() => void) | undefined;
 		let onTerminalInput: (() => void) | undefined;
+		const progressKey = `${DELEGATED_WIDGET_KEY}:${request.requestId}`;
 		let unsubscribeStarted = () => {};
 		let unsubscribeResponse = () => {};
 		let unsubscribeUpdate = () => {};
@@ -384,7 +387,7 @@ async function requestDelegatedRun(
 				refreshTimer = null;
 			}
 			if (ctx.hasUI && widgetSet) {
-				ctx.ui.setWidget(DELEGATED_WIDGET_KEY, undefined);
+				ctx.ui.setWidget(progressKey, undefined);
 				widgetSet = false;
 			}
 		};
@@ -412,14 +415,14 @@ async function requestDelegatedRun(
 			if (!ctx.hasUI || widgetSet) return;
 			widgetSet = true;
 			ctx.ui.setWidget(
-				DELEGATED_WIDGET_KEY,
+				progressKey,
 				(_tui, theme) => createDelegatedProgressWidget(request.requestId, request.agent, request.context, request.task, theme, request.model),
 				{ placement: "aboveEditor" },
 			);
 			refreshTimer = setInterval(() => {
 				if (done) return;
 				const statusLine = lastProgressStatus || "running...";
-				ctx.ui.setStatus("prompt-subagent", `delegating to ${requestLabel} · ${statusLine}`);
+				ctx.ui.setStatus(progressKey, `delegating to ${requestLabel} · ${statusLine}`);
 			}, 1000);
 		};
 
@@ -482,7 +485,7 @@ async function requestDelegatedRun(
 
 			if (!ctx.hasUI) return;
 			const statusLine = progressStatus ?? (lastProgressStatus || "running...");
-			ctx.ui.setStatus("prompt-subagent", `delegating to ${requestLabel} · ${statusLine}`);
+			ctx.ui.setStatus(progressKey, `delegating to ${requestLabel} · ${statusLine}`);
 		};
 
 		onTerminalInput = ctx.mode === "tui"
@@ -524,7 +527,7 @@ async function requestDelegatedRun(
 }
 
 export async function executeSubagentPromptStep(options: DelegatedPromptOptions): Promise<DelegatedPromptOutcome> {
-	const { pi, ctx, currentModel, prompt, args, override, signal, inheritedModel, taskPreamble, emitResult = true } = options;
+	const { pi, ctx, currentModel, prompt, args, override, signal, inheritedModel, taskPreamble, includeTaskPreambleWithFork = false, emitResult = true } = options;
 	if (signal?.aborted) throw new DelegatedPromptCancelledError();
 	const commands = typeof (pi as { getCommands?: () => RuntimeSkillCommand[] }).getCommands === "function"
 		? (pi as { getCommands: () => RuntimeSkillCommand[] }).getCommands()
@@ -538,10 +541,12 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 		override,
 		inheritedModel,
 		taskPreamble,
+		includeTaskPreambleWithFork,
 	);
 	if (signal?.aborted) throw new DelegatedPromptCancelledError();
 
 	const requestId = randomUUID();
+	const progressKey = `${DELEGATED_WIDGET_KEY}:${requestId}`;
 	const request: DelegatedSubagentRequest = {
 		requestId,
 		ownerRunId: requestId,
@@ -556,7 +561,7 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 	const beforeSnapshot = captureDelegatedGitSnapshot(preparedTask.cwd);
 
 	if (ctx.hasUI) {
-		ctx.ui.setStatus("prompt-subagent", `delegating to ${preparedTask.agent}`);
+		ctx.ui.setStatus(progressKey, `delegating to ${preparedTask.agent}`);
 		ctx.ui.setWorkingMessage(`Running delegated prompt with ${preparedTask.agent}...`);
 	}
 	if (emitResult) notify(ctx, `Delegating prompt \`${preparedTask.promptName}\` to subagent \`${preparedTask.agent}\``, "info");
@@ -607,7 +612,7 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 	} finally {
 		clearDelegatedLiveState(request.requestId);
 		if (ctx.hasUI) {
-			ctx.ui.setStatus("prompt-subagent", undefined);
+			ctx.ui.setStatus(progressKey, undefined);
 			ctx.ui.setWorkingMessage();
 		}
 	}

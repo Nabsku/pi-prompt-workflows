@@ -458,7 +458,7 @@ export async function createPromptDryRun(
 	if (delegated) {
 		runtime.delegation = {
 			enabled: true,
-			agent: effectivePrompt.bestOfN ? "best-of-n" : parsed.override?.agent ?? (typeof effectivePrompt.subagent === "string" ? effectivePrompt.subagent : DEFAULT_SUBAGENT_NAME),
+			agent: parsed.override?.agent ?? (effectivePrompt.bestOfN ? "best-of-n" : (typeof effectivePrompt.subagent === "string" ? effectivePrompt.subagent : DEFAULT_SUBAGENT_NAME)),
 			...(parsed.fork ? { fork: true, inheritContext: true } : {}),
 		};
 	}

@@ -196,6 +196,14 @@ test("previews effective best-of-N counts and runtime replacement overrides", as
 	assert.equal(result.runtime.delegation?.agent, "best-of-n");
 });
 
+test("reports a runtime subagent override for best-of-N dry-runs", async () => {
+	const result = assertOk(await createPromptDryRun(prompt({
+		models: ["anthropic/claude-sonnet-4-20250514"],
+		bestOfN: { workers: [{ agent: "delegate" }] },
+	}), options("/tmp", { rawArgs: "--subagent=specialist task" })));
+	assert.equal(result.runtime.delegation?.agent, "specialist");
+});
+
 test("defers model selection for model-less delegated dry-runs", async () => {
 	const task = '<if-model is="openai/*">openai<else>other</if-model>';
 	const result = assertOk(await createPromptDryRun(
