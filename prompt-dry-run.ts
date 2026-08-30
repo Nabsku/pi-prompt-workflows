@@ -4,15 +4,18 @@ import type { Model } from "@earendil-works/pi-ai";
 import {
 	extractLoopCount,
 	extractLoopFlags,
+	extractLineupOverrides,
 	extractSubagentOverride,
 	findRemovedLegacyRuntimeFlag,
 	parseCommandArgs,
 	splitRawArgsAtBoundary,
 	type SubagentOverride,
+	type LineupOverrideExtraction,
 } from "./args.js";
 import type { ModelSelectionOptions, RegistryLike } from "./model-selection.js";
 import { evaluatePromptBudget, estimatePromptTokens, type PromptBudgetResult, type PromptBudgetSourceEstimate } from "./prompt-budget.js";
 import { preparePromptExecution } from "./prompt-execution.js";
+import { applyLineupOverrides, MAX_BEST_OF_N_REQUESTS } from "./best-of-n.js";
 import { expandCwdPath, type PromptWithModel } from "./prompt-loader.js";
 import { stripPromptPartialFrontmatter, type PromptIncludeGraph } from "./prompt-includes.js";
 import { buildSkillLoadedMessage, canResolveProjectSkills, getDelegatedCwdTrustError, getRequestedSkills, resolvePromptSkills, type RuntimeSkillCommand } from "./prompt-skills.js";
@@ -44,6 +47,14 @@ export interface PromptDryRunDelegationMetadata {
 	inheritContext?: boolean;
 }
 
+export interface PromptDryRunBestOfNMetadata {
+	workers: number;
+	reviewers: number;
+	finalApplier: boolean;
+	totalRequests: number;
+	maxRequests: number;
+}
+
 export interface PromptDryRunRuntimeMetadata {
 	model?: string;
 	cwd?: string;
@@ -51,6 +62,7 @@ export interface PromptDryRunRuntimeMetadata {
 	restore: boolean;
 	thinking?: ThinkingLevel;
 	boomerang: boolean;
+	bestOfN?: PromptDryRunBestOfNMetadata;
 	delegation?: PromptDryRunDelegationMetadata;
 	inheritContext?: boolean;
 }
@@ -221,8 +233,12 @@ function errorResult(
 	return { status: "error", promptName: prompt.name, error, warnings, ...(runtime ? { runtime } : {}), ...(budget ? { budget } : {}) };
 }
 
-function shouldDelegatePrompt(prompt: Pick<PromptWithModel, "subagent">, override?: SubagentOverride): boolean {
-	return prompt.subagent !== undefined || override?.enabled === true;
+function shouldDelegatePrompt(prompt: Pick<PromptWithModel, "subagent" | "bestOfN">, override?: SubagentOverride): boolean {
+	return prompt.subagent !== undefined || prompt.bestOfN !== undefined || override?.enabled === true;
+}
+
+function countLineupSlots(slots: Array<{ count?: number }> | undefined): number {
+	return (slots ?? []).reduce((total, slot) => total + (slot.count ?? 1), 0);
 }
 
 function applyRepresentativeLoopRotation(prompt: PromptWithModel, runtime: PromptDryRunRuntimeMetadata) {
@@ -314,6 +330,7 @@ function parseDryRunArgs(prompt: PromptWithModel, rawArgs: string | undefined, a
 			model: undefined,
 			fork: false,
 			runtimeCwd: undefined,
+			lineup: undefined,
 		} as const;
 	}
 
@@ -334,6 +351,8 @@ function parseDryRunArgs(prompt: PromptWithModel, rawArgs: string | undefined, a
 		};
 		cleanedArgs = flags.args;
 	}
+	const lineup = extractLineupOverrides(cleanedArgs);
+	cleanedArgs = lineup.args;
 
 	return {
 		args: [...parseCommandArgs(cleanedArgs), ...(boundary.after.length ? ["--", ...boundary.after] : [])],
@@ -348,6 +367,7 @@ function parseDryRunArgs(prompt: PromptWithModel, rawArgs: string | undefined, a
 		model: subagent.model,
 		fork: subagent.fork === true,
 		runtimeCwd: subagent.cwd,
+		lineup,
 	} as const;
 }
 
@@ -406,6 +426,19 @@ export async function createPromptDryRun(
 		...(parsed.fork ? { inheritContext: true } : {}),
 		...(runtime.cwd ? { cwd: runtime.cwd } : {}),
 	};
+	if (parsed.lineup?.errors.length) return errorResult(prompt, parsed.lineup.errors.join(" "), warnings, runtime);
+	if (parsed.lineup && parsed.lineup.actions.length > 0 && !effectivePrompt.bestOfN) {
+		return errorResult(prompt, "Best-of-N runtime overrides require a prompt with a bestOfN configuration.", warnings, runtime);
+	}
+	if (effectivePrompt.bestOfN) {
+		const bestOfN = parsed.lineup ? applyLineupOverrides(effectivePrompt.bestOfN, parsed.lineup.actions) : effectivePrompt.bestOfN;
+		const workers = countLineupSlots(bestOfN.workers);
+		const reviewers = countLineupSlots(bestOfN.reviewers);
+		const totalRequests = workers + reviewers + (bestOfN.finalApplier ? 1 : 0);
+		if (totalRequests > MAX_BEST_OF_N_REQUESTS) return errorResult(prompt, `bestOfN requested ${totalRequests} delegation requests, above the configured limit of ${MAX_BEST_OF_N_REQUESTS}.`, warnings, runtime);
+		effectivePrompt = { ...effectivePrompt, bestOfN };
+		runtime.bestOfN = { workers, reviewers, finalApplier: bestOfN.finalApplier !== undefined, totalRequests, maxRequests: MAX_BEST_OF_N_REQUESTS };
+	}
 
 	const delegated = shouldDelegatePrompt(effectivePrompt, parsed.override);
 	const skillResolutionCwd = delegated ? (effectivePrompt.cwd ?? options.cwd) : options.cwd;
@@ -423,7 +456,7 @@ export async function createPromptDryRun(
 	if (delegated) {
 		runtime.delegation = {
 			enabled: true,
-			agent: parsed.override?.agent ?? (typeof effectivePrompt.subagent === "string" ? effectivePrompt.subagent : DEFAULT_SUBAGENT_NAME),
+			agent: effectivePrompt.bestOfN ? "best-of-n" : parsed.override?.agent ?? (typeof effectivePrompt.subagent === "string" ? effectivePrompt.subagent : DEFAULT_SUBAGENT_NAME),
 			...(parsed.fork ? { fork: true, inheritContext: true } : {}),
 		};
 	}

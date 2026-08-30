@@ -1232,7 +1232,7 @@ test("refuses unsafe prompt invocation paths before acknowledgement", async () =
 			{ requestId: "frontmatter-delegated", name: "delegated" },
 			{ requestId: "runtime-subagent", name: "plain", args: "--subagent worker" },
 			{ requestId: "runtime-fork", name: "plain", args: "--fork" },
-			{ requestId: "removed-legacy", name: "plain", args: "--workers 2" },
+			{ requestId: "removed-legacy", name: "plain", args: "--worktree" },
 		]) {
 			pi.events.emit(PROMPT_TEMPLATE_PROMPT_INVOKE_REQUEST_EVENT, {
 				protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION,

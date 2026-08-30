@@ -88,7 +88,7 @@ export interface DelegatedSubagentRequest {
 	agent: string;
 	task: string;
 	context: "fresh" | "fork";
-	model: string;
+	model?: string;
 	cwd: string;
 	result: DelegatedSubagentResultSpec;
 }

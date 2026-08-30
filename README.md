@@ -31,7 +31,7 @@ No more manually switching models, copying standard instructions between prompts
 - **Dry-run preview**: inspect the exact rendered prompt body, metadata, warnings, and optional skill content before execution.
 - **Pi-native TUI**: browse templates and inspect dry-run output interactively in Pi TUI mode without typing template names.
 - **Prompt budgets**: inspect approximate rendered-token cost, set warning thresholds, and fail closed above an explicit maximum.
-- **Execution control**: loops, model rotation, fresh context, boomerang collapse, structured single-subagent delegation, and sequential chains.
+- **Execution control**: loops, model rotation, fresh context, boomerang collapse, structured subagent delegation, bounded best-of-N comparison, and sequential chains.
 
 ## Differences from upstream
 
@@ -43,7 +43,7 @@ This package is an enhanced fork of [`pi-prompt-template-model`](https://github.
 - Multiple skill injection via `skills`, plus constrained wildcard skill selectors.
 - Dry-run previews and a Pi-native TUI picker/inspector for prompt templates.
 - Loop controls, model rotation, fresh context, and boomerang context collapse.
-- Chain templates, deterministic prompt steps, and structured single-subagent delegation.
+- Chain templates, deterministic prompt steps, structured subagent delegation, and bounded best-of-N comparison.
 - Richer `/validate-prompts` diagnostics, include graphs, and source summaries.
 
 ### Behavior changes and stricter validation
@@ -51,13 +51,13 @@ This package is an enhanced fork of [`pi-prompt-template-model`](https://github.
 - Invalid prompt config is reported and skipped more consistently instead of running with silently degraded behavior.
 - Prompt-library commands have extra trust checks because they can come from project-local reusable libraries.
 - Duplicate prompt and prompt-library precedence is deterministic and reported with diagnostics.
-- Runtime flags are scoped to prompt types that support them. Removed `--worktree`, `--preset`, `--workers`, `--workers-append`, `--reviewers`, `--reviewers-append`, `--final-applier`, and `--keep-artifacts` controls fail before execution and dry-run instead of degrading silently. Quote a runtime-looking flag when it is prompt content.
+- Runtime flags are scoped to prompt types that support them. Removed `--worktree`, `--preset`, and `--keep-artifacts` controls fail before execution and dry-run instead of degrading silently. Best-of-N uses `--workers`, `--workers-append`, `--reviewers`, `--reviewers-append`, and `--final-applier` only for compare prompts. Quote a runtime-looking flag when it is prompt content.
 - Delegated execution accepts only a trusted session cwd or one of its child directories. The pi-subagents bridge loads child-local agent definitions and extensions from the delegated cwd. To delegate into another project root, start Pi in that root and approve project trust there.
 - Prompt invocation events fail closed for execution paths without a bounded completion contract. Deterministic prompts need `timeout`; delegated prompts, runtime `--subagent`/`--fork`, and removed legacy runtime flags are refused with `accepted: false` and `reason: "unsupported-context"`.
 
 ### Breaking or migration notes
 
-- `pi-subagents` 0.44 removed its legacy parallel/task/worktree transport. This extension now supports only the structured single-delegation contract. Templates that use `parallel`, `worktree`, `bestOfN`, `workers`, `reviewers`, `finalApplier`, `commit`, or `preset` are rejected with `unsupported-legacy-delegation`.
+- `pi-subagents` 0.44 removed its legacy parallel/task/worktree transport. This extension keeps the structured single-delegation contract and restores best-of-N by issuing one bounded structured request per worker, reviewer, or final applier. Templates that use legacy `parallel`, `worktree`, `commit`, or `preset` fields are rejected with `unsupported-legacy-delegation`; nested `bestOfN` is supported.
 - `skills:` must be a list. Use `skill: name` for a single skill.
 - Some fields that upstream accepted loosely are now type-checked before registration, including prompt includes, chain declarations, loop values, cwd paths, and delegated skill selectors.
 
@@ -342,6 +342,27 @@ All fields are optional. Templates that don't use any extension features (no `mo
 | `subagent` | — | Delegate execution to a subagent instead of running in the current session. `true` uses the default `delegate` agent; a string value like `reviewer` targets that specific agent. Requires [pi-subagents](https://github.com/nicobailon/pi-subagents/). |
 | `inheritContext` | `false` | Only meaningful with `subagent`. When `true`, the subagent receives a fork of the current conversation context instead of starting fresh. |
 | `cwd` | — | Working directory for delegated subagent subprocesses. Must be an absolute path (`~/...` is expanded). Valid with `subagent` and on chain templates as the default cwd for delegated steps. |
+| `bestOfN` | — | Runs bounded independent workers, optional reviewers, and one optional final applier through individual structured subagent requests. See [Best-of-N comparison](#best-of-n-comparison). |
+
+### Best-of-N comparison
+
+Use `bestOfN` when independent answers are useful. Each worker is one structured delegation request. Reviewers receive the successful worker outputs. The optional final applier receives both worker outputs and reviewer findings and returns the user-facing answer.
+
+```yaml
+bestOfN:
+  workers:
+    - agent: delegate
+      model: anthropic/claude-sonnet-4-20250514
+      count: 2
+    - agent: specialist
+      taskSuffix: Focus on security and failure modes.
+  reviewers:
+    - agent: reviewer
+  finalApplier:
+    agent: synthesizer
+```
+
+`agent` and `subagent` are accepted as slot names. A slot may set `model`, `task`, `taskSuffix`, `cwd`, and (for workers or reviewers) a positive `count`. Runtime replace/append overrides are available with `--workers=JSON`, `--workers-append=JSON`, `--reviewers=JSON`, `--reviewers-append=JSON`, and `--final-applier=JSON`. The total number of worker, reviewer, and final-applier requests is bounded at 32 per invocation. Best-of-N does not restore the removed worktree or automatic commit transport.
 
 ## Model Format
 

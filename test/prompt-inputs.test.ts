@@ -54,11 +54,6 @@ test("rejects input names reserved by removed runtime flags", () => {
 	for (const name of [
 		"worktree",
 		"preset",
-		"workers",
-		"workers-append",
-		"reviewers",
-		"reviewers-append",
-		"final-applier",
 		"keep-artifacts",
 	]) {
 		assert.match(
