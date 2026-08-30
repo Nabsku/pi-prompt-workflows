@@ -46,16 +46,27 @@ export const RESERVED_COMMAND_NAMES = new Set([
 const REMOVED_LEGACY_DELEGATION_FIELDS = [
 	"parallel",
 	"worktree",
-	"bestOfN",
-	"workers",
-	"reviewers",
-	"finalApplier",
 	"commit",
 	"preset",
 ] as const;
 
 export type PromptSource = "user" | "project";
 export type PromptRootKind = "prompts" | "prompt-library";
+
+export interface DelegationLineupSlot {
+	agent: string;
+	model?: string;
+	task?: string;
+	taskSuffix?: string;
+	cwd?: string;
+	count?: number;
+}
+
+export interface BestOfNConfig {
+	workers?: DelegationLineupSlot[];
+	reviewers?: DelegationLineupSlot[];
+	finalApplier?: DelegationLineupSlot;
+}
 
 interface PromptRoot {
 	source: PromptSource;
@@ -108,6 +119,7 @@ export interface PromptWithModel {
 	loop?: number | null;
 	converge?: boolean;
 	boomerang?: boolean;
+	bestOfN?: BestOfNConfig;
 	deterministic?: DeterministicStep;
 	subagent?: true | string;
 	inheritContext?: boolean;
@@ -1076,6 +1088,151 @@ function normalizeConverge(
 	return true;
 }
 
+function normalizeLineupSlot(
+	value: unknown,
+	field: "workers" | "reviewers" | "finalApplier",
+	filePath: string,
+	source: PromptSource,
+	diagnostics: PromptLoaderDiagnostic[],
+	index: number,
+): DelegationLineupSlot | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		diagnostics.push(createDiagnostic(`invalid-${field}`, filePath, source, `Ignoring invalid ${field} value in ${filePath}: slot ${index + 1} must be an object.`));
+		return undefined;
+	}
+	const slot = value as Record<string, unknown>;
+	if (slot.agent !== undefined && slot.subagent !== undefined) {
+		diagnostics.push(createDiagnostic(`invalid-${field}`, filePath, source, `Ignoring invalid ${field} value in ${filePath}: slot ${index + 1} cannot combine "agent" and "subagent".`));
+		return undefined;
+	}
+	let agent: string | undefined;
+	if (typeof slot.agent === "string" && slot.agent.trim()) agent = slot.agent.trim();
+	else if (slot.agent !== undefined) {
+		diagnostics.push(createDiagnostic(`invalid-${field}`, filePath, source, `Ignoring invalid ${field} value in ${filePath}: slot ${index + 1} requires a non-empty string "agent".`));
+		return undefined;
+	}
+	if (!agent && slot.subagent !== undefined) {
+		if (slot.subagent === true) agent = field === "reviewers" ? "reviewer" : "delegate";
+		else if (typeof slot.subagent === "string" && slot.subagent.trim()) agent = slot.subagent.trim();
+		else {
+			diagnostics.push(createDiagnostic(`invalid-${field}`, filePath, source, `Ignoring invalid ${field} value in ${filePath}: slot ${index + 1} requires "subagent" to be true or a non-empty string.`));
+			return undefined;
+		}
+	}
+	if (!agent) {
+		diagnostics.push(createDiagnostic(`invalid-${field}`, filePath, source, `Ignoring invalid ${field} value in ${filePath}: slot ${index + 1} requires "agent" or "subagent".`));
+		return undefined;
+	}
+	const normalized: DelegationLineupSlot = { agent };
+	if (slot.model !== undefined) {
+		if (typeof slot.model !== "string" || !slot.model.trim() || !isValidModelSelectionSpec(slot.model.trim())) {
+			diagnostics.push(createDiagnostic(`invalid-${field}`, filePath, source, `Ignoring invalid ${field} value in ${filePath}: slot ${index + 1} has an invalid "model".`));
+			return undefined;
+		}
+		normalized.model = slot.model.trim();
+	}
+	for (const key of ["task", "taskSuffix"] as const) {
+		if (slot[key] === undefined) continue;
+		if (typeof slot[key] !== "string") {
+			diagnostics.push(createDiagnostic(`invalid-${field}`, filePath, source, `Ignoring invalid ${field} value in ${filePath}: slot ${index + 1} has a non-string "${key}".`));
+			return undefined;
+		}
+		const valueText = slot[key].trim();
+		if (valueText) normalized[key] = valueText;
+	}
+	if (slot.cwd !== undefined) {
+		if (typeof slot.cwd !== "string") {
+			diagnostics.push(createDiagnostic(`invalid-${field}`, filePath, source, `Ignoring invalid ${field} value in ${filePath}: slot ${index + 1} has a non-string "cwd".`));
+			return undefined;
+		}
+		const cwd = slot.cwd.trim();
+		if (cwd) {
+			const expanded = expandCwdPath(cwd);
+			if (!expanded) {
+				diagnostics.push(createDiagnostic(`invalid-${field}`, filePath, source, `Ignoring invalid ${field} value in ${filePath}: slot ${index + 1} "cwd" must be an absolute path.`));
+				return undefined;
+			}
+			normalized.cwd = expanded;
+		}
+	}
+	if (slot.count !== undefined) {
+		const count = typeof slot.count === "number" ? slot.count : typeof slot.count === "string" && /^\d+$/.test(slot.count.trim()) ? Number(slot.count.trim()) : NaN;
+		if (!Number.isSafeInteger(count) || count < 1) {
+			diagnostics.push(createDiagnostic(`invalid-${field}`, filePath, source, `Ignoring invalid ${field} value in ${filePath}: slot ${index + 1} "count" must be a safe integer greater than or equal to 1.`));
+			return undefined;
+		}
+		normalized.count = count;
+	}
+	return normalized;
+}
+
+function normalizeLineup(
+	value: unknown,
+	field: "workers" | "reviewers",
+	filePath: string,
+	source: PromptSource,
+	diagnostics: PromptLoaderDiagnostic[],
+): DelegationLineupSlot[] | undefined {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value) || value.length === 0) {
+		diagnostics.push(createDiagnostic(`invalid-${field}`, filePath, source, `Ignoring invalid ${field} value in ${filePath}: expected a non-empty array of slot objects.`));
+		return undefined;
+	}
+	const slots: DelegationLineupSlot[] = [];
+	for (let index = 0; index < value.length; index++) {
+		const slot = normalizeLineupSlot(value[index], field, filePath, source, diagnostics, index);
+		if (!slot) return undefined;
+		slots.push(slot);
+	}
+	return slots;
+}
+
+function normalizeFinalApplier(
+	value: unknown,
+	filePath: string,
+	source: PromptSource,
+	diagnostics: PromptLoaderDiagnostic[],
+): DelegationLineupSlot | undefined {
+	if (value === undefined) return undefined;
+	const slot = normalizeLineupSlot(value, "finalApplier", filePath, source, diagnostics, 0);
+	if (!slot) return undefined;
+	const raw = value as Record<string, unknown>;
+	if (raw.count !== undefined || raw.cwd !== undefined) {
+		diagnostics.push(createDiagnostic("invalid-finalApplier", filePath, source, `Ignoring invalid finalApplier value in ${filePath}: "count" and "cwd" are not supported.`));
+		return undefined;
+	}
+	return slot;
+}
+
+function normalizeBestOfN(
+	value: unknown,
+	filePath: string,
+	source: PromptSource,
+	diagnostics: PromptLoaderDiagnostic[],
+): BestOfNConfig | undefined {
+	if (value === undefined) return undefined;
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		diagnostics.push(createDiagnostic("invalid-best-of-n", filePath, source, `Ignoring invalid bestOfN value in ${filePath}: frontmatter field "bestOfN" must be an object.`));
+		return undefined;
+	}
+	const record = value as Record<string, unknown>;
+	const workers = normalizeLineup(record.workers, "workers", filePath, source, diagnostics);
+	const reviewers = normalizeLineup(record.reviewers, "reviewers", filePath, source, diagnostics);
+	const finalApplier = normalizeFinalApplier(record.finalApplier, filePath, source, diagnostics);
+	if (record.workers !== undefined && !workers) return undefined;
+	if (record.reviewers !== undefined && !reviewers) return undefined;
+	if (record.finalApplier !== undefined && !finalApplier) return undefined;
+	if (!workers || workers.length === 0) {
+		diagnostics.push(createDiagnostic("invalid-best-of-n", filePath, source, `Ignoring invalid bestOfN value in ${filePath}: frontmatter field "bestOfN.workers" must contain at least one slot.`));
+		return undefined;
+	}
+	return {
+		workers,
+		...(reviewers ? { reviewers } : {}),
+		...(finalApplier ? { finalApplier } : {}),
+	};
+}
+
 function normalizeSubagent(
 	value: unknown,
 	filePath: string,
@@ -1634,6 +1791,7 @@ function hasPromptLibraryCommandMarker(frontmatter: Record<string, unknown>): bo
 		"loop",
 		"converge",
 		"boomerang",
+		"bestOfN",
 		"inputs",
 	].some((key) => Object.hasOwn(frontmatter, key));
 }
@@ -1796,7 +1954,20 @@ function loadPromptsWithModelFromDir(
 					));
 					continue;
 				}
+				const topLevelCompareFields = ["workers", "reviewers", "finalApplier"]
+					.filter((key) => Object.hasOwn(frontmatter, key));
+				if (topLevelCompareFields.length > 0) {
+					diagnostics.push(createDiagnostic(
+						"unsupported-legacy-delegation",
+						fullPath,
+						source,
+						`Skipping prompt template at ${fullPath}: top-level compare field(s) ${topLevelCompareFields.join(", ")} are unsupported; use nested "bestOfN" configuration.`,
+					));
+					continue;
+				}
+				const bestOfN = normalizeBestOfN(frontmatter.bestOfN, fullPath, source, diagnostics);
 				let subagent = normalizeSubagent(frontmatter.subagent, fullPath, source, diagnostics);
+
 				const cwd = normalizeCwd(frontmatter.cwd, fullPath, source, diagnostics);
 				const inheritContext = normalizeInheritContext(frontmatter.inheritContext, fullPath, source, diagnostics);
 				let deterministic = normalizeDeterministic(frontmatter, fullPath, source, diagnostics);
@@ -1814,6 +1985,14 @@ function loadPromptsWithModelFromDir(
 				}
 				if (subagent === undefined && inheritContext) {
 					diagnostics.push(createDiagnostic("invalid-inherit-context", fullPath, source, `Ignoring inheritContext in ${fullPath}: frontmatter field "inheritContext" requires "subagent".`));
+				}
+				if (bestOfN) {
+					const incompatibleBestOfNFields = ["chain", "loop", "fresh", "converge", "boomerang", "deterministic", "subagent", "inputs"]
+						.filter((key) => Object.hasOwn(frontmatter, key));
+					if (incompatibleBestOfNFields.length > 0) {
+						diagnostics.push(createDiagnostic("invalid-best-of-n-mode", fullPath, source, `Skipping compare prompt at ${fullPath}: bestOfN cannot be combined with ${incompatibleBestOfNFields.join(", ")}.`));
+						continue;
+					}
 				}
 				if (!rawChain && subagent === undefined && cwd) {
 					if (deterministic) deterministic = { ...deterministic, ...(deterministic.cwd ? {} : { cwd }) };
@@ -1914,6 +2093,7 @@ function loadPromptsWithModelFromDir(
 					budget !== undefined ||
 					inputs !== undefined ||
 					includeConfigIsCommandCapable ||
+					bestOfN !== undefined ||
 					deterministic !== undefined ||
 					subagent !== undefined ||
 					safeInheritContext;
@@ -1976,6 +2156,7 @@ function loadPromptsWithModelFromDir(
 					loop: loop !== undefined ? loop : undefined,
 					converge: converge === false ? false : undefined,
 					boomerang: boomerang || undefined,
+					bestOfN,
 					deterministic,
 					subagent,
 					inheritContext: safeInheritContext || undefined,
@@ -2206,6 +2387,7 @@ function collectPromptSourceRecordsFromDir(
 						Object.hasOwn(frontmatter, "deterministic") ||
 						Object.hasOwn(frontmatter, "run") ||
 						Object.hasOwn(frontmatter, "script") ||
+						Object.hasOwn(frontmatter, "bestOfN") ||
 						REMOVED_LEGACY_DELEGATION_FIELDS.some((key) => Object.hasOwn(frontmatter, key));
 				const promptCapable = calculatePromptCapable({
 					frontmatter,
@@ -2421,12 +2603,13 @@ export function buildPromptCommandDescription(prompt: PromptWithModel): string {
 	const thinkingLabel = thinkingValue ? ` ${thinkingValue}` : "";
 	const loopLabel = prompt.loop !== undefined ? ` loop:${prompt.loop === null ? "unlimited" : prompt.loop}` : "";
 	const boomerangLabel = prompt.boomerang ? " boomerang" : "";
+	const compareLabel = prompt.bestOfN ? ` compare:${prompt.bestOfN.workers?.length ?? 0} workers${prompt.bestOfN.reviewers ? `/${prompt.bestOfN.reviewers.length} reviewers` : ""}${prompt.bestOfN.finalApplier ? " +final" : ""}` : "";
 	const subagentLabel = prompt.subagent ? ` subagent:${prompt.subagent === true ? "delegate" : prompt.subagent}` : "";
 	const deterministicLabel = prompt.deterministic ? ` deterministic-step:${prompt.deterministic.handoff}` : "";
 	const cwdLabel = prompt.cwd ? ` cwd:${prompt.cwd}` : "";
 	const inheritContextLabel = prompt.inheritContext ? " fork" : "";
 	const details =
-		`[${modelLabel}${rotateLabel}${thinkingLabel}${skillLabel}${loopLabel}${boomerangLabel}${subagentLabel}${deterministicLabel}${cwdLabel}${inheritContextLabel}] ${sourceLabel}`;
+		`[${modelLabel}${rotateLabel}${thinkingLabel}${skillLabel}${loopLabel}${boomerangLabel}${compareLabel}${subagentLabel}${deterministicLabel}${cwdLabel}${inheritContextLabel}] ${sourceLabel}`;
 	return prompt.description ? `${prompt.description} ${details}` : details;
 }
 

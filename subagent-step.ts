@@ -4,7 +4,7 @@ import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
-import { captureStepExecutionOutcome, checkPromptExecutionBudget, preparePromptExecution, PromptBudgetExceededError, type StepExecutionOutcome } from "./prompt-execution.js";
+import { captureStepExecutionOutcome, checkPromptExecutionBudget, preparePromptExecution, PromptBudgetExceededError, renderPromptForDeferredModel, type StepExecutionOutcome } from "./prompt-execution.js";
 import type { PromptWithModel } from "./prompt-loader.js";
 import { notify } from "./notifications.js";
 import { buildSkillLoadedMessage, getRequestedSkills, inspectDelegatedCwd, resolvePromptSkills, type RuntimeSkillCommand } from "./prompt-skills.js";
@@ -34,7 +34,7 @@ import {
 	type GitWorktreeSnapshot,
 } from "./git-worktree-snapshot.js";
 
-interface DelegatedPromptOptions {
+export interface DelegatedPromptOptions {
 	pi: ExtensionAPI;
 	ctx: ExtensionContext;
 	currentModel: Model<any> | undefined;
@@ -44,6 +44,7 @@ interface DelegatedPromptOptions {
 	signal?: AbortSignal;
 	inheritedModel?: Model<any>;
 	taskPreamble?: string;
+	emitResult?: boolean;
 }
 
 export interface DelegatedPromptOutcome {
@@ -96,7 +97,7 @@ interface NormalizedDelegatedResponse {
 	requestId: string;
 	agent: string;
 	context: "fresh" | "fork";
-	model: string;
+	model?: string;
 	cwd: string;
 	messages: Message[];
 	status: DelegatedSubagentStatus;
@@ -217,7 +218,7 @@ interface PreparedDelegatedTask {
 	agent: string;
 	task: string;
 	context: "fresh" | "fork";
-	model: string;
+	model?: string;
 	cwd: string;
 }
 
@@ -275,24 +276,36 @@ async function prepareDelegatedTask(
 	}
 	const effectiveCwd = verifiedCwd.value.effectiveCwd;
 	const agent = requestedAgent;
-	const preparationOptions = inheritedModel === undefined
-		? { scopedModels: ctx.scopedModels }
-		: { inheritedModel, scopedModels: ctx.scopedModels };
-	const prepared = await preparePromptExecution(
-		prompt,
-		args,
-		currentModel,
-		ctx.modelRegistry,
-		preparationOptions,
-	);
-	if (!prepared) {
-		throw new Error(`No available model from: ${prompt.models.join(", ")}`);
-	}
-	if ("message" in prepared) {
+	const deferModelSelection = prompt.models.length === 0 && inheritedModel === undefined;
+	let preparedContent: string;
+	let preparedModel: string | undefined;
+	if (deferModelSelection) {
+		const deferred = renderPromptForDeferredModel(prompt, args);
+		if (deferred.warning) notify(ctx, deferred.warning, "warning");
+		if (deferred.empty) throw new Error(deferred.empty);
+		preparedContent = deferred.content ?? "";
+	} else {
+		const preparationOptions = inheritedModel === undefined
+			? { scopedModels: ctx.scopedModels }
+			: { inheritedModel, scopedModels: ctx.scopedModels };
+		const prepared = await preparePromptExecution(
+			prompt,
+			args,
+			currentModel,
+			ctx.modelRegistry,
+			preparationOptions,
+		);
+		if (!prepared) {
+			throw new Error(`No available model from: ${prompt.models.join(", ")}`);
+		}
+		if ("message" in prepared) {
+			if (prepared.warning) notify(ctx, prepared.warning, "warning");
+			throw new Error(prepared.message);
+		}
 		if (prepared.warning) notify(ctx, prepared.warning, "warning");
-		throw new Error(prepared.message);
+		preparedContent = prepared.content;
+		preparedModel = `${prepared.selectedModel.model.provider}/${prepared.selectedModel.model.id}`;
 	}
-	if (prepared.warning) notify(ctx, prepared.warning, "warning");
 	const requestedSkills = getRequestedSkills(prompt);
 	const skillResolution = resolvePromptSkills(
 		requestedSkills,
@@ -307,9 +320,9 @@ async function prepareDelegatedTask(
 	const resolvedSkillPreamble = resolvedSkills.length > 0
 		? buildSkillLoadedMessage(resolvedSkills).content
 		: undefined;
-	let taskText = prepared.content;
+	let taskText = preparedContent;
 	if (!prompt.inheritContext && taskPreamble) {
-		taskText = `${taskPreamble}\n\n---\n\n${prepared.content}`;
+		taskText = `${taskPreamble}\n\n---\n\n${preparedContent}`;
 	}
 	if (resolvedSkillPreamble) {
 		// Bind the exact content that the host validated, trust-filtered, and budgeted.
@@ -325,7 +338,7 @@ async function prepareDelegatedTask(
 		agent,
 		task: taskText,
 		context: prompt.inheritContext ? "fork" : "fresh",
-		model: `${prepared.selectedModel.model.provider}/${prepared.selectedModel.model.id}`,
+		...(preparedModel ? { model: preparedModel } : {}),
 		cwd: effectiveCwd,
 	};
 }
@@ -512,7 +525,7 @@ async function requestDelegatedRun(
 }
 
 export async function executeSubagentPromptStep(options: DelegatedPromptOptions): Promise<DelegatedPromptOutcome> {
-	const { pi, ctx, currentModel, prompt, args, override, signal, inheritedModel, taskPreamble } = options;
+	const { pi, ctx, currentModel, prompt, args, override, signal, inheritedModel, taskPreamble, emitResult = true } = options;
 	if (signal?.aborted) throw new DelegatedPromptCancelledError();
 	const commands = typeof (pi as { getCommands?: () => RuntimeSkillCommand[] }).getCommands === "function"
 		? (pi as { getCommands: () => RuntimeSkillCommand[] }).getCommands()
@@ -537,7 +550,7 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 		agent: preparedTask.agent,
 		task: preparedTask.task,
 		context: preparedTask.context,
-		model: preparedTask.model,
+		...(preparedTask.model ? { model: preparedTask.model } : {}),
 		cwd: preparedTask.cwd,
 		result: { kind: "text" },
 	};
@@ -547,7 +560,7 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 		ctx.ui.setStatus("prompt-subagent", `delegating to ${preparedTask.agent}`);
 		ctx.ui.setWorkingMessage(`Running delegated prompt with ${preparedTask.agent}...`);
 	}
-	notify(ctx, `Delegating prompt \`${preparedTask.promptName}\` to subagent \`${preparedTask.agent}\``, "info");
+	if (emitResult) notify(ctx, `Delegating prompt \`${preparedTask.promptName}\` to subagent \`${preparedTask.agent}\``, "info");
 
 	try {
 		const response = await requestDelegatedRun(pi, ctx, request, signal);
@@ -563,8 +576,9 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 		if (!text) throw new Error("Delegated subagent returned no assistant text.");
 
 		const changed = delegatedRunChanged(beforeSnapshot, preparedTask.cwd, response.usage?.toolCalls ?? 0);
-		pi.sendMessage({
-			customType: PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE,
+		if (emitResult) {
+			pi.sendMessage({
+				customType: PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE,
 			content: text,
 			display: true,
 			details: {
@@ -579,6 +593,7 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 				changed,
 			},
 		});
+		}
 
 		return {
 			changed,
