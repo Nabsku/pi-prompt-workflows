@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyLineupOverrides, executeBestOfNPrompt, MAX_BEST_OF_N_REQUESTS } from "../best-of-n.ts";
 import { PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT, PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE, PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT } from "../subagent-runtime.ts";
+import { getLastAssistantText } from "../loop-utils.ts";
 
 function createPi(responses: string[], requests: any[] = [], changedResponses: boolean[] = []) {
 	const bus = new Map<string, Array<(data: unknown) => void>>();
@@ -111,6 +112,8 @@ test("runs worker, reviewer, and final-applier phases through individual structu
 		assert.equal(pi.customMessages.length, 1);
 		assert.equal((pi.customMessages[0] as any).customType, PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE);
 		assert.match((pi.customMessages[0] as any).content, /final answer/);
+		assert.equal((pi.customMessages[0] as any).details.text, (pi.customMessages[0] as any).content);
+		assert.equal(getLastAssistantText([{ type: "custom_message", ...(pi.customMessages[0] as any) } as any]), (pi.customMessages[0] as any).details.text);
 		assert.equal((pi.customMessages[0] as any).details.changed, true);
 		assert.deepEqual((pi.customMessages[0] as any).details.usage, {
 			input: 40,

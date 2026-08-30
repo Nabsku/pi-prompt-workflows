@@ -5,6 +5,7 @@ import { minimatch } from "minimatch";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import type { PromptBudgetConfig } from "./prompt-budget.js";
+import { expandCwdPath } from "./cwd-utils.js";
 import { validatePromptInputReferences, validatePromptInputSchema, type PromptInputSchema } from "./prompt-inputs.js";
 import { parseChainDeclaration, type ChainLimits, type StructuredChainStep } from "./chain-parser.js";
 import {
@@ -52,6 +53,9 @@ const REMOVED_LEGACY_DELEGATION_FIELDS = [
 
 export type PromptSource = "user" | "project";
 export type PromptRootKind = "prompts" | "prompt-library";
+
+/** Maximum worker, reviewer, and final-applier requests in one best-of-N run. */
+export const MAX_BEST_OF_N_REQUESTS = 32;
 
 export interface DelegationLineupSlot {
 	agent: string;
@@ -1210,6 +1214,20 @@ function normalizeFinalApplier(
 	return slot;
 }
 
+function exceedsBestOfNRequestLimit(
+	workers: DelegationLineupSlot[],
+	reviewers: DelegationLineupSlot[] | undefined,
+	finalApplier: DelegationLineupSlot | undefined,
+): boolean {
+	let total = finalApplier ? 1 : 0;
+	for (const slot of [...workers, ...(reviewers ?? [])]) {
+		const count = slot.count ?? 1;
+		if (total > MAX_BEST_OF_N_REQUESTS - count) return true;
+		total += count;
+	}
+	return false;
+}
+
 function normalizeBestOfN(
 	value: unknown,
 	filePath: string,
@@ -1236,6 +1254,10 @@ function normalizeBestOfN(
 	if (record.finalApplier !== undefined && !finalApplier) return undefined;
 	if (!workers || workers.length === 0) {
 		diagnostics.push(createDiagnostic("invalid-best-of-n", filePath, source, `Ignoring invalid bestOfN value in ${filePath}: frontmatter field "bestOfN.workers" must contain at least one slot.`));
+		return undefined;
+	}
+	if (exceedsBestOfNRequestLimit(workers, reviewers, finalApplier)) {
+		diagnostics.push(createDiagnostic("invalid-best-of-n", filePath, source, `Skipping prompt template at ${filePath}: bestOfN requests exceed the configured limit of ${MAX_BEST_OF_N_REQUESTS}. Reduce slot counts before retrying.`));
 		return undefined;
 	}
 	return {
@@ -1281,10 +1303,7 @@ function normalizeSubagent(
 	return normalized;
 }
 
-export function expandCwdPath(raw: string): string | undefined {
-	const expanded = raw.startsWith("~/") ? join(homedir(), raw.slice(2)) : raw;
-	return isAbsolute(expanded) ? expanded : undefined;
-}
+export { expandCwdPath } from "./cwd-utils.js";
 
 function normalizeCwd(
 	value: unknown,
