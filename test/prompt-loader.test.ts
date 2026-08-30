@@ -823,10 +823,10 @@ test("prompt-library command marker matrix matches runtime and source inventory"
 			{ name: "deterministic-marker", frontmatter: `deterministic:\n  run: echo hi`, assertPrompt: (prompt) => assert.equal(prompt.deterministic?.execution.command, "echo hi") },
 			{ name: "run-marker", frontmatter: `run: echo hi`, assertPrompt: (prompt) => assert.equal(prompt.deterministic?.execution.command, "echo hi") },
 			{ name: "script-marker", frontmatter: `script: ./script.sh`, assertPrompt: (prompt) => assert.equal(prompt.deterministic?.execution.path, "./script.sh") },
+			{ name: "best-of-n-marker", frontmatter: `bestOfN:\n  workers:\n    - agent: delegate\n      count: 2`, assertPrompt: (prompt) => assert.equal(prompt.bestOfN?.workers?.[0].count, 2) },
 		];
 		const legacyFixtures = [
 			{ name: "parallel-marker", frontmatter: `subagent: true\nparallel: 2` },
-			{ name: "best-of-n-marker", frontmatter: `bestOfN:\n  workers:\n    - model: claude-sonnet-4-20250514` },
 			{ name: "worktree-marker", frontmatter: `subagent: true\nworktree: true` },
 		] as const;
 

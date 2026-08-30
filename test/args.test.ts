@@ -4,6 +4,7 @@ import {
 	extractChainContextFlag,
 	extractLoopCount,
 	extractLoopFlags,
+	extractLineupOverrides,
 	extractSubagentOverride,
 	findRemovedLegacyRuntimeFlag,
 	parseCommandArgs,
@@ -40,11 +41,6 @@ test("findRemovedLegacyRuntimeFlag rejects retired delegation controls but prese
 		"--worktree",
 		"--preset=quick",
 		"--preset quick",
-		"--workers=[]",
-		"--workers-append=[]",
-		"--reviewers=[]",
-		"--reviewers-append=[]",
-		"--final-applier={}",
 		"--keep-artifacts",
 	]) {
 		assert.ok(findRemovedLegacyRuntimeFlag(`task ${flag}`), flag);
@@ -61,14 +57,29 @@ test("findRemovedLegacyRuntimeFlag uses the command parser grammar around escape
 
 test("findRemovedLegacyRuntimeFlag rejects retired flags with partially quoted tokens", () => {
 	for (const [raw, parsed, expected] of [
-		["--workers='[]'", ["--workers=[]"], "--workers"],
 		['--preset="quick"', ["--preset=quick"], "--preset"],
-		["--final-applier='{}'", ["--final-applier={}"], "--final-applier"],
 		['""--worktree', ["--worktree"], "--worktree"],
 	] as const) {
 		assert.deepEqual(parseCommandArgs(raw), parsed, raw);
 		assert.equal(findRemovedLegacyRuntimeFlag(raw), expected, raw);
 	}
+});
+
+test("extractLineupOverrides removes structured compare flags and preserves ordinary args", () => {
+	const result = extractLineupOverrides(`task --workers=${JSON.stringify([{ agent: "one", count: 2 }])} --workers-append=${JSON.stringify([{ agent: "two" }])} --final-applier=${JSON.stringify({ agent: "final" })}`);
+	assert.equal(result.errors.length, 0);
+	assert.equal(result.args, "task");
+	assert.deepEqual(result.actions.map((action) => [action.target, action.mode, action.slots.length]), [
+		["workers", "replace", 1],
+		["workers", "append", 1],
+		["finalApplier", "replace", 1],
+	]);
+});
+
+test("extractLineupOverrides rejects invalid slot JSON and unsupported final-applier count", () => {
+	const result = extractLineupOverrides('--workers=[{"agent":""}] --final-applier={"agent":"final","count":2}');
+	assert.equal(result.actions.length, 0);
+	assert.match(result.errors.join(" "), /non-empty|count/);
 });
 
 test("extractLoopCount extracts --loop N and --loop=N forms", () => {

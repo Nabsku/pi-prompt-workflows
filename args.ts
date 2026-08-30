@@ -1,3 +1,5 @@
+import type { DelegationLineupSlot } from "./prompt-loader.js";
+
 export interface LoopExtraction {
 	args: string;
 	loopCount: number | null;
@@ -27,11 +29,6 @@ export interface SubagentOverrideExtraction {
 export const REMOVED_LEGACY_RUNTIME_FLAGS = [
 	"--worktree",
 	"--preset",
-	"--workers",
-	"--workers-append",
-	"--reviewers",
-	"--reviewers-append",
-	"--final-applier",
 	"--keep-artifacts",
 ] as const;
 
@@ -369,6 +366,150 @@ export function extractSubagentOverride(argsString: string): SubagentOverrideExt
 		...(modelRaw !== undefined ? { model: modelRaw } : {}),
 		...(fork ? { fork: true } : {}),
 	};
+}
+
+export interface LineupOverrideSlot extends DelegationLineupSlot {}
+
+export interface LineupOverrideAction {
+	target: "workers" | "reviewers" | "finalApplier";
+	mode: "replace" | "append";
+	slots: LineupOverrideSlot[];
+}
+
+export interface LineupOverrideExtraction {
+	args: string;
+	actions: LineupOverrideAction[];
+	errors: string[];
+}
+
+function parseLineupOverrideSlots(
+	raw: string,
+	target: "workers" | "reviewers" | "finalApplier",
+	mode: "replace" | "append",
+	errors: string[],
+): LineupOverrideAction | undefined {
+	const label = `--${target === "finalApplier" ? "final-applier" : `${target}${mode === "append" ? "-append" : ""}`}`;
+	if (!raw) {
+		errors.push(`Invalid ${label}: expected JSON.`);
+		return undefined;
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch (error) {
+		errors.push(`Invalid ${label}: expected valid JSON (${error instanceof Error ? error.message : String(error)}).`);
+		return undefined;
+	}
+	const entries = target === "finalApplier"
+		? (Array.isArray(parsed) ? parsed.length === 1 ? parsed : null : [parsed])
+		: (Array.isArray(parsed) && parsed.length > 0 ? parsed : null);
+	if (!entries) {
+		errors.push(`Invalid ${label}: expected ${target === "finalApplier" ? "a slot object or a one-element JSON array" : "a non-empty JSON array"}.`);
+		return undefined;
+	}
+	const slots: LineupOverrideSlot[] = [];
+	for (let index = 0; index < entries.length; index++) {
+		const entry = entries[index];
+		if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+			errors.push(`Invalid ${label}: slot ${index + 1} must be an object.`);
+			return undefined;
+		}
+		const slot = entry as Record<string, unknown>;
+		if (typeof slot.agent !== "string" || !slot.agent.trim()) {
+			errors.push(`Invalid ${label}: slot ${index + 1} requires a non-empty string "agent".`);
+			return undefined;
+		}
+		const normalized: LineupOverrideSlot = { agent: slot.agent.trim() };
+		for (const key of ["model", "task", "taskSuffix", "cwd"] as const) {
+			if (slot[key] === undefined) continue;
+			if (typeof slot[key] !== "string" || !slot[key].trim()) {
+				errors.push(`Invalid ${label}: slot ${index + 1} "${key}" must be a non-empty string.`);
+				return undefined;
+			}
+			if (key === "cwd" && !slot[key].startsWith("/")) {
+				errors.push(`Invalid ${label}: slot ${index + 1} "cwd" must be absolute.`);
+				return undefined;
+			}
+			normalized[key] = slot[key].trim();
+		}
+		if (slot.count !== undefined) {
+			if (target === "finalApplier" || typeof slot.count !== "number" || !Number.isSafeInteger(slot.count) || slot.count < 1) {
+				errors.push(`Invalid ${label}: slot ${index + 1} "count" is not valid.`);
+				return undefined;
+			}
+			normalized.count = slot.count;
+		}
+		slots.push(normalized);
+	}
+	return { target, mode, slots };
+}
+
+function readBalancedJsonValue(input: string, start: number): { value: string; end: number } | undefined {
+	const open = input[start];
+	if (open !== "[" && open !== "{") return undefined;
+	const close = open === "[" ? "]" : "}";
+	let depth = 0;
+	let quote: string | undefined;
+	for (let index = start; index < input.length; index++) {
+		const char = input[index];
+		if (quote) {
+			if (char === "\\") index++;
+			else if (char === quote) quote = undefined;
+			continue;
+		}
+		if (char === "\"" || char === "'") {
+			quote = char;
+			continue;
+		}
+		if (char === open) depth++;
+		else if (char === close && --depth === 0) return { value: input.slice(start, index + 1), end: index + 1 };
+	}
+	return undefined;
+}
+
+const LINEUP_OVERRIDE_PREFIXES = [
+	["--workers-append=", "workers", "append"],
+	["--reviewers-append=", "reviewers", "append"],
+	["--workers=", "workers", "replace"],
+	["--reviewers=", "reviewers", "replace"],
+	["--final-applier=", "finalApplier", "replace"],
+] as const;
+
+export function extractLineupOverrides(argsString: string): LineupOverrideExtraction {
+	const actions: LineupOverrideAction[] = [];
+	const errors: string[] = [];
+	const ranges: Array<{ start: number; end: number }> = [];
+	let index = 0;
+	while (index < argsString.length) {
+		const char = argsString[index];
+		if (char === "\"" || char === "'") {
+			const quote = char;
+			index++;
+			while (index < argsString.length && argsString[index] !== quote) index++;
+			if (index < argsString.length) index++;
+			continue;
+		}
+		if (/\s/.test(char)) {
+			index++;
+			continue;
+		}
+		const spec = LINEUP_OVERRIDE_PREFIXES.find(([prefix]) => argsString.startsWith(prefix, index));
+		if (!spec) {
+			while (index < argsString.length && !/\s/.test(argsString[index])) index++;
+			continue;
+		}
+		const valueStart = index + spec[0].length;
+		const balanced = readBalancedJsonValue(argsString, valueStart);
+		const end = balanced?.end ?? (() => { let end = valueStart; while (end < argsString.length && !/\s/.test(argsString[end])) end++; return end; })();
+		const raw = balanced?.value ?? argsString.slice(valueStart, end);
+		ranges.push({ start: index, end });
+		const action = parseLineupOverrideSlots(raw, spec[1], spec[2], errors);
+		if (action) actions.push(action);
+		index = end;
+	}
+	let cleaned = argsString;
+	for (const range of ranges.sort((a, b) => b.start - a.start)) cleaned = cleaned.slice(0, range.start) + cleaned.slice(range.end);
+	return { args: cleaned.trim(), actions, errors };
 }
 
 export function splitByUnquotedSeparator(input: string, separator: string): string[] {

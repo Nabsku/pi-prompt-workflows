@@ -183,7 +183,20 @@ test("inherits current model when prompt has no model", async () => {
 	assert.equal(result.model!.id, sonnet.id);
 });
 
-test("returns error when no model exists and no current model exists", async () => {
+test("previews effective best-of-N counts and runtime replacement overrides", async () => {
+	const result = assertOk(await createPromptDryRun(prompt({
+		models: ["anthropic/claude-sonnet-4-20250514"],
+		bestOfN: {
+			workers: [{ agent: "delegate", count: 2 }],
+			reviewers: [{ agent: "reviewer" }],
+			finalApplier: { agent: "synthesizer" },
+		},
+	}), options("/tmp", { rawArgs: `--workers=${JSON.stringify([{ agent: "specialist" }])}` })));
+	assert.deepEqual(result.runtime.bestOfN, { workers: 1, reviewers: 1, finalApplier: true, totalRequests: 3, maxRequests: 32 });
+	assert.equal(result.runtime.delegation?.agent, "best-of-n");
+});
+
+ test("returns error when no model exists and no current model exists", async () => {
 	const result = assertError(await createPromptDryRun(prompt({ models: [], content: "body" }), options("/tmp")));
 	assert.match(result.error, /has no `model` configured and there is no active session model/i);
 });

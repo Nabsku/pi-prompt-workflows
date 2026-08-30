@@ -43,6 +43,10 @@ function formatRuntime(runtime: Partial<PromptDryRunRuntimeMetadata> | undefined
 	} else {
 		lines.push("- Delegation: disabled");
 	}
+	if (runtime.bestOfN) {
+		lines.push(`- Best-of-N: workers=${formatScalar(runtime.bestOfN.workers)}, reviewers=${formatScalar(runtime.bestOfN.reviewers)}, final applier=${formatScalar(runtime.bestOfN.finalApplier)}`);
+		lines.push(`  - Requests: ${formatScalar(runtime.bestOfN.totalRequests)} / ${formatScalar(runtime.bestOfN.maxRequests)}`);
+	}
 	if (runtime.loop) {
 		lines.push(
 			`- Loop: count=${formatScalar(runtime.loop.count)}, fresh=${formatScalar(runtime.loop.fresh)}, converge=${formatScalar(runtime.loop.converge)}`,

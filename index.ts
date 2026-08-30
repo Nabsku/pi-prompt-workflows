@@ -10,6 +10,7 @@ import {
 	extractChainContextFlag,
 	extractLoopCount,
 	extractLoopFlags,
+	extractLineupOverrides,
 	extractSubagentOverride,
 	findRemovedLegacyRuntimeFlag,
 	parseCommandArgs,
@@ -32,6 +33,8 @@ import {
 	loadPromptsWithModel,
 	collectPromptSourceRecords,
 	selectEffectivePromptSourceRecords,
+	type DelegationLineupSlot,
+	type BestOfNConfig,
 	type PromptWithModel,
 } from "./prompt-loader.js";
 import { createInvalidAdaptivePreflight, isAdaptivePromptTarget, isAdaptiveRunTarget } from "./adaptive-preflight.js";
@@ -47,6 +50,7 @@ import {
 import { renderSkillLoaded, type SkillLoadedDetails } from "./skill-loaded-renderer.js";
 import { createToolManager } from "./tool-manager.js";
 import { DelegatedPromptCancelledError, executeSubagentPromptStep } from "./subagent-step.js";
+import { executeBestOfNPrompt, applyLineupOverrides } from "./best-of-n.js";
 import {
 	DEFAULT_SUBAGENT_NAME,
 	PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT,
@@ -2117,6 +2121,30 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 			return "failed";
 		}
 		const argsWithoutSubagent = subagent.args;
+		const lineup = extractLineupOverrides(argsWithoutSubagent);
+		if (lineup.errors.length > 0) {
+			notify(ctx, lineup.errors.join(" "), "error");
+			return "failed";
+		}
+		if (prompt.bestOfN !== undefined || lineup.actions.length > 0) {
+			if (prompt.bestOfN === undefined) {
+				notify(ctx, "Lineup overrides require a prompt with bestOfN configuration.", "error");
+				return "failed";
+			}
+			if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return "failed";
+			const compareArgs = [...parseCommandArgs(lineup.args), ...(boundary.after.length ? ["--", ...boundary.after] : [])];
+			return await executeBestOfNPrompt({
+				pi,
+				ctx,
+				prompt,
+				config: applyLineupOverrides(prompt.bestOfN, lineup.actions),
+				args: compareArgs,
+				currentModel: getCurrentModel(ctx),
+				runtimeModel: subagent.model,
+				runtimeCwd,
+				signal: getCommandSignal(ctx),
+			});
+		}
 		if (prompt.inputs && extractLoopCount(argsWithoutSubagent)) {
 			notify(ctx, "Prompt inputs are only supported on ordinary prompts without loops, chains, delegation, compare, or deterministic execution", "error");
 			return "failed";
