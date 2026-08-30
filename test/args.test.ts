@@ -90,6 +90,15 @@ test("extractLineupOverrides expands home-relative slot cwds", () => {
 	assert.equal(result.actions[0]?.slots[0]?.cwd, join(homedir(), "delegated"));
 });
 
+test("extractLineupOverrides decodes single- and double-quoted JSON values", () => {
+	const json = JSON.stringify([{ agent: "worker", task: "focus on \"quoted\" output" }]);
+	const result = extractLineupOverrides(`keep --workers='${json}' --reviewers=${JSON.stringify(json)} tail`);
+	assert.equal(result.errors.length, 0);
+	assert.deepEqual(parseCommandArgs(result.args), ["keep", "tail"]);
+	assert.deepEqual(result.actions.map((action) => action.slots[0]?.agent), ["worker", "worker"]);
+	assert.deepEqual(result.actions.map((action) => action.slots[0]?.task), ["focus on \"quoted\" output", "focus on \"quoted\" output"]);
+});
+
 test("extractLineupOverrides rejects invalid slot JSON and unsupported final-applier count", () => {
 	const result = extractLineupOverrides('--workers=[{"agent":""}] --final-applier={"agent":"final","count":2}');
 	assert.equal(result.actions.length, 0);

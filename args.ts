@@ -498,6 +498,34 @@ function readBalancedJsonValue(input: string, start: number): { value: string; e
 	return undefined;
 }
 
+function readQuotedValue(input: string, start: number): { value: string; end: number } | undefined {
+	const quote = input[start];
+	if (quote !== "\"" && quote !== "'") return undefined;
+	for (let index = start + 1; index < input.length; index++) {
+		const char = input[index];
+		if (quote === "\"" && char === "\\") {
+			index++;
+			continue;
+		}
+		if (char === quote) return { value: input.slice(start, index + 1), end: index + 1 };
+	}
+	return undefined;
+}
+
+function readQuotedJsonValue(input: string, start: number): { value: string; end: number } | undefined {
+	const quoted = readQuotedValue(input, start);
+	if (!quoted) return undefined;
+	let end = quoted.end;
+	while (end < input.length && !/\s/.test(input[end]!)) end++;
+	return { value: input.slice(start, end), end };
+}
+
+function decodeQuotedJsonValue(raw: string): string {
+	if (raw[0] !== "\"" && raw[0] !== "'") return raw;
+	const tokens = parseCommandArgTokens(raw);
+	return tokens.length === 1 ? tokens[0]!.value : raw;
+}
+
 const LINEUP_OVERRIDE_PREFIXES = [
 	["--workers-append=", "workers", "append"],
 	["--reviewers-append=", "reviewers", "append"],
@@ -531,8 +559,9 @@ export function extractLineupOverrides(argsString: string): LineupOverrideExtrac
 		}
 		const valueStart = index + spec[0].length;
 		const balanced = readBalancedJsonValue(argsString, valueStart);
-		const end = balanced?.end ?? (() => { let end = valueStart; while (end < argsString.length && !/\s/.test(argsString[end])) end++; return end; })();
-		const raw = balanced?.value ?? argsString.slice(valueStart, end);
+		const quoted = balanced ? undefined : readQuotedJsonValue(argsString, valueStart);
+		const end = balanced?.end ?? quoted?.end ?? (() => { let end = valueStart; while (end < argsString.length && !/\s/.test(argsString[end]!)) end++; return end; })();
+		const raw = decodeQuotedJsonValue(balanced?.value ?? quoted?.value ?? argsString.slice(valueStart, end));
 		ranges.push({ start: index, end });
 		const action = parseLineupOverrideSlots(raw, spec[1], spec[2], errors);
 		if (action) actions.push(action);

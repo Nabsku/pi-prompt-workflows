@@ -7,7 +7,7 @@ import { applyLineupOverrides, executeBestOfNPrompt, MAX_BEST_OF_N_REQUESTS } fr
 import { PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT, PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE, PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT } from "../subagent-runtime.ts";
 import { getLastAssistantText } from "../loop-utils.ts";
 
-function createPi(responses: string[], requests: any[] = [], changedResponses: boolean[] = []) {
+function createPi(responses: string[], requests: any[] = [], changedResponses: boolean[] = [], failedAgents: string[] = []) {
 	const bus = new Map<string, Array<(data: unknown) => void>>();
 	const customMessages: unknown[] = [];
 	let responseIndex = 0;
@@ -31,6 +31,7 @@ function createPi(responses: string[], requests: any[] = [], changedResponses: b
 	pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data: any) => {
 		requests.push(data);
 		const currentResponseIndex = responseIndex++;
+		const failed = failedAgents.includes(data.agent);
 		pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, {
 			requestId: data.requestId,
 			ownerRunId: data.ownerRunId,
@@ -40,10 +41,10 @@ function createPi(responses: string[], requests: any[] = [], changedResponses: b
 			requestId: data.requestId,
 			ownerRunId: data.ownerRunId,
 			nodeId: data.nodeId,
-			status: "completed",
+			status: failed ? "failed" : "completed",
 			agent: data.agent,
 			model: data.model,
-			result: { kind: "text", text: responses[currentResponseIndex] ?? "fallback" },
+			...(failed ? { error: `${data.agent} unavailable` } : { result: { kind: "text", text: responses[currentResponseIndex] ?? "fallback" } }),
 			changed: changedResponses[currentResponseIndex] === true,
 			usage: { input: 10, output: 5, cacheRead: 1, cacheWrite: 2, cost: 0.01, turns: 1, toolCalls: 1, durationMs: 100 },
 		});
@@ -130,6 +131,38 @@ test("runs worker, reviewer, and final-applier phases through individual structu
 	}
 });
 
+test("preserves the original task when reviewer and final-applier tasks override phase instructions", async () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-prompt-best-of-n-task-context-"));
+	try {
+		const requests: any[] = [];
+		const pi = createPi(["candidate", "review", "final"], requests);
+		const context = createCtx(root);
+		const result = await executeBestOfNPrompt({
+			pi,
+			ctx: context,
+			prompt: { ...basePrompt, content: "Original requirements must remain visible." },
+			config: {
+				workers: [{ agent: "worker" }],
+				reviewers: [{ agent: "reviewer", task: "Check compliance only." }],
+				finalApplier: { agent: "applier", task: "Return the final response only." },
+			},
+			args: [],
+			currentModel: context.model,
+		});
+		assert.equal(result, "completed");
+		const reviewerRequest = requests.find((request) => request.agent === "reviewer");
+		assert.ok(reviewerRequest);
+		assert.match(reviewerRequest.task, /Check compliance only\./);
+		assert.match(reviewerRequest.task, /Original requirements must remain visible\./);
+		const applierRequest = requests.find((request) => request.agent === "applier");
+		assert.ok(applierRequest);
+		assert.match(applierRequest.task, /Return the final response only\./);
+		assert.match(applierRequest.task, /Original requirements must remain visible\./);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("forwards runtime subagent and fork overrides to every best-of-N request", async () => {
 	const root = mkdtempSync(join(tmpdir(), "pi-prompt-best-of-n-runtime-"));
 	try {
@@ -210,6 +243,27 @@ test("passes reviewer failures to the final applier", async () => {
 		const applierRequest = requests.find((request) => request.agent === "applier");
 		assert.ok(applierRequest);
 		assert.match(applierRequest.task, /review backend unavailable/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("fails when a configured final applier produces no successful result", async () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-prompt-best-of-n-final-failure-"));
+	try {
+		const requests: any[] = [];
+		const pi = createPi(["candidate"], requests, [], ["applier"]);
+		const context = createCtx(root);
+		const result = await executeBestOfNPrompt({
+			pi,
+			ctx: context,
+			prompt: basePrompt,
+			config: { workers: [{ agent: "worker" }], finalApplier: { agent: "applier" } },
+			args: [],
+			currentModel: context.model,
+		});
+		assert.equal(result, "failed");
+		assert.equal(pi.customMessages.length, 0);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

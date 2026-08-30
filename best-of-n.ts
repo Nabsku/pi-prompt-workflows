@@ -94,11 +94,12 @@ function phasePreamble(
 	slot: DelegationLineupSlot,
 	evidence: string,
 ): string {
-	const instruction = phase === "worker"
+	const defaultInstruction = phase === "worker"
 		? "Produce one independent candidate answer for the prompt. Do not discuss other candidates."
 		: phase === "reviewer"
 			? "Review the candidate answers below. Identify the strongest answer and concrete corrections. Do not claim to apply changes."
 			: "Select or synthesize the best final answer from the candidate answers and reviews below. Return only the answer for the user.";
+	const instruction = phase === "worker" ? defaultInstruction : (slot.task?.trim() || defaultInstruction);
 	const suffix = slot.taskSuffix ? `\n\nAdditional slot instruction:\n${slot.taskSuffix.trim()}` : "";
 	return `${instruction}${suffix}${evidence}`;
 }
@@ -106,6 +107,7 @@ function phasePreamble(
 function slotPrompt(
 	base: PromptWithModel,
 	slot: DelegationLineupSlot,
+	phase: PhaseResult["phase"],
 	runtimeModel: string | undefined,
 	runtimeCwd: string | undefined,
 	runtimeFork: boolean,
@@ -114,7 +116,7 @@ function slotPrompt(
 	return {
 		...base,
 		name: `${base.name}:${slot.agent}`,
-		content: slot.task ?? base.content,
+		content: phase === "worker" ? (slot.task ?? base.content) : base.content,
 		models,
 		subagent: slot.agent,
 		cwd: runtimeCwd ?? slot.cwd ?? base.cwd,
@@ -151,7 +153,7 @@ async function runPhase(
 				pi: options.pi,
 				ctx: options.ctx,
 				currentModel: options.currentModel,
-				prompt: slotPrompt(effectivePrompt, slot, runtimeModel, options.runtimeCwd, options.runtimeFork === true),
+				prompt: slotPrompt(effectivePrompt, slot, phase, runtimeModel, options.runtimeCwd, options.runtimeFork === true),
 				args: options.args,
 				signal: cancellation.signal,
 				override: options.runtimeOverride,
@@ -262,6 +264,11 @@ export async function executeBestOfNPrompt(options: BestOfNRunOptions): Promise<
 			? await runPhase(options, "final-applier", [options.config.finalApplier], options.runtimeModel, `${workerEvidence}${reviewEvidence}`, cancellation.controller)
 			: [];
 		const finalText = resultText(finalResults, "Final answer");
+		if (options.config.finalApplier && finalText.length === 0) {
+			const failures = summarizeFailures(finalResults);
+			notify(options.ctx, `bestOfN final applier produced no successful result.${failures.length > 0 ? `\n${failures.join("\n")}` : ""}`, "error");
+			return "failed";
+		}
 		const reviewText = resultText(reviewers, "Review");
 		const workerText = resultText(workers, "Candidate");
 		const body = finalText || reviewText || workerText;
