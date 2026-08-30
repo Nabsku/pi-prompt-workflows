@@ -196,7 +196,28 @@ test("previews effective best-of-N counts and runtime replacement overrides", as
 	assert.equal(result.runtime.delegation?.agent, "best-of-n");
 });
 
- test("returns error when no model exists and no current model exists", async () => {
+test("defers model selection for model-less delegated dry-runs", async () => {
+	const task = '<if-model is="openai/*">openai<else>other</if-model>';
+	const result = assertOk(await createPromptDryRun(
+		prompt({ models: [], content: task, subagent: true }),
+		options("/tmp", { currentModel: sonnet as never }),
+	));
+	assert.equal(result.content, task);
+	assert.equal(result.model, undefined);
+	assert.equal(result.modelResolution, "deferred");
+	assert.equal(result.modelAlreadyActive, false);
+});
+
+test("model-less delegated dry-runs do not require an active session model", async () => {
+	const result = assertOk(await createPromptDryRun(
+		prompt({ models: [], subagent: true }),
+		options("/tmp"),
+	));
+	assert.equal(result.model, undefined);
+	assert.equal(result.modelResolution, "deferred");
+});
+
+test("returns error when no model exists and no current model exists", async () => {
 	const result = assertError(await createPromptDryRun(prompt({ models: [], content: "body" }), options("/tmp")));
 	assert.match(result.error, /has no `model` configured and there is no active session model/i);
 });

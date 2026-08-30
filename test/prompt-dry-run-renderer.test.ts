@@ -123,6 +123,17 @@ test("shows delegation metadata clearly", () => {
 	assert.match(rendered, /Inherit context: true/);
 });
 
+test("reports deferred delegated model selection honestly", () => {
+	const rendered = formatPromptDryRun(ok({
+		model: undefined,
+		modelAlreadyActive: false,
+		modelResolution: "deferred",
+		runtime: { restore: false, boomerang: false, delegation: { enabled: true, agent: "delegate" } },
+	}));
+	assert.match(rendered, /Model: deferred \(delegated agent resolves\)/);
+	assert.match(rendered, /Model already active: unknown \(delegated agent resolves\)/);
+});
+
 test("shows model, active, thinking, restore, cwd, boomerang, and loop metadata clearly", () => {
 	const rendered = formatPromptDryRun(
 		ok({
