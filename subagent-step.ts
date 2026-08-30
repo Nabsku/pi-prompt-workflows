@@ -47,6 +47,8 @@ export interface DelegatedPromptOptions {
 	taskPreamble?: string;
 	includeTaskPreambleWithFork?: boolean;
 	emitResult?: boolean;
+	/** Canonical root of a worktree created by the best-of-N isolation adapter. */
+	trustedWorktreeRoot?: string;
 }
 
 export interface DelegatedPromptOutcome {
@@ -266,6 +268,27 @@ async function approveNestedDelegatedProject(ctx: ExtensionContext, projectRoot:
 	}
 }
 
+export async function validateDelegatedCwd(ctx: ExtensionContext, requestedCwd: string, trustedRoots: readonly string[] = []): Promise<string> {
+	if (!existsSync(requestedCwd)) {
+		throw new Error(`cwd directory does not exist: ${requestedCwd}`);
+	}
+	const cwdTrustOptions = trustedRoots.length > 0 ? { trustedRoots } : undefined;
+	const inspectedCwd = inspectDelegatedCwd(ctx.cwd, requestedCwd, ctx.isProjectTrusted?.() !== false, cwdTrustOptions);
+	if (inspectedCwd.kind === "error") throw new Error(inspectedCwd.error);
+	if (inspectedCwd.value.nestedProjectRoot) {
+		await approveNestedDelegatedProject(ctx, inspectedCwd.value.nestedProjectRoot);
+	}
+	const verifiedCwd = inspectDelegatedCwd(ctx.cwd, requestedCwd, ctx.isProjectTrusted?.() !== false, cwdTrustOptions);
+	if (verifiedCwd.kind === "error") throw new Error(verifiedCwd.error);
+	if (
+		verifiedCwd.value.effectiveCwd !== inspectedCwd.value.effectiveCwd
+		|| verifiedCwd.value.nestedProjectRoot !== inspectedCwd.value.nestedProjectRoot
+	) {
+		throw new Error("Delegated cwd changed while project trust was being verified; refusing execution.");
+	}
+	return verifiedCwd.value.effectiveCwd;
+}
+
 async function prepareDelegatedTask(
 	prompt: PromptWithModel,
 	args: string[],
@@ -276,29 +299,14 @@ async function prepareDelegatedTask(
 	inheritedModel: Model<any> | undefined,
 	taskPreamble: string | undefined,
 	includeTaskPreambleWithFork: boolean,
+	trustedWorktreeRoot: string | undefined,
 ): Promise<PreparedDelegatedTask> {
 	const requestedAgent = resolveDelegationName(prompt, override);
 	if (!requestedAgent) {
 		throw new Error(`Prompt \`${prompt.name}\` is not configured for delegated execution.`);
 	}
 	const requestedCwd = prompt.cwd ?? ctx.cwd;
-	if (!existsSync(requestedCwd)) {
-		throw new Error(`cwd directory does not exist: ${requestedCwd}`);
-	}
-	const inspectedCwd = inspectDelegatedCwd(ctx.cwd, requestedCwd, ctx.isProjectTrusted?.() !== false);
-	if (inspectedCwd.kind === "error") throw new Error(inspectedCwd.error);
-	if (inspectedCwd.value.nestedProjectRoot) {
-		await approveNestedDelegatedProject(ctx, inspectedCwd.value.nestedProjectRoot);
-	}
-	const verifiedCwd = inspectDelegatedCwd(ctx.cwd, requestedCwd, ctx.isProjectTrusted?.() !== false);
-	if (verifiedCwd.kind === "error") throw new Error(verifiedCwd.error);
-	if (
-		verifiedCwd.value.effectiveCwd !== inspectedCwd.value.effectiveCwd
-		|| verifiedCwd.value.nestedProjectRoot !== inspectedCwd.value.nestedProjectRoot
-	) {
-		throw new Error("Delegated cwd changed while project trust was being verified; refusing execution.");
-	}
-	const effectiveCwd = verifiedCwd.value.effectiveCwd;
+	const effectiveCwd = await validateDelegatedCwd(ctx, requestedCwd, trustedWorktreeRoot ? [trustedWorktreeRoot] : []);
 	const agent = requestedAgent;
 	const deferModelSelection = prompt.models.length === 0 && inheritedModel === undefined;
 	let preparedContent: string;
@@ -552,7 +560,7 @@ async function requestDelegatedRun(
 }
 
 export async function executeSubagentPromptStep(options: DelegatedPromptOptions): Promise<DelegatedPromptOutcome> {
-	const { pi, ctx, currentModel, prompt, args, override, signal, inheritedModel, taskPreamble, includeTaskPreambleWithFork = false, emitResult = true } = options;
+	const { pi, ctx, currentModel, prompt, args, override, signal, inheritedModel, taskPreamble, includeTaskPreambleWithFork = false, emitResult = true, trustedWorktreeRoot } = options;
 	if (signal?.aborted) throw new DelegatedPromptCancelledError();
 	const commands = typeof (pi as { getCommands?: () => RuntimeSkillCommand[] }).getCommands === "function"
 		? (pi as { getCommands: () => RuntimeSkillCommand[] }).getCommands()
@@ -567,6 +575,7 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 		inheritedModel,
 		taskPreamble,
 		includeTaskPreambleWithFork,
+		trustedWorktreeRoot,
 	);
 	if (signal?.aborted) throw new DelegatedPromptCancelledError();
 

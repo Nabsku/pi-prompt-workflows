@@ -57,7 +57,7 @@ This package is an enhanced fork of [`pi-prompt-template-model`](https://github.
 
 ### Breaking or migration notes
 
-- `pi-subagents` 0.44 removed its legacy parallel/task/worktree transport. This extension keeps the structured single-delegation contract and restores best-of-N by issuing one bounded structured request per worker, reviewer, or final applier. Templates that use legacy `parallel`, `worktree`, `commit`, or `preset` fields are rejected with `unsupported-legacy-delegation`; nested `bestOfN` is supported.
+- `pi-subagents` 0.44 removed its legacy parallel/task/worktree transport. This extension keeps the structured single-delegation contract and restores best-of-N by issuing one bounded structured request per worker, reviewer, or final applier. Templates that use legacy `parallel`, `worktree`, `commit`, or `preset` fields are rejected with `unsupported-legacy-delegation`; nested `bestOfN` is supported. Best-of-N creates one temporary detached Git worktree per worker and reviewer; the source worktree must be clean.
 - `skills:` must be a list. Use `skill: name` for a single skill.
 - Some fields that upstream accepted loosely are now type-checked before registration, including prompt includes, chain declarations, loop values, cwd paths, and delegated skill selectors.
 
@@ -362,7 +362,7 @@ bestOfN:
     agent: synthesizer
 ```
 
-`agent` and `subagent` are accepted as slot names. A slot may set `model`, `task`, `taskSuffix`, `cwd`, and (for workers or reviewers) a positive `count`. Runtime replace/append overrides are available with `--workers=JSON`, `--workers-append=JSON`, `--reviewers=JSON`, `--reviewers-append=JSON`, and `--final-applier=JSON`. The total number of worker, reviewer, and final-applier requests is bounded at 32 per invocation. Best-of-N does not restore the removed worktree or automatic commit transport.
+`agent` and `subagent` are accepted as slot names. A slot may set `model`, `task`, `taskSuffix`, `cwd`, and (for workers or reviewers) a positive `count`. Runtime replace/append overrides are available with `--workers=JSON`, `--workers-append=JSON`, `--reviewers=JSON`, `--reviewers-append=JSON`, and `--final-applier=JSON`. The total number of worker, reviewer, and final-applier requests is bounded at 32 per invocation. Each worker and reviewer runs in its own temporary detached Git worktree, so the source worktree must be clean. Their worktree paths are passed to later phases as evidence. The final applier runs in the effective target cwd and may apply a selected worker diff there; worktree cleanup is automatic and no commit is created automatically. Best-of-N does not restore the removed legacy parallel/task/worktree transport.
 
 ## Model Format
 
