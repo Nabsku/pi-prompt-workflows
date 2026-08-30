@@ -1,13 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyLineupOverrides, executeBestOfNPrompt, MAX_BEST_OF_N_REQUESTS } from "../best-of-n.ts";
 import { PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT, PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE, PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT } from "../subagent-runtime.ts";
 import { getLastAssistantText } from "../loop-utils.ts";
 
-function createPi(responses: string[], requests: any[] = [], changedResponses: boolean[] = [], failedAgents: string[] = []) {
+function createPi(
+	responses: string[],
+	requests: any[] = [],
+	changedResponses: boolean[] = [],
+	failedAgents: string[] = [],
+	onRequest?: (data: any) => void,
+) {
 	const bus = new Map<string, Array<(data: unknown) => void>>();
 	const customMessages: unknown[] = [];
 	let responseIndex = 0;
@@ -30,6 +37,7 @@ function createPi(responses: string[], requests: any[] = [], changedResponses: b
 	} as any;
 	pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data: any) => {
 		requests.push(data);
+		onRequest?.(data);
 		const currentResponseIndex = responseIndex++;
 		const failed = failedAgents.includes(data.agent);
 		pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, {
@@ -53,6 +61,14 @@ function createPi(responses: string[], requests: any[] = [], changedResponses: b
 }
 
 function createCtx(cwd: string) {
+	if (!existsSync(join(cwd, ".git"))) {
+		execFileSync("git", ["init", "-q"], { cwd });
+		execFileSync("git", ["config", "user.email", "test@example.com"], { cwd });
+		execFileSync("git", ["config", "user.name", "Test User"], { cwd });
+		writeFileSync(join(cwd, "tracked.txt"), "base\n");
+		execFileSync("git", ["add", "tracked.txt"], { cwd });
+		execFileSync("git", ["commit", "-qm", "initial"], { cwd });
+	}
 	const model = { provider: "anthropic", id: "claude-sonnet-4-20250514" };
 	const configured = { provider: "openai", id: "configured" };
 	return {
@@ -76,6 +92,17 @@ function createCtx(cwd: string) {
 	} as any;
 }
 
+function createGitRepo(prefix: string): string {
+	const root = mkdtempSync(join(tmpdir(), prefix));
+	execFileSync("git", ["init", "-q"], { cwd: root });
+	execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: root });
+	execFileSync("git", ["config", "user.name", "Test User"], { cwd: root });
+	writeFileSync(join(root, "tracked.txt"), "base\n");
+	execFileSync("git", ["add", "tracked.txt"], { cwd: root });
+	execFileSync("git", ["commit", "-qm", "initial"], { cwd: root });
+	return root;
+}
+
 const basePrompt = {
 	name: "compare",
 	description: "",
@@ -96,10 +123,98 @@ test("applies lineup replacements and appends in command order", () => {
 	assert.deepEqual(result, { workers: [{ agent: "one" }, { agent: "two" }], reviewers: [{ agent: "new-review" }], finalApplier: { agent: "new-final" } });
 });
 
+test("isolates concurrent workers in separate worktrees", async () => {
+	const root = createGitRepo("pi-prompt-best-of-n-isolation-");
+	try {
+		const requests: any[] = [];
+		const pi = createPi(["candidate one", "candidate two"], requests, [], [], (data) => {
+			if (data.agent === "worker") writeFileSync(join(data.cwd, "worker-marker.txt"), data.agent);
+		});
+		const context = createCtx(root);
+		const result = await executeBestOfNPrompt({
+			pi,
+			ctx: context,
+			prompt: basePrompt,
+			config: { workers: [{ agent: "worker", count: 2 }] },
+			args: [],
+			currentModel: context.model,
+		});
+		assert.equal(result, "completed");
+		assert.equal(requests.length, 2);
+		const workerCwds = requests.map((request) => request.cwd);
+		assert.equal(new Set(workerCwds).size, 2);
+		assert.equal(workerCwds.every((cwd) => !existsSync(cwd)), true);
+		assert.equal(existsSync(join(root, "worker-marker.txt")), false);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("rejects a dirty source worktree before launching workers", async () => {
+	const root = createGitRepo("pi-prompt-best-of-n-dirty-");
+	try {
+		writeFileSync(join(root, "tracked.txt"), "dirty\n");
+		const requests: any[] = [];
+		const pi = createPi(["candidate"], requests);
+		const context = createCtx(root);
+		const result = await executeBestOfNPrompt({
+			pi,
+			ctx: context,
+			prompt: basePrompt,
+			config: { workers: [{ agent: "worker" }] },
+			args: [],
+			currentModel: context.model,
+		});
+		assert.equal(result, "failed");
+		assert.equal(requests.length, 0);
+		assert.equal(existsSync(join(root, "tracked.txt")), true);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("rejects an untrusted worker source cwd before creating a worktree", async () => {
+	const root = createGitRepo("pi-prompt-best-of-n-trusted-root-");
+	const outside = createGitRepo("pi-prompt-best-of-n-untrusted-root-");
+	try {
+		const requests: any[] = [];
+		const pi = createPi(["candidate"], requests);
+		const context = createCtx(root);
+		const result = await executeBestOfNPrompt({
+			pi,
+			ctx: context,
+			prompt: basePrompt,
+			config: { workers: [{ agent: "worker", cwd: outside }] },
+			args: [],
+			currentModel: context.model,
+		});
+		assert.equal(result, "failed");
+		assert.equal(requests.length, 0);
+	} finally {
+		rmSync(outside, { recursive: true, force: true });
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("runs worker, reviewer, and final-applier phases through individual structured requests", async () => {
 	const root = mkdtempSync(join(tmpdir(), "pi-prompt-best-of-n-"));
 	try {
-		const pi = createPi(["candidate one", "candidate two", "review findings", "final answer"], [], [true]);
+		const requests: any[] = [];
+		const pi = createPi(
+			["candidate one", "candidate two", "review findings", "final answer"],
+			requests,
+			[true],
+			[],
+			(data) => {
+				if (data.agent === "worker") writeFileSync(join(data.cwd, "candidate-marker.txt"), data.agent);
+				if (data.agent === "applier") {
+					const workerCwds = requests.filter((request) => request.agent === "worker").map((request) => request.cwd);
+					assert.equal(workerCwds.length, 2);
+					assert.equal(workerCwds.every((cwd) => existsSync(cwd)), true);
+					assert.match(data.task, /Worktree:/);
+				}
+			},
+		);
 		const context = createCtx(root);
 		const result = await executeBestOfNPrompt({
 			pi,
@@ -126,6 +241,9 @@ test("runs worker, reviewer, and final-applier phases through individual structu
 			toolCalls: 4,
 			durationMs: 400,
 		});
+		assert.equal(requests.length, 4);
+		assert.equal(new Set(requests.slice(0, 3).map((request) => request.cwd)).size, 3);
+		assert.equal(requests[3].cwd, realpathSync(root));
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -186,7 +304,8 @@ test("forwards runtime subagent and fork overrides to every best-of-N request", 
 		assert.equal(requests[0].agent, "runtime-worker");
 		assert.equal(requests[0].context, "fork");
 		assert.equal(requests[0].model, "anthropic/claude-sonnet-4-20250514");
-		assert.equal(requests[0].cwd, realpathSync(root));
+		assert.notEqual(requests[0].cwd, realpathSync(root));
+		assert.match(requests[0].cwd, /pi-prompt-best-of-n-worktrees-/);
 		assert.match(requests[0].task, /independent candidate answer/);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
@@ -317,11 +436,11 @@ test("preserves original slot labels when an earlier worker fails", async () => 
 		assert.equal(result, "completed");
 		const reviewerRequest = requests.find((request) => request.agent === "reviewer");
 		assert.ok(reviewerRequest);
-		assert.match(reviewerRequest.task, /Candidate 1 \(first\) failed/);
+		assert.match(reviewerRequest.task, /Candidate 1 \(first\)[\s\S]*failed/);
 		assert.match(reviewerRequest.task, /Candidate 2 \(second\)/);
 		const applierRequest = requests.find((request) => request.agent === "applier");
 		assert.ok(applierRequest);
-		assert.match(applierRequest.task, /Candidate 1 \(first\) failed/);
+		assert.match(applierRequest.task, /Candidate 1 \(first\)[\s\S]*failed/);
 		assert.match(applierRequest.task, /Candidate 2 \(second\)/);
 	} finally {
 		rmSync(root, { recursive: true, force: true });

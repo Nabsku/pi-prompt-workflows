@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1300,6 +1301,12 @@ test("routes best-of-N runtime overrides through the registered command", async 
 			join(cwd, ".pi", "prompts", "compare.md"),
 			`---\nmodel: ${MODEL_ID}\nbestOfN:\n  workers:\n    - agent: configured-worker\n  reviewers:\n    - agent: configured-reviewer\n  finalApplier:\n    agent: configured-applier\n---\ncompare task`,
 		);
+		execFileSync("git", ["init", "-q"], { cwd });
+		execFileSync("git", ["config", "user.email", "test@example.com"], { cwd });
+		execFileSync("git", ["config", "user.name", "Test User"], { cwd });
+		writeFileSync(join(cwd, "tracked.txt"), "base\n");
+		execFileSync("git", ["add", "."], { cwd });
+		execFileSync("git", ["commit", "-qm", "initial"], { cwd });
 
 		const pi = new FakePi();
 		const requests: any[] = [];
