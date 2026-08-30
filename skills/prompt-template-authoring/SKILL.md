@@ -145,6 +145,7 @@ bestOfN:
 - A slot accepts `agent` or the documented `subagent` alias, plus `model`, `task`, `taskSuffix`, `cwd`, and a positive `count` for workers or reviewers.
 - Reviewers receive successful candidates and labelled worker failure summaries. The final applier receives those materials plus reviewer results and failure summaries.
 - The total worker, reviewer, and final-applier requests cannot exceed 32 per invocation.
+- Every worker and reviewer runs in its own temporary detached Git worktree. The source worktree for each slot must be clean. Their worktree paths are included in later-phase evidence; the final applier runs in the effective target cwd and no commit is created automatically.
 - Runtime lineup changes use `--workers=JSON`, `--workers-append=JSON`, `--reviewers=JSON`, `--reviewers-append=JSON`, and `--final-applier=JSON`.
 - This feature does not restore legacy worktree, parallel, automatic commit, or preset transport. Those fields are rejected instead of ignored.
 

@@ -21,6 +21,11 @@ export type DelegatedCwdInspectionResult =
 	| { kind: "ready"; value: DelegatedCwdInspection }
 	| { kind: "error"; error: string };
 
+/** Additional roots created and verified by an internal delegated-workspace adapter. */
+export interface DelegatedCwdInspectionOptions {
+	trustedRoots?: readonly string[];
+}
+
 function isDirectory(path: string): boolean {
 	try {
 		return statSync(path).isDirectory();
@@ -65,10 +70,16 @@ function findNestedProjectRoot(sessionCwd: string, effectiveCwd: string): string
 	return undefined;
 }
 
+function isWithin(root: string, candidate: string): boolean {
+	const childPath = relative(root, candidate);
+	return childPath === "" || (childPath !== ".." && !childPath.startsWith(`..${sep}`) && !isAbsolute(childPath));
+}
+
 export function inspectDelegatedCwd(
 	sessionCwd: string,
 	effectiveCwd: string,
 	sessionTrusted: boolean,
+	options: DelegatedCwdInspectionOptions = {},
 ): DelegatedCwdInspectionResult {
 	if (!sessionTrusted) {
 		return {
@@ -89,20 +100,30 @@ export function inspectDelegatedCwd(
 		};
 	}
 
-	const childPath = relative(canonicalSessionCwd, canonicalEffectiveCwd);
-	if (childPath === ".." || childPath.startsWith(`..${sep}`) || isAbsolute(childPath)) {
+	const trustedRoots = [canonicalSessionCwd];
+	for (const trustedRoot of options.trustedRoots ?? []) {
+		try {
+			const canonicalTrustedRoot = realpathSync(trustedRoot);
+			if (!trustedRoots.includes(canonicalTrustedRoot)) trustedRoots.push(canonicalTrustedRoot);
+		} catch {
+			// An unresolvable additional root cannot grant trust.
+		}
+	}
+	const trustRoot = trustedRoots.find((root) => isWithin(root, canonicalEffectiveCwd));
+	if (!trustRoot) {
 		return {
 			kind: "error",
 			error: `Delegated cwd \`${effectiveCwd}\` is outside the trusted session root \`${sessionCwd}\`. Start Pi in that cwd and approve project trust before delegation.`,
 		};
 	}
+	const childPath = relative(trustRoot, canonicalEffectiveCwd);
 
 	return {
 		kind: "ready",
 		value: {
 			sessionCwd: canonicalSessionCwd,
 			effectiveCwd: canonicalEffectiveCwd,
-			...(childPath ? { nestedProjectRoot: findNestedProjectRoot(canonicalSessionCwd, canonicalEffectiveCwd) } : {}),
+			...(childPath ? { nestedProjectRoot: findNestedProjectRoot(trustRoot, canonicalEffectiveCwd) } : {}),
 		},
 	};
 }

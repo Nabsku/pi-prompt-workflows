@@ -1,11 +1,12 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
-import { executeSubagentPromptStep, DelegatedPromptCancelledError, type DelegatedPromptOutcome } from "./subagent-step.js";
+import { executeSubagentPromptStep, DelegatedPromptCancelledError, validateDelegatedCwd, type DelegatedPromptOutcome } from "./subagent-step.js";
 import { MAX_BEST_OF_N_REQUESTS, type BestOfNConfig, type DelegationLineupSlot, type PromptWithModel } from "./prompt-loader.js";
 import type { SubagentOverride } from "./args.js";
 import { type LineupOverrideAction } from "./args.js";
 import { notify } from "./notifications.js";
 import { PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE, type DelegatedSubagentUsage } from "./subagent-runtime.js";
+import { createBestOfNWorktreeManager, type BestOfNWorktreeManager, type IsolatedBestOfNWorktree } from "./best-of-n-worktree.js";
 
 export { MAX_BEST_OF_N_REQUESTS } from "./prompt-loader.js";
 
@@ -48,6 +49,7 @@ interface PhaseResult {
 	index: number;
 	outcome?: DelegatedPromptOutcome;
 	error?: string;
+	workspace?: IsolatedBestOfNWorktree;
 }
 
 function requestedSlotCount(slots: readonly DelegationLineupSlot[]): number {
@@ -77,11 +79,13 @@ function expandSlots(slots: DelegationLineupSlot[], label: string): DelegationLi
 function appendEvidence(preamble: string, label: string, results: PhaseResult[]): string {
 	const evidence = results
 		.map((result) => {
+			const agent = result.outcome?.agent ?? result.slot.agent;
+			const workspace = result.workspace ? `\nWorktree: ${result.workspace.root}` : "";
 			if (result.outcome && !result.error && result.outcome.text.trim()) {
-				return `\n\n--- ${label} ${result.index + 1} (${result.slot.agent}) ---\n${result.outcome.text.trim()}`;
+				return `\n\n--- ${label} ${result.index + 1} (${agent})${workspace} ---\n${result.outcome.text.trim()}`;
 			}
 			if (result.error) {
-				return `\n\n--- ${label} ${result.index + 1} (${result.slot.agent}) failed ---\n${result.error}`;
+				return `\n\n--- ${label} ${result.index + 1} (${agent})${workspace} failed ---\n${result.error}`;
 			}
 			return "";
 		})
@@ -93,15 +97,17 @@ function phasePreamble(
 	phase: "worker" | "reviewer" | "final-applier",
 	slot: DelegationLineupSlot,
 	evidence: string,
+	workspace?: IsolatedBestOfNWorktree,
 ): string {
 	const defaultInstruction = phase === "worker"
-		? "Produce one independent candidate answer for the prompt. Do not discuss other candidates."
+		? "Produce one independent candidate answer for the prompt. Do not discuss other candidates. You are working in an isolated Git worktree. Make candidate changes only there, do not modify the original workspace or commit changes. Leave useful changes in that worktree for reviewers or the final applier, and report all changed files."
 		: phase === "reviewer"
-			? "Review the candidate answers below. Identify the strongest answer and concrete corrections. Do not claim to apply changes."
-			: "Select or synthesize the best final answer from the candidate answers and reviews below. Return only the answer for the user.";
+			? "Review the candidate answers below. Identify the strongest answer and concrete corrections. Do not modify any worktree or claim to apply changes."
+			: "Select or synthesize the best final answer from the candidate answers and reviews below. If a candidate contains code changes, inspect its Worktree path and apply only the selected changes to the current target cwd. Return only the answer for the user.";
 	const instruction = phase === "worker" ? defaultInstruction : (slot.task?.trim() || defaultInstruction);
 	const suffix = slot.taskSuffix ? `\n\nAdditional slot instruction:\n${slot.taskSuffix.trim()}` : "";
-	return `${instruction}${suffix}${evidence}`;
+	const workspaceNote = workspace ? `\n\nThis ${phase} runs in isolated Git worktree \`${workspace.root}\`.\n` : "";
+	return `${instruction}${suffix}${workspaceNote}${evidence}`;
 }
 
 function slotPrompt(
@@ -111,6 +117,7 @@ function slotPrompt(
 	runtimeModel: string | undefined,
 	runtimeCwd: string | undefined,
 	runtimeFork: boolean,
+	isolatedCwd: string | undefined,
 ): PromptWithModel {
 	const models = runtimeModel ? [runtimeModel] : slot.model ? [slot.model] : base.models;
 	return {
@@ -119,7 +126,7 @@ function slotPrompt(
 		content: phase === "worker" ? (slot.task ?? base.content) : base.content,
 		models,
 		subagent: slot.agent,
-		cwd: runtimeCwd ?? slot.cwd ?? base.cwd,
+		cwd: isolatedCwd ?? runtimeCwd ?? slot.cwd ?? base.cwd,
 		...(runtimeFork ? { inheritContext: true } : {}),
 		bestOfN: undefined,
 	};
@@ -137,6 +144,10 @@ function createCancellationScope(parentSignal: AbortSignal | undefined): { contr
 	};
 }
 
+function sourceCwdForSlot(options: BestOfNRunOptions, slot: DelegationLineupSlot): string {
+	return options.runtimeCwd ?? slot.cwd ?? options.prompt.cwd ?? options.ctx.cwd;
+}
+
 async function runPhase(
 	options: BestOfNRunOptions,
 	phase: PhaseResult["phase"],
@@ -144,24 +155,39 @@ async function runPhase(
 	runtimeModel: string | undefined,
 	evidence: string,
 	cancellation: AbortController,
+	worktreeManager: BestOfNWorktreeManager,
 ): Promise<PhaseResult[]> {
 	let cancellationError: DelegatedPromptCancelledError | undefined;
+	if (phase !== "final-applier") {
+		for (const sourceCwd of new Set(slots.map((slot) => sourceCwdForSlot(options, slot)))) {
+			await validateDelegatedCwd(options.ctx, sourceCwd);
+		}
+	}
+	const workspaces = phase === "final-applier"
+		? slots.map(() => undefined)
+		: slots.map((slot, index) => worktreeManager.create(sourceCwdForSlot(options, slot), `${phase}-${index + 1}`));
 	const results = await Promise.all(slots.map(async (slot, index): Promise<PhaseResult> => {
+		const workspace = workspaces[index];
 		try {
-			const effectivePrompt = options.runtimeCwd ? { ...options.prompt, cwd: options.runtimeCwd } : options.prompt;
+			const effectivePrompt = workspace
+				? { ...options.prompt, cwd: workspace.cwd }
+				: options.runtimeCwd
+					? { ...options.prompt, cwd: options.runtimeCwd }
+					: options.prompt;
 			const outcome = await executeSubagentPromptStep({
 				pi: options.pi,
 				ctx: options.ctx,
 				currentModel: options.currentModel,
-				prompt: slotPrompt(effectivePrompt, slot, phase, runtimeModel, options.runtimeCwd, options.runtimeFork === true),
+				prompt: slotPrompt(effectivePrompt, slot, phase, runtimeModel, options.runtimeCwd, options.runtimeFork === true, workspace?.cwd),
 				args: options.args,
 				signal: cancellation.signal,
 				override: options.runtimeOverride,
-				taskPreamble: phasePreamble(phase, slot, evidence),
+				taskPreamble: phasePreamble(phase, slot, evidence, workspace),
 				includeTaskPreambleWithFork: options.runtimeFork === true,
 				emitResult: false,
+				trustedWorktreeRoot: workspace?.root,
 			});
-			return { phase, slot, index, outcome };
+			return { phase, slot, index, outcome, workspace };
 		} catch (error) {
 			if (error instanceof DelegatedPromptCancelledError) {
 				cancellationError ??= error;
@@ -172,6 +198,7 @@ async function runPhase(
 				slot,
 				index,
 				error: error instanceof Error ? error.message : String(error),
+				workspace,
 			};
 		}
 	}));
@@ -236,6 +263,7 @@ function notifyResult(options: BestOfNRunOptions, body: string, details?: { mode
 
 export async function executeBestOfNPrompt(options: BestOfNRunOptions): Promise<"completed" | "failed" | "cancelled"> {
 	const cancellation = createCancellationScope(options.signal);
+	let worktreeManager: BestOfNWorktreeManager | undefined;
 	try {
 		const workerCount = requestedSlotCount(options.config.workers ?? []);
 		const reviewerCount = options.config.reviewers ? requestedSlotCount(options.config.reviewers) : 0;
@@ -247,8 +275,9 @@ export async function executeBestOfNPrompt(options: BestOfNRunOptions): Promise<
 		}
 		const workerSlots = expandSlots(options.config.workers ?? [], "workers");
 		const reviewerSlots = options.config.reviewers ? expandSlots(options.config.reviewers, "reviewers") : [];
+		worktreeManager = createBestOfNWorktreeManager();
 
-		const workers = await runPhase(options, "worker", workerSlots, options.runtimeModel, "", cancellation.controller);
+		const workers = await runPhase(options, "worker", workerSlots, options.runtimeModel, "", cancellation.controller, worktreeManager);
 		const workerEvidence = appendEvidence("\n\nCandidate answers:", "Candidate", workers);
 		const workerSuccesses = workers.filter((result) => result.outcome && !result.error);
 		if (workerSuccesses.length === 0) {
@@ -257,11 +286,11 @@ export async function executeBestOfNPrompt(options: BestOfNRunOptions): Promise<
 		}
 
 		const reviewers = reviewerSlots.length > 0
-			? await runPhase(options, "reviewer", reviewerSlots, options.runtimeModel, workerEvidence, cancellation.controller)
+			? await runPhase(options, "reviewer", reviewerSlots, options.runtimeModel, workerEvidence, cancellation.controller, worktreeManager)
 			: [];
 		const reviewEvidence = appendEvidence("\n\nReviewer findings:", "Review", reviewers);
 		const finalResults = options.config.finalApplier
-			? await runPhase(options, "final-applier", [options.config.finalApplier], options.runtimeModel, `${workerEvidence}${reviewEvidence}`, cancellation.controller)
+			? await runPhase(options, "final-applier", [options.config.finalApplier], options.runtimeModel, `${workerEvidence}${reviewEvidence}`, cancellation.controller, worktreeManager)
 			: [];
 		const finalText = resultText(finalResults, "Final answer");
 		if (options.config.finalApplier && finalText.length === 0) {
@@ -292,6 +321,13 @@ export async function executeBestOfNPrompt(options: BestOfNRunOptions): Promise<
 		notify(options.ctx, `bestOfN failed: ${error instanceof Error ? error.message : String(error)}`, "error");
 		return "failed";
 	} finally {
+		if (worktreeManager) {
+			try {
+				worktreeManager.cleanup();
+			} catch (error) {
+				notify(options.ctx, `bestOfN worker worktree cleanup failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
+			}
+		}
 		cancellation.cleanup();
 	}
 }
