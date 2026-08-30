@@ -79,18 +79,18 @@ function expandSlots(slots: DelegationLineupSlot[], label: string): DelegationLi
 }
 
 function appendEvidence(preamble: string, label: string, results: PhaseResult[]): string {
-	const successful = results.filter((result) => result.outcome && !result.error && result.outcome.text.trim());
-	const evidence = successful
-		.map((result, index) => {
-			const outcome = result.outcome!;
-			return `\n\n--- ${label} ${index + 1} (${result.slot.agent}) ---\n${outcome.text.trim()}`;
+	const evidence = results
+		.map((result) => {
+			if (result.outcome && !result.error && result.outcome.text.trim()) {
+				return `\n\n--- ${label} ${result.index + 1} (${result.slot.agent}) ---\n${result.outcome.text.trim()}`;
+			}
+			if (result.error) {
+				return `\n\n--- ${label} ${result.index + 1} (${result.slot.agent}) failed ---\n${result.error}`;
+			}
+			return "";
 		})
 		.join("");
-	const failures = results
-		.filter((result) => result.error)
-		.map((result) => `\n\n--- ${label} ${result.index + 1} (${result.slot.agent}) failed ---\n${result.error}`)
-		.join("");
-	return `${preamble}${evidence}${failures}`;
+	return `${preamble}${evidence}`;
 }
 
 function phasePreamble(
@@ -184,9 +184,9 @@ function resultText(results: PhaseResult[], title: string): string {
 	const successful = results.filter((result) => result.outcome && !result.error);
 	if (successful.length === 0) return "";
 	return successful
-		.map((result, index) => {
+		.map((result) => {
 			const outcome = result.outcome!;
-			return `### ${title} ${index + 1} — ${result.slot.agent}\n\n${outcome.text.trim()}`;
+			return `### ${title} ${result.index + 1} — ${result.slot.agent}\n\n${outcome.text.trim()}`;
 		})
 		.join("\n\n");
 }

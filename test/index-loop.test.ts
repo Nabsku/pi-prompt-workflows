@@ -14,6 +14,7 @@ import {
 	PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT,
 	PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT,
 	PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT,
+	PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE,
 } from "../subagent-runtime.ts";
 
 const MODEL_ID = "claude-sonnet-4-20250514";
@@ -33,6 +34,7 @@ class FakePi {
 	commands = new Map<string, FakeCommand>();
 	tools = new Map<string, FakeTool>();
 	hooks = new Map<string, Array<(event: any, ctx: any) => Promise<any> | any>>();
+	messageRenderers = new Map<string, unknown>();
 	bus = new Map<string, Array<(data: unknown) => void>>();
 
 	events = {
@@ -58,7 +60,9 @@ class FakePi {
 	currentModel = ACTIVE_MODEL;
 	private thinking = "medium";
 
-	registerMessageRenderer() {}
+	registerMessageRenderer(type: string, renderer: unknown) {
+		this.messageRenderers.set(type, renderer);
+	}
 
 	registerCommand(name: string, command: FakeCommand) {
 		this.commands.set(name, command);
@@ -219,6 +223,8 @@ function createContext(
 				return true;
 			},
 			setStatus() {},
+			setWorkingMessage() {},
+			setWidget() {},
 			theme: {
 				fg(_token: string, text: string) {
 					return text;
@@ -1257,6 +1263,41 @@ test("refuses unsafe prompt invocation paths before acknowledgement", async () =
 		const finished = await plainFinished;
 		assert.equal(finished.status, "completed");
 		assert.equal(acknowledgements.at(-1)?.accepted, true);
+	});
+});
+
+test("routes best-of-N runtime overrides through the registered command", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "compare.md"),
+			`---\nmodel: ${MODEL_ID}\nbestOfN:\n  workers:\n    - agent: configured-worker\n  reviewers:\n    - agent: configured-reviewer\n  finalApplier:\n    agent: configured-applier\n---\ncompare task`,
+		);
+
+		const pi = new FakePi();
+		const requests: any[] = [];
+		const messages: any[] = [];
+		pi.sendMessage = (message: any) => { messages.push(message); };
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+			const request = payload as any;
+			requests.push(request);
+			emitSubagentStarted(pi, request);
+			emitSubagentCompleted(pi, request, `${request.agent} response`);
+		});
+		promptModelExtension(pi as never);
+		const { ctx, getNotifications } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+		assert.equal(pi.commands.has("compare"), true, [...pi.commands.keys()].join(", "));
+
+		await pi.commands.get("compare")!.handler("--subagent=reviewer --fork", ctx);
+
+		assert.equal(requests.length, 3, getNotifications().join(" | "));
+		assert.equal(requests.every((request) => request.agent === "reviewer"), true);
+		assert.equal(requests.every((request) => request.context === "fork"), true);
+		assert.equal(messages.length, 1);
+		assert.equal(messages[0].customType, PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE);
+		assert.equal(pi.messageRenderers.has(PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE), true);
 	});
 });
 
