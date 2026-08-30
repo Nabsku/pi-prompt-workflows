@@ -12,6 +12,7 @@
 ### Bug Fixes
 
 * honor delegated producer-owned progress rendering
+* let model-less delegated prompts use the target agent's configured model
 * refuse unsafe prompt invocation event paths before acknowledgement
 
 ## [0.18.1](https://github.com/Nabsku/pi-prompt-workflows/compare/v0.18.0...v0.18.1) (2026-08-11)

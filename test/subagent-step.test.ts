@@ -62,7 +62,7 @@ function emitCompleted(pi: any, request: any, text?: string, toolCalls = 0): voi
 		nodeId: request.nodeId,
 		status: "completed",
 		agent: request.agent,
-		model: request.model,
+		...(request.model ? { model: request.model } : {}),
 		...(text ? { result: { kind: "text", text } } : {}),
 		usage: {
 			input: 120,
@@ -182,8 +182,10 @@ test("executeSubagentPromptStep returns delegated change info", async () => {
 	await withDelegationBridge(async (root) => {
 		const pi = createPi();
 		const ctx = createCtx(root);
+		let delegatedRequest: any;
 		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
 			const request = data as any;
+			delegatedRequest = request;
 			emitStarted(pi, request);
 			emitCompleted(pi, request, "Done.", 1);
 		});
@@ -196,6 +198,7 @@ test("executeSubagentPromptStep returns delegated change info", async () => {
 			currentModel: ctx.model,
 		});
 		assert.equal(result?.changed, true);
+		assert.equal(delegatedRequest.model, "anthropic/claude-sonnet-4-20250514");
 		assert.equal(pi.customMessages.length, 1);
 		assert.deepEqual((pi.customMessages[0] as any).details.usage, {
 			input: 120,
@@ -207,6 +210,56 @@ test("executeSubagentPromptStep returns delegated change info", async () => {
 			toolCalls: 1,
 			durationMs: 1500,
 		});
+	});
+});
+
+test("executeSubagentPromptStep omits the session model for model-less delegated prompts", async () => {
+	await withDelegationBridge(async (root) => {
+		const pi = createPi();
+		const ctx = createCtx(root);
+		let request: any;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+			request = data;
+			const parsed = parseSubagentDelegationRequest(request);
+			assert.equal(parsed.ok, true, parsed.ok ? undefined : parsed.error);
+			emitStarted(pi, request);
+			emitCompleted(pi, request, "Resolved by agent.");
+		});
+
+		const result = await executeSubagentPromptStep({
+			pi,
+			prompt: { ...prompt, models: [] },
+			args: [],
+			ctx,
+			currentModel: ctx.model,
+		});
+
+		assert.equal(Object.hasOwn(request, "model"), false);
+		assert.equal(result?.text, "Resolved by agent.");
+	});
+});
+
+test("executeSubagentPromptStep preserves an explicit inherited model for model-less delegated prompts", async () => {
+	await withDelegationBridge(async (root) => {
+		const pi = createPi();
+		const ctx = createCtx(root);
+		let request: any;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+			request = data;
+			emitStarted(pi, request);
+			emitCompleted(pi, request, "Resolved by inherited model.");
+		});
+
+		await executeSubagentPromptStep({
+			pi,
+			prompt: { ...prompt, models: [] },
+			args: [],
+			ctx,
+			currentModel: ctx.model,
+			inheritedModel: { provider: "openai", id: "gpt-inherited" } as any,
+		});
+
+		assert.equal(request.model, "openai/gpt-inherited");
 	});
 });
 
