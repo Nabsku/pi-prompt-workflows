@@ -49,6 +49,7 @@ function linesSafe(lines: string[], width: number): string[] {
 
 function modelLabel(result: PromptDryRunResult): string {
 	if (result.status !== "ok") return "n/a";
+	if (result.modelResolution === "deferred") return "deferred (delegated agent resolves)";
 	const model = result.model as { provider?: string; id?: string } | string | undefined;
 	if (typeof model === "string") return model;
 	return [model?.provider, model?.id].filter(Boolean).join("/") || "n/a";

@@ -239,6 +239,55 @@ test("executeSubagentPromptStep omits the session model for model-less delegated
 	});
 });
 
+test("executeSubagentPromptStep defers model conditionals for model-less delegated prompts", async () => {
+	await withDelegationBridge(async (root) => {
+		const pi = createPi();
+		const ctx = createCtx(root);
+		const task = '<if-model is="openai/*">openai<else>other</if-model>';
+		let request: any;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+			request = data;
+			emitStarted(pi, request);
+			emitCompleted(pi, request, "Resolved by agent.");
+		});
+
+		await executeSubagentPromptStep({
+			pi,
+			prompt: { ...prompt, content: task, models: [] },
+			args: [],
+			ctx,
+			currentModel: ctx.model,
+		});
+
+		assert.equal(request.task, task);
+		assert.equal(Object.hasOwn(request, "model"), false);
+	});
+});
+
+test("executeSubagentPromptStep reaches the bridge without a session model", async () => {
+	await withDelegationBridge(async (root) => {
+		const pi = createPi();
+		const ctx = createCtx(root);
+		let request: any;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+			request = data;
+			emitStarted(pi, request);
+			emitCompleted(pi, request, "Resolved by configured agent model.");
+		});
+
+		const result = await executeSubagentPromptStep({
+			pi,
+			prompt: { ...prompt, models: [] },
+			args: [],
+			ctx,
+			currentModel: undefined,
+		});
+
+		assert.equal(result?.text, "Resolved by configured agent model.");
+		assert.equal(Object.hasOwn(request, "model"), false);
+	});
+});
+
 test("executeSubagentPromptStep preserves an explicit inherited model for model-less delegated prompts", async () => {
 	await withDelegationBridge(async (root) => {
 		const pi = createPi();
