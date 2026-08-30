@@ -347,59 +347,68 @@ function validateAdaptiveChains(cwd: string, result: PromptValidationResult, pro
 	}
 }
 
-function promptSkillResolutionCwd(prompt: PromptWithModel, cwd: string): string {
-	if (prompt.subagent !== undefined || prompt.bestOfN !== undefined) return prompt.cwd ?? cwd;
-	return cwd;
+function promptSkillResolutionCwds(prompt: PromptWithModel, cwd: string): string[] {
+	if (prompt.bestOfN !== undefined) {
+		const baseCwd = prompt.cwd ?? cwd;
+		const slots = [
+			...(prompt.bestOfN.workers ?? []),
+			...(prompt.bestOfN.reviewers ?? []),
+			...(prompt.bestOfN.finalApplier ? [prompt.bestOfN.finalApplier] : []),
+		];
+		return [...new Set(slots.length > 0 ? slots.map((slot) => slot.cwd ?? baseCwd) : [baseCwd])];
+	}
+	return [prompt.subagent !== undefined ? prompt.cwd ?? cwd : cwd];
 }
 
 function validatePromptSkills(cwd: string, result: PromptValidationResult, prompts: ReturnType<typeof loadPromptsWithModel>["prompts"], options: PromptValidationOptions) {
 	const registeredSkills = collectRegisteredSkillCandidates(options.registeredSkills);
 
 	for (const prompt of prompts.values()) {
-		const skillCwd = promptSkillResolutionCwd(prompt, cwd);
-		const delegatedCwdTrustError = prompt.subagent !== undefined || prompt.bestOfN !== undefined
-			? getDelegatedCwdTrustError(cwd, skillCwd, options.projectTrusted !== false)
-			: undefined;
-		if (delegatedCwdTrustError) {
-			result.diagnostics.push(createValidationDiagnostic(
-				"delegated-cwd-trust",
-				prompt.filePath,
-				prompt.source,
-				`Prompt template ${prompt.filePath} cannot preflight its delegated cwd: ${delegatedCwdTrustError}`,
-			));
-			continue;
-		}
-		const includeProjectSkills = canResolveProjectSkills(cwd, skillCwd, options.projectTrusted !== false);
-		const filesystemSkillNames = collectFilesystemSkillNames(skillCwd, includeProjectSkills);
-		for (const skillName of uniqueSkillNames(prompt.skills)) {
-			if (isWildcardSelector(skillName)) {
-				const prefix = skillName.slice(0, -1);
-				const matchedRegistered = validateRegisteredWildcardReference(registeredSkills, prefix, result);
-				const matchedFilesystem = Array.from(filesystemSkillNames).some((candidate) => candidate.startsWith(prefix));
-				if (!matchedRegistered && !matchedFilesystem) {
-					result.diagnostics.push(
-						createValidationDiagnostic(
-							"skill-wildcard-not-found",
-							prompt.filePath,
-							prompt.source,
-							`Prompt template ${prompt.filePath} references skill wildcard ${JSON.stringify(skillName)}, but no registered or filesystem skills matched it.`,
-						),
-					);
-				}
-				continue;
-			}
-
-			if (validateRegisteredExactReference(registeredSkills, skillName, result)) continue;
-			if (validateFilesystemSkillReference(skillCwd, prompt.source, skillName, result, includeProjectSkills)) continue;
-
-			result.diagnostics.push(
-				createValidationDiagnostic(
-					"skill-not-found",
+		for (const skillCwd of promptSkillResolutionCwds(prompt, cwd)) {
+			const delegatedCwdTrustError = prompt.subagent !== undefined || prompt.bestOfN !== undefined
+				? getDelegatedCwdTrustError(cwd, skillCwd, options.projectTrusted !== false)
+				: undefined;
+			if (delegatedCwdTrustError) {
+				result.diagnostics.push(createValidationDiagnostic(
+					"delegated-cwd-trust",
 					prompt.filePath,
 					prompt.source,
-					`Prompt template ${prompt.filePath} references skill ${JSON.stringify(skillName)}, but it was not found in registered or filesystem skills.`,
-				),
-			);
+					`Prompt template ${prompt.filePath} cannot preflight its delegated cwd: ${delegatedCwdTrustError}`,
+				));
+				continue;
+			}
+			const includeProjectSkills = canResolveProjectSkills(cwd, skillCwd, options.projectTrusted !== false);
+			const filesystemSkillNames = collectFilesystemSkillNames(skillCwd, includeProjectSkills);
+			for (const skillName of uniqueSkillNames(prompt.skills)) {
+				if (isWildcardSelector(skillName)) {
+					const prefix = skillName.slice(0, -1);
+					const matchedRegistered = validateRegisteredWildcardReference(registeredSkills, prefix, result);
+					const matchedFilesystem = Array.from(filesystemSkillNames).some((candidate) => candidate.startsWith(prefix));
+					if (!matchedRegistered && !matchedFilesystem) {
+						result.diagnostics.push(
+							createValidationDiagnostic(
+								"skill-wildcard-not-found",
+								prompt.filePath,
+								prompt.source,
+								`Prompt template ${prompt.filePath} references skill wildcard ${JSON.stringify(skillName)}, but no registered or filesystem skills matched it.`,
+							),
+						);
+					}
+					continue;
+				}
+
+				if (validateRegisteredExactReference(registeredSkills, skillName, result)) continue;
+				if (validateFilesystemSkillReference(skillCwd, prompt.source, skillName, result, includeProjectSkills)) continue;
+
+				result.diagnostics.push(
+					createValidationDiagnostic(
+						"skill-not-found",
+						prompt.filePath,
+						prompt.source,
+						`Prompt template ${prompt.filePath} references skill ${JSON.stringify(skillName)}, but it was not found in registered or filesystem skills.`,
+					),
+				);
+			}
 		}
 	}
 }
@@ -529,11 +538,12 @@ export function validatePromptTemplates(cwd: string, options: PromptValidationOp
 		let skillPreamble: string | undefined;
 		if (prompt.subagent || prompt.bestOfN) {
 			const commands = (options.registeredSkills ?? []).map((skill) => ({ name: skill.skillName, source: "skill", sourceInfo: { path: skill.skillPath } }));
-			const skillCwd = promptSkillResolutionCwd(prompt, cwd);
-			const resolved = resolvePromptSkills(getRequestedSkills(prompt), skillCwd, commands, { includeProjectSkills: canResolveProjectSkills(cwd, skillCwd, options.projectTrusted !== false) });
-			if (resolved.kind === "ready" && resolved.skills.length > 0) {
-				skillPreamble = buildSkillLoadedMessage(resolved.skills).content;
-			}
+			const skillPreambles = promptSkillResolutionCwds(prompt, cwd).flatMap((skillCwd) => {
+				const resolved = resolvePromptSkills(getRequestedSkills(prompt), skillCwd, commands, { includeProjectSkills: canResolveProjectSkills(cwd, skillCwd, options.projectTrusted !== false) });
+				if (resolved.kind !== "ready" || resolved.skills.length === 0) return [];
+				return [buildSkillLoadedMessage(resolved.skills).content];
+			});
+			skillPreamble = skillPreambles.sort((a, b) => utf8ByteLength(b) - utf8ByteLength(a))[0];
 		}
 		const minimumConditionalBody = minimumTemplateConditionalContent(substitutedBody);
 		const configuredModels = prompt.models.map((spec) => {

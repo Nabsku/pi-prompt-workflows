@@ -231,12 +231,22 @@ const pendingNestedProjectApprovalsBySession = new WeakMap<object, Map<string, P
 
 async function approveNestedDelegatedProject(ctx: ExtensionContext, projectRoot: string): Promise<void> {
 	const sessionKey = ctx.sessionManager as object;
-	const approvedProjects = approvedNestedProjectsBySession.get(sessionKey);
-	if (approvedProjects?.has(projectRoot)) return;
-	const pendingApprovals = pendingNestedProjectApprovalsBySession.get(sessionKey);
-	const pending = pendingApprovals?.get(projectRoot);
-	if (pending) return pending;
-
+	let approvedProjects = approvedNestedProjectsBySession.get(sessionKey);
+	if (!approvedProjects) {
+		approvedProjects = new Set<string>();
+		approvedNestedProjectsBySession.set(sessionKey, approvedProjects);
+	}
+	if (approvedProjects.has(projectRoot)) return;
+	let pendingApprovals = pendingNestedProjectApprovalsBySession.get(sessionKey);
+	if (!pendingApprovals) {
+		pendingApprovals = new Map<string, Promise<void>>();
+		pendingNestedProjectApprovalsBySession.set(sessionKey, pendingApprovals);
+	}
+	const pending = pendingApprovals.get(projectRoot);
+	if (pending) {
+		await pending;
+		return;
+	}
 	const message =
 		`Separate approval is required for nested project configuration at \`${projectRoot}\`. ` +
 		"pi-subagents can load project-local agents, settings, skills, and extensions from this directory.";
@@ -246,18 +256,13 @@ async function approveNestedDelegatedProject(ctx: ExtensionContext, projectRoot:
 		}
 		const approved = await ctx.ui.confirm("Approve nested delegated project", message, { timeout: 30_000 });
 		if (!approved) throw new Error(`${message} Approval was not granted.`);
-
-		const nextApprovedProjects = approvedProjects ?? new Set<string>();
-		nextApprovedProjects.add(projectRoot);
-		if (!approvedProjects) approvedNestedProjectsBySession.set(sessionKey, nextApprovedProjects);
+		approvedProjects!.add(projectRoot);
 	})();
-	const nextPendingApprovals = pendingApprovals ?? new Map<string, Promise<void>>();
-	nextPendingApprovals.set(projectRoot, approval);
-	if (!pendingApprovals) pendingNestedProjectApprovalsBySession.set(sessionKey, nextPendingApprovals);
+	pendingApprovals.set(projectRoot, approval);
 	try {
 		await approval;
 	} finally {
-		if (nextPendingApprovals.get(projectRoot) === approval) nextPendingApprovals.delete(projectRoot);
+		if (pendingApprovals.get(projectRoot) === approval) pendingApprovals.delete(projectRoot);
 	}
 }
 
