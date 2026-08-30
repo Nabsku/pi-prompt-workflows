@@ -332,7 +332,6 @@ async function prepareDelegatedTask(
 	const budgetCheck = checkPromptExecutionBudget(prompt, taskText);
 	if (budgetCheck.warning) notify(ctx, budgetCheck.warning, "warning");
 	if (budgetCheck.message) throw new PromptBudgetExceededError(budgetCheck.message);
-
 	return {
 		promptName: prompt.name,
 		agent,
