@@ -196,6 +196,50 @@ test("previews effective best-of-N counts and runtime replacement overrides", as
 	assert.equal(result.runtime.delegation?.agent, "best-of-n");
 });
 
+test("parses scalar flags outside quoted best-of-N JSON only", async () => {
+	const result = assertOk(await createPromptDryRun(prompt({
+		bestOfN: { workers: [{ agent: "delegate" }] },
+	}), options("/tmp", {
+		rawArgs: `--workers=${JSON.stringify([{ agent: "specialist", task: "use --model=gpt-5.2" }])}`,
+	})));
+	assert.equal(result.runtime.model, undefined);
+	assert.equal(result.runtime.bestOfN?.workers, 1);
+});
+
+test("validates every best-of-N slot cwd and resolves skills from the slot cwd", async () => {
+	await withTempHome(async (root) => {
+		const slotCwd = join(root, "slot-project");
+		mkdirSync(slotCwd, { recursive: true });
+		const skillDir = join(root, ".agents", "skills", "slot-skill");
+		mkdirSync(skillDir, { recursive: true });
+		const skillPath = join(skillDir, "SKILL.md");
+		writeFileSync(skillPath, "slot skill content");
+		const result = assertOk(await createPromptDryRun(prompt({
+			skill: "slot-skill",
+			bestOfN: {
+				workers: [{ agent: "worker", cwd: slotCwd }],
+				reviewers: [{ agent: "reviewer", cwd: slotCwd }],
+				finalApplier: { agent: "applier", cwd: slotCwd },
+			},
+		}), options(root)));
+		assert.equal(result.skills?.[0].skillPath, skillPath);
+
+		const missing = assertError(await createPromptDryRun(prompt({
+			bestOfN: { workers: [{ agent: "worker", cwd: join(root, "missing-slot") }] },
+		}), options(root)));
+		assert.match(missing.error, /best-of-N.*cwd|delegated cwd.*exist/i);
+	});
+});
+
+test("validates a best-of-N final-applier cwd during dry-run", async () => {
+	await withTempHome(async (root) => {
+		const result = assertError(await createPromptDryRun(prompt({
+			bestOfN: { workers: [{ agent: "worker" }], finalApplier: { agent: "applier", cwd: join(root, "missing-applier") } },
+		}), options(root)));
+		assert.match(result.error, /best-of-N.*cwd|delegated cwd.*exist/i);
+	});
+});
+
 test("reports a runtime subagent override for best-of-N dry-runs", async () => {
 	const result = assertOk(await createPromptDryRun(prompt({
 		models: ["anthropic/claude-sonnet-4-20250514"],

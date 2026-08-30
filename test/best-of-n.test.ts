@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyLineupOverrides, executeBestOfNPrompt, MAX_BEST_OF_N_REQUESTS } from "../best-of-n.ts";
@@ -42,6 +42,7 @@ function createPi(responses: string[], requests: any[] = []) {
 			agent: data.agent,
 			model: data.model,
 			result: { kind: "text", text: responses[responseIndex++] ?? "fallback" },
+			usage: { input: 10, output: 5, cacheRead: 1, cacheWrite: 2, cost: 0.01, turns: 1, toolCalls: 1, durationMs: 100 },
 		});
 	});
 	return pi;
@@ -108,6 +109,16 @@ test("runs worker, reviewer, and final-applier phases through individual structu
 		assert.equal(pi.customMessages.length, 1);
 		assert.equal((pi.customMessages[0] as any).customType, PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE);
 		assert.match((pi.customMessages[0] as any).content, /final answer/);
+		assert.deepEqual((pi.customMessages[0] as any).details.usage, {
+			input: 40,
+			output: 20,
+			cacheRead: 4,
+			cacheWrite: 8,
+			cost: 0.04,
+			turns: 4,
+			toolCalls: 4,
+			durationMs: 400,
+		});
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -123,16 +134,20 @@ test("forwards runtime subagent and fork overrides to every best-of-N request", 
 			pi,
 			ctx: context,
 			prompt: { ...basePrompt, content: "Base candidate task." },
-			config: { workers: [{ agent: "configured-worker" }] },
+			config: { workers: [{ agent: "configured-worker", model: "openai/configured" }] },
 			args: [],
 			currentModel: context.model,
 			runtimeOverride: { enabled: true, agent: "runtime-worker" },
+			runtimeModel: "anthropic/claude-sonnet-4-20250514",
+			runtimeCwd: root,
 			runtimeFork: true,
 		});
 		assert.equal(result, "completed");
 		assert.equal(requests.length, 1);
 		assert.equal(requests[0].agent, "runtime-worker");
 		assert.equal(requests[0].context, "fork");
+		assert.equal(requests[0].model, "anthropic/claude-sonnet-4-20250514");
+		assert.equal(requests[0].cwd, realpathSync(root));
 		assert.match(requests[0].task, /independent candidate answer/);
 	} finally {
 		rmSync(root, { recursive: true, force: true });

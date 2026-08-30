@@ -361,6 +361,32 @@ test("a finished observer can synchronously invoke the next prompt", async () =>
 	});
 });
 
+test("rejects generic prompt invocation for best-of-N prompts", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "prompts", "compare.md"), "---\nbestOfN:\n  workers:\n    - agent: delegate\n---\ncompare this");
+		const pi = new FakePi();
+		const acknowledgements: any[] = [];
+		pi.events.on(PROMPT_TEMPLATE_PROMPT_INVOKE_ACK_EVENT, (payload) => acknowledgements.push(payload));
+		promptModelExtension(pi as never);
+		const { ctx } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+
+		pi.events.emit(PROMPT_TEMPLATE_PROMPT_INVOKE_REQUEST_EVENT, {
+			protocolVersion: PROMPT_TEMPLATE_PROMPT_INVOKE_PROTOCOL_VERSION,
+			requestId: "best-of-n-generic-invoke",
+			name: "compare",
+		});
+		await new Promise<void>((resolve) => setImmediate(resolve));
+
+		assert.equal(acknowledgements.length, 1);
+		assert.equal(acknowledgements[0].accepted, false);
+		assert.equal(acknowledgements[0].reason, "unsupported-context");
+		assert.deepEqual(pi.userMessages, []);
+	});
+});
+
 test("a direct ordinary prompt reports an assistant error stop as failed", async () => {
 	await withTempHome(async (root) => {
 		const cwd = join(root, "project");

@@ -1203,8 +1203,8 @@ function normalizeFinalApplier(
 	const slot = normalizeLineupSlot(value, "finalApplier", filePath, source, diagnostics, 0);
 	if (!slot) return undefined;
 	const raw = value as Record<string, unknown>;
-	if (raw.count !== undefined || raw.cwd !== undefined) {
-		diagnostics.push(createDiagnostic("invalid-finalApplier", filePath, source, `Ignoring invalid finalApplier value in ${filePath}: "count" and "cwd" are not supported.`));
+	if (raw.count !== undefined) {
+		diagnostics.push(createDiagnostic("invalid-finalApplier", filePath, source, `Ignoring invalid finalApplier value in ${filePath}: "count" is not supported.`));
 		return undefined;
 	}
 	return slot;
@@ -2002,6 +2002,7 @@ function loadPromptsWithModelFromDir(
 				if (bestOfN) {
 					const incompatibleBestOfNFields = ["chain", "loop", "fresh", "converge", "boomerang", "deterministic", "subagent", "inputs"]
 						.filter((key) => Object.hasOwn(frontmatter, key));
+					if (deterministic !== undefined && !incompatibleBestOfNFields.includes("deterministic")) incompatibleBestOfNFields.push("deterministic");
 					if (inheritContext) incompatibleBestOfNFields.push("inheritContext");
 					if (incompatibleBestOfNFields.length > 0) {
 						diagnostics.push(createDiagnostic("invalid-best-of-n-mode", fullPath, source, `Skipping compare prompt at ${fullPath}: bestOfN cannot be combined with ${incompatibleBestOfNFields.join(", ")}.`));

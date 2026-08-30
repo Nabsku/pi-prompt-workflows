@@ -239,8 +239,18 @@ function shouldDelegatePrompt(prompt: Pick<PromptWithModel, "subagent" | "bestOf
 	return prompt.subagent !== undefined || prompt.bestOfN !== undefined || override?.enabled === true;
 }
 
-function countLineupSlots(slots: Array<{ count?: number }> | undefined): number {
-	return (slots ?? []).reduce((total, slot) => total + (slot.count ?? 1), 0);
+function countLineupSlots(slots: readonly { count?: number }[] | undefined): number {
+	return slots?.reduce((total, slot) => total + (slot.count ?? 1), 0) ?? 0;
+}
+
+function bestOfNSlotCwds(prompt: PromptWithModel, runtimeCwd: string | undefined, fallbackCwd: string): string[] {
+	if (!prompt.bestOfN) return [];
+	const slots = [
+		...(prompt.bestOfN.workers ?? []),
+		...(prompt.bestOfN.reviewers ?? []),
+		...(prompt.bestOfN.finalApplier ? [prompt.bestOfN.finalApplier] : []),
+	];
+	return [...new Set(slots.map((slot) => runtimeCwd ?? slot.cwd ?? prompt.cwd ?? fallbackCwd))];
 }
 
 function applyRepresentativeLoopRotation(prompt: PromptWithModel, runtime: PromptDryRunRuntimeMetadata) {
@@ -337,8 +347,10 @@ function parseDryRunArgs(prompt: PromptWithModel, rawArgs: string | undefined, a
 	}
 
 	const boundary = prompt.inputs ? splitRawArgsAtBoundary(rawArgs) : { before: rawArgs, after: [] };
-	const subagent = extractSubagentOverride(boundary.before);
-	let cleanedArgs = subagent.args;
+	const lineup = extractLineupOverrides(boundary.before);
+	let cleanedArgs = lineup.args;
+	const subagent = extractSubagentOverride(cleanedArgs);
+	cleanedArgs = subagent.args;
 	let loop: PromptDryRunLoopMetadata | undefined;
 	const extractedLoop = extractLoopCount(cleanedArgs);
 	if (extractedLoop) {
@@ -353,9 +365,6 @@ function parseDryRunArgs(prompt: PromptWithModel, rawArgs: string | undefined, a
 		};
 		cleanedArgs = flags.args;
 	}
-	const lineup = extractLineupOverrides(cleanedArgs);
-	cleanedArgs = lineup.args;
-
 	return {
 		args: [...parseCommandArgs(cleanedArgs), ...(boundary.after.length ? ["--", ...boundary.after] : [])],
 		runtime: {
@@ -394,9 +403,10 @@ export async function createPromptDryRun(
 	const runtime: PromptDryRunRuntimeMetadata = { ...parsed.runtime };
 	const warnings: string[] = [];
 	if (prompt.inputs && parsed.runtime.loop) return errorResult(prompt, inputModeEligibilityError({ inputs: prompt.inputs }) ?? "Prompt inputs do not support runtime loops", warnings, runtime);
-	let resolvedPositional = parsed.args;
+	const parsedArgs = [...parsed.args];
+	let resolvedPositional = parsedArgs;
 	if (prompt.inputs) {
-		const resolved = resolvePromptInputs(prompt.inputs, parsed.args);
+		const resolved = resolvePromptInputs(prompt.inputs, parsedArgs);
 		if (resolved.errors.length > 0) return errorResult(prompt, `Invalid prompt inputs: ${resolved.errors[0]}`, warnings, runtime);
 		resolvedPositional = resolved.positional;
 		prompt = { ...prompt, resolvedInputValues: Object.fromEntries(Object.entries(resolved.values).map(([key, input]) => [key, input.value])) };
@@ -406,12 +416,12 @@ export async function createPromptDryRun(
 		const runtimeCwd = parsed.runtimeCwd ? expandCwdPath(parsed.runtimeCwd) : undefined;
 		if (parsed.runtimeCwd && !runtimeCwd) return errorResult(prompt, "Invalid --cwd path: must be absolute", warnings, runtime);
 		if (runtimeCwd) runtime.cwd = runtimeCwd;
-		const adaptivePreflight = await prepareAdaptivePreflight(prompt, options.promptCatalog ?? new Map(), { cwd: options.cwd, runtimeCwd, args: parsed.args, modelOverride: parsed.model, currentModel: options.currentModel, modelRegistry: options.modelRegistry, scopedModels: options.scopedModels, projectTrusted: options.projectTrusted, commands: options.commands });
+		const adaptivePreflight = await prepareAdaptivePreflight(prompt, options.promptCatalog ?? new Map(), { cwd: options.cwd, runtimeCwd, args: parsedArgs, modelOverride: parsed.model, currentModel: options.currentModel, modelRegistry: options.modelRegistry, scopedModels: options.scopedModels, projectTrusted: options.projectTrusted, commands: options.commands });
 		warnings.push(...adaptivePreflight.warnings);
 		const unsupportedRuntime = parsed.override || parsed.fork || parsed.runtime.loop;
 		if (unsupportedRuntime) return { ...errorResult(prompt, "Adaptive chains reject runtime --subagent, --fork, and --loop modes because they can expand one router action into multiple top-level model calls; exact call reservation is not implemented.", warnings, runtime), adaptivePreflight };
 		if (adaptivePreflight.status === "blocked") return { ...errorResult(prompt, adaptivePreflight.diagnostics.join("\n"), warnings, runtime), adaptivePreflight };
-		return { status: "ok", promptName: prompt.name, content: "", args: parsed.args, modelAlreadyActive: true, warnings, budget: evaluateDryRunBudget("", prompt, []), skills: [], details: { skills: [] }, runtime, adaptivePreflight };
+		return { status: "ok", promptName: prompt.name, content: "", args: parsedArgs, modelAlreadyActive: true, warnings, budget: evaluateDryRunBudget("", prompt, []), skills: [], details: { skills: [] }, runtime, adaptivePreflight };
 	}
 	if (prompt.chain) return errorResult(prompt, DRY_RUN_CHAIN_UNSUPPORTED, warnings, runtime);
 	if (prompt.deterministic) return errorResult(prompt, DRY_RUN_DETERMINISTIC_UNSUPPORTED, warnings, runtime);
@@ -443,15 +453,21 @@ export async function createPromptDryRun(
 	}
 
 	const delegated = shouldDelegatePrompt(effectivePrompt, parsed.override);
-	const skillResolutionCwd = delegated ? (effectivePrompt.cwd ?? options.cwd) : options.cwd;
+	const requestedSkills = [...getRequestedSkills(effectivePrompt)];
+	const slotCwds = bestOfNSlotCwds(effectivePrompt, runtime.cwd, options.cwd);
+	const skillResolutionCwd = delegated ? (slotCwds[0] ?? effectivePrompt.cwd ?? options.cwd) : options.cwd;
 	if (delegated) {
-		if (skillResolutionCwd !== options.cwd && !existsSync(skillResolutionCwd)) {
-			return errorResult(prompt, `cwd directory does not exist: ${skillResolutionCwd}`, warnings, runtime);
+		for (const delegatedCwd of new Set([skillResolutionCwd, ...slotCwds])) {
+			if (delegatedCwd !== options.cwd && !existsSync(delegatedCwd)) {
+				const label = effectivePrompt.bestOfN ? "best-of-N slot cwd" : "cwd";
+				return errorResult(prompt, `${label} directory does not exist: ${delegatedCwd}`, warnings, runtime);
+			}
+			const cwdTrustError = getDelegatedCwdTrustError(options.cwd, delegatedCwd, options.projectTrusted !== false);
+			if (cwdTrustError) return errorResult(prompt, cwdTrustError, warnings, runtime);
+			const slotSkillResolution = resolvePromptSkills(requestedSkills, delegatedCwd, options.commands ?? [], { includeProjectSkills: canResolveProjectSkills(options.cwd, delegatedCwd, options.projectTrusted !== false) });
+			if (slotSkillResolution.kind === "error") return errorResult(prompt, slotSkillResolution.error, warnings, runtime);
 		}
-		const cwdTrustError = getDelegatedCwdTrustError(options.cwd, skillResolutionCwd, options.projectTrusted !== false);
-		if (cwdTrustError) return errorResult(prompt, cwdTrustError, warnings, runtime);
 	}
-	const requestedSkills = getRequestedSkills(effectivePrompt);
 	const skillResolution = resolvePromptSkills(requestedSkills, skillResolutionCwd, options.commands ?? [], { includeProjectSkills: canResolveProjectSkills(options.cwd, skillResolutionCwd, options.projectTrusted !== false) });
 	if (skillResolution.kind === "error") return errorResult(prompt, skillResolution.error, warnings, runtime);
 	if (delegated && !runtime.cwd && prompt.cwd) runtime.cwd = prompt.cwd;

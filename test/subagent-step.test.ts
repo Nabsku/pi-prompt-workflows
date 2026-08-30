@@ -240,7 +240,7 @@ test("executeSubagentPromptStep omits the session model for model-less delegated
 	});
 });
 
-test("executeSubagentPromptStep defers model conditionals for model-less delegated prompts", async () => {
+test("rejects model conditionals for model-less delegated prompts", async () => {
 	await withDelegationBridge(async (root) => {
 		const pi = createPi();
 		const ctx = createCtx(root);
@@ -248,20 +248,20 @@ test("executeSubagentPromptStep defers model conditionals for model-less delegat
 		let request: any;
 		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
 			request = data;
-			emitStarted(pi, request);
-			emitCompleted(pi, request, "Resolved by agent.");
 		});
 
-		await executeSubagentPromptStep({
-			pi,
-			prompt: { ...prompt, content: task, models: [] },
-			args: [],
-			ctx,
-			currentModel: ctx.model,
-		});
+		await assert.rejects(
+			executeSubagentPromptStep({
+				pi,
+				prompt: { ...prompt, content: task, models: [] },
+				args: [],
+				ctx,
+				currentModel: ctx.model,
+			}),
+			/uses <if-model> conditionals/,
+		);
 
-		assert.equal(request.task, task);
-		assert.equal(Object.hasOwn(request, "model"), false);
+		assert.equal(request, undefined);
 	});
 });
 
@@ -656,6 +656,44 @@ test("executeSubagentPromptStep uses the approved nested project's canonical cwd
 		assert.match(outbound.task, new RegExp(skillContent));
 		assert.equal(result.changed, true);
 		assert.equal((pi.customMessages.at(-1) as any).details.changed, true);
+	});
+});
+
+test("shares one in-flight approval across concurrent requests for a nested project", async () => {
+	await withDelegationBridge(async (root) => {
+		const sessionRoot = join(root, "project");
+		const nestedProject = join(sessionRoot, "nested-concurrent");
+		mkdirSync(join(nestedProject, ".pi"), { recursive: true });
+		const pi = createPi();
+		const { ctx } = createInteractiveCtx(sessionRoot);
+		let approvals = 0;
+		let releaseApproval!: () => void;
+		const approvalGate = new Promise<void>((resolve) => { releaseApproval = resolve; });
+		ctx.ui.confirm = async () => {
+			approvals++;
+			await approvalGate;
+			return true;
+		};
+		let requests = 0;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data: unknown) => {
+			const request = data as any;
+			requests++;
+			emitStarted(pi, request);
+			emitCompleted(pi, request, "done");
+		});
+
+		const runs = Array.from({ length: 3 }, () => executeSubagentPromptStep({
+			pi,
+			prompt: { ...prompt, cwd: nestedProject },
+			args: [],
+			ctx,
+			currentModel: ctx.model,
+		}));
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.equal(approvals, 1);
+		releaseApproval();
+		await Promise.all(runs);
+		assert.equal(requests, 3);
 	});
 });
 

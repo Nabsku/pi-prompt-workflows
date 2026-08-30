@@ -5,7 +5,7 @@ import type { BestOfNConfig, DelegationLineupSlot, PromptWithModel } from "./pro
 import type { SubagentOverride } from "./args.js";
 import { type LineupOverrideAction } from "./args.js";
 import { notify } from "./notifications.js";
-import { PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE } from "./subagent-runtime.js";
+import { PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE, type DelegatedSubagentUsage } from "./subagent-runtime.js";
 
 /**
  * Protects the host and the bridge from unbounded fan-out. The limit applies
@@ -111,16 +111,17 @@ function slotPrompt(
 	base: PromptWithModel,
 	slot: DelegationLineupSlot,
 	runtimeModel: string | undefined,
+	runtimeCwd: string | undefined,
 	runtimeFork: boolean,
 ): PromptWithModel {
-	const models = slot.model ? [slot.model] : runtimeModel ? [runtimeModel] : base.models;
+	const models = runtimeModel ? [runtimeModel] : slot.model ? [slot.model] : base.models;
 	return {
 		...base,
 		name: `${base.name}:${slot.agent}`,
 		content: slot.task ?? base.content,
 		models,
 		subagent: slot.agent,
-		cwd: slot.cwd ?? base.cwd,
+		cwd: runtimeCwd ?? slot.cwd ?? base.cwd,
 		...(runtimeFork ? { inheritContext: true } : {}),
 		bestOfN: undefined,
 	};
@@ -154,7 +155,7 @@ async function runPhase(
 				pi: options.pi,
 				ctx: options.ctx,
 				currentModel: options.currentModel,
-				prompt: slotPrompt(effectivePrompt, slot, runtimeModel, options.runtimeFork === true),
+				prompt: slotPrompt(effectivePrompt, slot, runtimeModel, options.runtimeCwd, options.runtimeFork === true),
 				args: options.args,
 				signal: cancellation.signal,
 				override: options.runtimeOverride,
@@ -197,11 +198,41 @@ function summarizeFailures(results: PhaseResult[]): string[] {
 		.map((result) => `${result.phase} ${result.index + 1} (${result.slot.agent}): ${result.error}`);
 }
 
-function notifyResult(options: BestOfNRunOptions, body: string): void {
+function aggregateUsage(results: PhaseResult[]): DelegatedSubagentUsage | undefined {
+	const usages = results.flatMap((result) => result.outcome?.usage ? [result.outcome.usage] : []);
+	if (usages.length === 0) return undefined;
+	return usages.reduce((total, usage) => ({
+		input: total.input + usage.input,
+		output: total.output + usage.output,
+		cacheRead: total.cacheRead + usage.cacheRead,
+		cacheWrite: total.cacheWrite + usage.cacheWrite,
+		cost: total.cost + usage.cost,
+		turns: total.turns + usage.turns,
+		toolCalls: total.toolCalls + usage.toolCalls,
+		durationMs: total.durationMs + usage.durationMs,
+	}), {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		cost: 0,
+		turns: 0,
+		toolCalls: 0,
+		durationMs: 0,
+	});
+}
+
+function aggregateModel(results: PhaseResult[]): string | undefined {
+	const models = new Set(results.flatMap((result) => result.outcome?.model ? [result.outcome.model] : []));
+	return models.size === 1 ? [...models][0] : undefined;
+}
+
+function notifyResult(options: BestOfNRunOptions, body: string, details?: { model?: string; usage?: DelegatedSubagentUsage }): void {
 	options.pi.sendMessage({
 		customType: PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE,
 		content: body,
 		display: true,
+		...(details && Object.keys(details).length > 0 ? { details } : {}),
 	});
 }
 
@@ -240,7 +271,13 @@ export async function executeBestOfNPrompt(options: BestOfNRunOptions): Promise<
 		const body = finalText || reviewText || workerText;
 		const failures = [...summarizeFailures(workers), ...summarizeFailures(reviewers), ...summarizeFailures(finalResults)];
 		const suffix = failures.length > 0 ? `\n\n> Partial result. Failed slots:\n> ${failures.join("\n> ")}` : "";
-		notifyResult(options, `${body}${suffix}`);
+		const allResults = [...workers, ...reviewers, ...finalResults];
+		const usage = aggregateUsage(allResults);
+		const model = aggregateModel(allResults);
+		notifyResult(options, `${body}${suffix}`, {
+			...(model ? { model } : {}),
+			...(usage ? { usage } : {}),
+		});
 		return "completed";
 	} catch (error) {
 		if (error instanceof DelegatedPromptCancelledError || options.signal?.aborted) {
