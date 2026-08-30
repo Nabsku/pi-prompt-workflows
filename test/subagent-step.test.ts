@@ -697,6 +697,54 @@ test("shares one in-flight approval across concurrent requests for a nested proj
 	});
 });
 
+test("keeps approvals for distinct nested projects during concurrent requests", async () => {
+	await withDelegationBridge(async (root) => {
+		const sessionRoot = join(root, "project");
+		const nestedProjectA = join(sessionRoot, "nested-a");
+		const nestedProjectB = join(sessionRoot, "nested-b");
+		mkdirSync(join(nestedProjectA, ".pi"), { recursive: true });
+		mkdirSync(join(nestedProjectB, ".pi"), { recursive: true });
+		const pi = createPi();
+		const { ctx } = createInteractiveCtx(sessionRoot);
+		let approvals = 0;
+		let releaseApproval!: () => void;
+		const approvalGate = new Promise<void>((resolve) => { releaseApproval = resolve; });
+		ctx.ui.confirm = async () => {
+			approvals++;
+			await approvalGate;
+			return true;
+		};
+		let requests = 0;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data: unknown) => {
+			const request = data as any;
+			requests++;
+			emitStarted(pi, request);
+			emitCompleted(pi, request, "done");
+		});
+
+		const runs = [nestedProjectA, nestedProjectB].map((cwd) => executeSubagentPromptStep({
+			pi,
+			prompt: { ...prompt, cwd },
+			args: [],
+			ctx,
+			currentModel: ctx.model,
+		}));
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.equal(approvals, 2);
+		releaseApproval();
+		await Promise.all(runs);
+		await executeSubagentPromptStep({
+			pi,
+			prompt: { ...prompt, cwd: nestedProjectA },
+			args: [],
+			ctx,
+			currentModel: ctx.model,
+		});
+		assert.equal(approvals, 2);
+		assert.equal(requests, 3);
+	});
+});
+
 test("executeSubagentPromptStep forwards custom agents to the loaded bridge", async () => {
 	await withDelegationBridge(async (root) => {
 		const pi = createPi();
