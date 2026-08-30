@@ -2543,3 +2543,17 @@ test("invalid chain type diagnostic names both accepted declaration shapes", () 
 		assert.equal(result.diagnostics.some((item) => item.code === "invalid-chain" && /legacy string or structured array/i.test(item.message)), true);
 	});
 });
+
+test("bestOfN rejects inherited context because evidence must be explicit", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "compare.md"),
+			"---\nbestOfN:\n  workers:\n    - agent: delegate\ninheritContext: true\n---\ncompare this",
+		);
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.has("compare"), false);
+		assert.equal(result.diagnostics.some((item) => item.code === "invalid-best-of-n-mode" && /inheritContext/.test(item.message)), true);
+	});
+});

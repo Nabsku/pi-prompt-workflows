@@ -1989,6 +1989,7 @@ function loadPromptsWithModelFromDir(
 				if (bestOfN) {
 					const incompatibleBestOfNFields = ["chain", "loop", "fresh", "converge", "boomerang", "deterministic", "subagent", "inputs"]
 						.filter((key) => Object.hasOwn(frontmatter, key));
+					if (inheritContext) incompatibleBestOfNFields.push("inheritContext");
 					if (incompatibleBestOfNFields.length > 0) {
 						diagnostics.push(createDiagnostic("invalid-best-of-n-mode", fullPath, source, `Skipping compare prompt at ${fullPath}: bestOfN cannot be combined with ${incompatibleBestOfNFields.join(", ")}.`));
 						continue;
