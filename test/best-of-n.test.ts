@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { applyLineupOverrides, executeBestOfNPrompt, MAX_BEST_OF_N_REQUESTS } from "../best-of-n.ts";
 import { PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT, PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE, PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT } from "../subagent-runtime.ts";
 
-function createPi(responses: string[], requests: any[] = []) {
+function createPi(responses: string[], requests: any[] = [], changedResponses: boolean[] = []) {
 	const bus = new Map<string, Array<(data: unknown) => void>>();
 	const customMessages: unknown[] = [];
 	let responseIndex = 0;
@@ -29,6 +29,7 @@ function createPi(responses: string[], requests: any[] = []) {
 	} as any;
 	pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data: any) => {
 		requests.push(data);
+		const currentResponseIndex = responseIndex++;
 		pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, {
 			requestId: data.requestId,
 			ownerRunId: data.ownerRunId,
@@ -41,7 +42,8 @@ function createPi(responses: string[], requests: any[] = []) {
 			status: "completed",
 			agent: data.agent,
 			model: data.model,
-			result: { kind: "text", text: responses[responseIndex++] ?? "fallback" },
+			result: { kind: "text", text: responses[currentResponseIndex] ?? "fallback" },
+			changed: changedResponses[currentResponseIndex] === true,
 			usage: { input: 10, output: 5, cacheRead: 1, cacheWrite: 2, cost: 0.01, turns: 1, toolCalls: 1, durationMs: 100 },
 		});
 	});
@@ -95,7 +97,7 @@ test("applies lineup replacements and appends in command order", () => {
 test("runs worker, reviewer, and final-applier phases through individual structured requests", async () => {
 	const root = mkdtempSync(join(tmpdir(), "pi-prompt-best-of-n-"));
 	try {
-		const pi = createPi(["candidate one", "candidate two", "review findings", "final answer"]);
+		const pi = createPi(["candidate one", "candidate two", "review findings", "final answer"], [], [true]);
 		const context = createCtx(root);
 		const result = await executeBestOfNPrompt({
 			pi,
@@ -109,6 +111,7 @@ test("runs worker, reviewer, and final-applier phases through individual structu
 		assert.equal(pi.customMessages.length, 1);
 		assert.equal((pi.customMessages[0] as any).customType, PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE);
 		assert.match((pi.customMessages[0] as any).content, /final answer/);
+		assert.equal((pi.customMessages[0] as any).details.changed, true);
 		assert.deepEqual((pi.customMessages[0] as any).details.usage, {
 			input: 40,
 			output: 20,

@@ -227,7 +227,7 @@ function aggregateModel(results: PhaseResult[]): string | undefined {
 	return models.size === 1 ? [...models][0] : undefined;
 }
 
-function notifyResult(options: BestOfNRunOptions, body: string, details?: { model?: string; usage?: DelegatedSubagentUsage }): void {
+function notifyResult(options: BestOfNRunOptions, body: string, details?: { model?: string; usage?: DelegatedSubagentUsage; changed?: boolean }): void {
 	options.pi.sendMessage({
 		customType: PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE,
 		content: body,
@@ -275,6 +275,7 @@ export async function executeBestOfNPrompt(options: BestOfNRunOptions): Promise<
 		const usage = aggregateUsage(allResults);
 		const model = aggregateModel(allResults);
 		notifyResult(options, `${body}${suffix}`, {
+			changed: allResults.some((result) => result.outcome?.changed === true),
 			...(model ? { model } : {}),
 			...(usage ? { usage } : {}),
 		});

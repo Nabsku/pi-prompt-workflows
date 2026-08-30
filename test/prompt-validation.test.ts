@@ -952,6 +952,25 @@ test("validatePromptTemplates reports nested delegated cwd approval requirements
 	});
 });
 
+test("validatePromptTemplates checks every best-of-N slot cwd", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		const missingWorkerCwd = join(cwd, "missing-worker");
+		const promptsDir = join(cwd, ".pi", "prompts");
+		mkdirSync(promptsDir, { recursive: true });
+		writeFileSync(
+			join(promptsDir, "compare.md"),
+			`---\nmodel: openai/gpt-test\nbestOfN:\n  workers:\n    - agent: delegate\n      cwd: ${missingWorkerCwd}\n---\nx`,
+		);
+
+		const result = validatePromptTemplates(cwd);
+		const diagnostic = result.diagnostics.find((item) => item.code === "delegated-cwd-trust");
+		assert.equal(result.ok, false);
+		assert.match(diagnostic?.message ?? "", /cannot preflight its delegated cwd/i);
+		assert.match(diagnostic?.message ?? "", /missing-worker/);
+	});
+});
+
 test("validatePromptTemplates includes delegated skill payloads in static budgets", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");
