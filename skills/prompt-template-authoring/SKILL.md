@@ -3,7 +3,7 @@ name: prompt-template-authoring
 description: |
   Write and run custom Pi prompt templates (slash commands) for this extension.
   Use when creating templates with model selection, deterministic pre-steps,
-  loops, sequential chains, or structured single-subagent delegation.
+  loops, sequential chains, best-of-N comparisons, or structured single-subagent delegation.
 ---
 
 # Prompt Template Authoring
@@ -124,7 +124,29 @@ cwd: /absolute/path         # working directory for the subagent (optional)
 $@
 ```
 
-Requires [pi-subagents](https://github.com/nicobailon/pi-subagents/) to be installed. Current integration uses its structured single-delegation contract. Nested `bestOfN` with bounded workers, reviewers, final applier, and lineup overrides is supported. Legacy `parallel`, `worktree`, commit, and preset fields remain unsupported and fail validation.
+Requires [pi-subagents](https://github.com/nicobailon/pi-subagents/) to be installed. Current integration uses its structured single-delegation contract. Legacy `parallel`, `worktree`, `commit`, and `preset` fields remain unsupported and fail validation.
+
+### Best-of-N comparisons
+
+Use `bestOfN` for bounded independent candidates:
+
+```yaml
+bestOfN:
+  workers:
+    - agent: delegate
+      count: 2
+  reviewers:
+    - agent: reviewer
+  finalApplier:
+    agent: synthesizer
+```
+
+- `workers` is required and must contain at least one slot. `reviewers` and `finalApplier` are optional.
+- A slot accepts `agent` or the documented `subagent` alias, plus `model`, `task`, `taskSuffix`, `cwd`, and a positive `count` for workers or reviewers.
+- Reviewers receive successful candidates and labelled worker failure summaries. The final applier receives those materials plus reviewer results and failure summaries.
+- The total worker, reviewer, and final-applier requests cannot exceed 32 per invocation.
+- Runtime lineup changes use `--workers=JSON`, `--workers-append=JSON`, `--reviewers=JSON`, `--reviewers-append=JSON`, and `--final-applier=JSON`.
+- This feature does not restore legacy worktree, parallel, automatic commit, or preset transport. Those fields are rejected instead of ignored.
 
 ## Loops
 
