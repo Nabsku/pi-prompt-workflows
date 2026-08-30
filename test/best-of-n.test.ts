@@ -194,6 +194,129 @@ test("passes reviewer failures to the final applier", async () => {
 	}
 });
 
+test("preserves original slot labels when an earlier worker fails", async () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-prompt-best-of-n-slot-labels-"));
+	try {
+		const requests: any[] = [];
+		const bus = new Map<string, Array<(data: unknown) => void>>();
+		const pi = {
+			events: {
+				emit(channel: string, data: unknown) {
+					for (const handler of bus.get(channel) ?? []) handler(data);
+				},
+				on(channel: string, handler: (data: unknown) => void) {
+					const handlers = bus.get(channel) ?? [];
+					handlers.push(handler);
+					bus.set(channel, handlers);
+					return () => bus.set(channel, (bus.get(channel) ?? []).filter((entry) => entry !== handler));
+				},
+			},
+			sendMessage() {},
+		} as any;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data: any) => {
+			requests.push(data);
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, {
+				requestId: data.requestId,
+				ownerRunId: data.ownerRunId,
+				nodeId: data.nodeId,
+			});
+			const failed = data.agent === "first";
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				requestId: data.requestId,
+				ownerRunId: data.ownerRunId,
+				nodeId: data.nodeId,
+				status: failed ? "failed" : "completed",
+				agent: data.agent,
+				...(failed ? { error: "first worker unavailable" } : { result: { kind: "text", text: `${data.agent} result` } }),
+			});
+		});
+		const context = createCtx(root);
+		const result = await executeBestOfNPrompt({
+			pi,
+			ctx: context,
+			prompt: basePrompt,
+			config: { workers: [{ agent: "first" }, { agent: "second" }], reviewers: [{ agent: "reviewer" }], finalApplier: { agent: "applier" } },
+			args: [],
+			currentModel: context.model,
+		});
+		assert.equal(result, "completed");
+		const reviewerRequest = requests.find((request) => request.agent === "reviewer");
+		assert.ok(reviewerRequest);
+		assert.match(reviewerRequest.task, /Candidate 1 \(first\) failed/);
+		assert.match(reviewerRequest.task, /Candidate 2 \(second\)/);
+		const applierRequest = requests.find((request) => request.agent === "applier");
+		assert.ok(applierRequest);
+		assert.match(applierRequest.task, /Candidate 1 \(first\) failed/);
+		assert.match(applierRequest.task, /Candidate 2 \(second\)/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("cancels sibling best-of-N requests when a child response is cancelled", async () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-prompt-best-of-n-child-cancel-"));
+	try {
+		const requests: any[] = [];
+		const cancelEvents: string[] = [];
+		const timers = new Map<string, ReturnType<typeof setTimeout>>();
+		const bus = new Map<string, Array<(data: unknown) => void>>();
+		const pi = {
+			events: {
+				emit(channel: string, data: unknown) {
+					for (const handler of bus.get(channel) ?? []) handler(data);
+				},
+				on(channel: string, handler: (data: unknown) => void) {
+					const handlers = bus.get(channel) ?? [];
+					handlers.push(handler);
+					bus.set(channel, handlers);
+					return () => bus.set(channel, (bus.get(channel) ?? []).filter((entry) => entry !== handler));
+				},
+			},
+			sendMessage() {},
+		} as any;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data: any) => {
+			requests.push(data);
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, {
+				requestId: data.requestId,
+				ownerRunId: data.ownerRunId,
+				nodeId: data.nodeId,
+			});
+			const status = requests.length === 1 ? "cancelled" : "completed";
+			timers.set(data.requestId, setTimeout(() => {
+				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+					requestId: data.requestId,
+					ownerRunId: data.ownerRunId,
+					nodeId: data.nodeId,
+					status,
+					agent: data.agent,
+					...(status === "completed" ? { result: { kind: "text", text: "late result" } } : {}),
+				});
+			}, status === "cancelled" ? 0 : 1000));
+		});
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT, (data: any) => {
+			cancelEvents.push(data.requestId);
+			const timer = timers.get(data.requestId);
+			if (timer) clearTimeout(timer);
+		});
+		const context = createCtx(root);
+		const result = await executeBestOfNPrompt({
+			pi,
+			ctx: context,
+			prompt: basePrompt,
+			config: { workers: [{ agent: "worker", count: 3 }] },
+			args: [],
+			currentModel: context.model,
+		});
+		assert.equal(result, "cancelled");
+		assert.equal(requests.length, 3);
+		assert.equal(cancelEvents.length, 2);
+		assert.equal(new Set(cancelEvents).size, 2);
+		assert.equal(cancelEvents.includes(requests[0]!.requestId), false);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("cancels sibling best-of-N requests when the parent is cancelled", async () => {
 	const root = mkdtempSync(join(tmpdir(), "pi-prompt-best-of-n-cancel-"));
 	try {

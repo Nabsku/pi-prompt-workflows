@@ -204,7 +204,7 @@ Review `${input.target}` at `${input.depth}` depth.
 <if-input name="run-tests" is="true">Run focused tests.<else>Do not run tests.</if-input>
 ```
 
-Invoke named values with `--name=value` or `--name value`; boolean inputs also accept `--no-name`. A quote-aware `--` boundary leaves everything after it as positional `$@` text. `${input.name}` and `<if-input>` affect Markdown body content only; static include paths and executable configuration remain fixed. Missing values open one compact form in interactive TUI mode. Plain, RPC, dry-run, and other headless paths never block for input: they apply defaults and report unresolved values with an actionable error. Input-enabled loops, chains, delegation, and deterministic prompts are rejected. Compare/best-of-N execution has been removed entirely.
+Invoke named values with `--name=value` or `--name value`; boolean inputs also accept `--no-name`. A quote-aware `--` boundary leaves everything after it as positional `$@` text. `${input.name}` and `<if-input>` affect Markdown body content only; static include paths and executable configuration remain fixed. Missing values open one compact form in interactive TUI mode. Plain, RPC, dry-run, and other headless paths never block for input: they apply defaults and report unresolved values with an actionable error. Input-enabled loops, chains, delegation, and deterministic prompts are rejected. Input-enabled Compare/best-of-N execution is also unsupported because the comparison phases need a fixed prompt contract.
 
 See [`examples/interactive-inputs.md`](examples/interactive-inputs.md) for a complete safe review example.
 
@@ -346,7 +346,7 @@ All fields are optional. Templates that don't use any extension features (no `mo
 
 ### Best-of-N comparison
 
-Use `bestOfN` when independent answers are useful. Each worker is one structured delegation request. Reviewers receive the successful worker outputs. The optional final applier receives both worker outputs and reviewer findings and returns the user-facing answer.
+Use `bestOfN` when independent answers are useful. Each worker is one structured delegation request. Reviewers receive successful worker outputs together with labelled worker failure summaries. The optional final applier receives worker outputs and failure summaries plus reviewer findings and reviewer failure summaries, then returns the user-facing answer.
 
 ```yaml
 bestOfN:
