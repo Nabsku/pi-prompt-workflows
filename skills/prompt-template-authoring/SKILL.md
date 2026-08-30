@@ -124,7 +124,7 @@ cwd: /absolute/path         # working directory for the subagent (optional)
 $@
 ```
 
-Requires [pi-subagents](https://github.com/nicobailon/pi-subagents/) to be installed. Current integration uses its structured single-delegation contract. Legacy `parallel`, `worktree`, `bestOfN`, lineup, commit, and preset fields are unsupported and fail validation.
+Requires [pi-subagents](https://github.com/nicobailon/pi-subagents/) to be installed. Current integration uses its structured single-delegation contract. Nested `bestOfN` with bounded workers, reviewers, final applier, and lineup overrides is supported. Legacy `parallel`, `worktree`, commit, and preset fields remain unsupported and fail validation.
 
 ## Loops
 

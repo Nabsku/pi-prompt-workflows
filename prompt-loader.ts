@@ -1101,6 +1101,12 @@ function normalizeLineupSlot(
 		return undefined;
 	}
 	const slot = value as Record<string, unknown>;
+	const allowedKeys = new Set(["agent", "subagent", "model", "task", "taskSuffix", "cwd", "count"]);
+	const unknownKeys = Object.keys(slot).filter((key) => !allowedKeys.has(key));
+	if (unknownKeys.length > 0) {
+		diagnostics.push(createDiagnostic(`invalid-${field}`, filePath, source, `Skipping prompt template at ${filePath}: ${field} slot ${index + 1} contains unsupported field(s): ${unknownKeys.join(", ")}.`));
+		return undefined;
+	}
 	if (slot.agent !== undefined && slot.subagent !== undefined) {
 		diagnostics.push(createDiagnostic(`invalid-${field}`, filePath, source, `Ignoring invalid ${field} value in ${filePath}: slot ${index + 1} cannot combine "agent" and "subagent".`));
 		return undefined;
@@ -1216,6 +1222,12 @@ function normalizeBestOfN(
 		return undefined;
 	}
 	const record = value as Record<string, unknown>;
+	const allowedKeys = new Set(["workers", "reviewers", "finalApplier"]);
+	const unknownKeys = Object.keys(record).filter((key) => !allowedKeys.has(key));
+	if (unknownKeys.length > 0) {
+		diagnostics.push(createDiagnostic("invalid-best-of-n", filePath, source, `Skipping prompt template at ${filePath}: bestOfN contains unsupported field(s): ${unknownKeys.join(", ")}.`));
+		return undefined;
+	}
 	const workers = normalizeLineup(record.workers, "workers", filePath, source, diagnostics);
 	const reviewers = normalizeLineup(record.reviewers, "reviewers", filePath, source, diagnostics);
 	const finalApplier = normalizeFinalApplier(record.finalApplier, filePath, source, diagnostics);
@@ -1966,6 +1978,7 @@ function loadPromptsWithModelFromDir(
 					continue;
 				}
 				const bestOfN = normalizeBestOfN(frontmatter.bestOfN, fullPath, source, diagnostics);
+				if (Object.hasOwn(frontmatter, "bestOfN") && !bestOfN) continue;
 				let subagent = normalizeSubagent(frontmatter.subagent, fullPath, source, diagnostics);
 
 				const cwd = normalizeCwd(frontmatter.cwd, fullPath, source, diagnostics);

@@ -76,6 +76,12 @@ test("extractLineupOverrides removes structured compare flags and preserves ordi
 	]);
 });
 
+test("extractLineupOverrides accepts the documented subagent slot alias", () => {
+	const result = extractLineupOverrides(`--workers=${JSON.stringify([{ subagent: "worker" }])} --reviewers=${JSON.stringify([{ subagent: true }])}`);
+	assert.equal(result.errors.length, 0);
+	assert.deepEqual(result.actions.map((action) => action.slots[0].agent), ["worker", "reviewer"]);
+});
+
 test("extractLineupOverrides rejects invalid slot JSON and unsupported final-applier count", () => {
 	const result = extractLineupOverrides('--workers=[{"agent":""}] --final-applier={"agent":"final","count":2}');
 	assert.equal(result.actions.length, 0);

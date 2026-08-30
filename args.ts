@@ -415,11 +415,35 @@ function parseLineupOverrideSlots(
 			return undefined;
 		}
 		const slot = entry as Record<string, unknown>;
-		if (typeof slot.agent !== "string" || !slot.agent.trim()) {
+		const allowedKeys = new Set(["agent", "subagent", "model", "task", "taskSuffix", "cwd", "count"]);
+		const unknownKeys = Object.keys(slot).filter((key) => !allowedKeys.has(key));
+		if (unknownKeys.length > 0) {
+			errors.push(`Invalid ${label}: slot ${index + 1} contains unsupported field(s): ${unknownKeys.join(", ")}.`);
+			return undefined;
+		}
+		if (slot.agent !== undefined && slot.subagent !== undefined) {
+			errors.push(`Invalid ${label}: slot ${index + 1} cannot combine "agent" and "subagent".`);
+			return undefined;
+		}
+		let agent: string | undefined;
+		if (typeof slot.agent === "string" && slot.agent.trim()) agent = slot.agent.trim();
+		else if (slot.agent !== undefined) {
 			errors.push(`Invalid ${label}: slot ${index + 1} requires a non-empty string "agent".`);
 			return undefined;
 		}
-		const normalized: LineupOverrideSlot = { agent: slot.agent.trim() };
+		if (!agent && slot.subagent !== undefined) {
+			if (slot.subagent === true) agent = target === "reviewers" ? "reviewer" : "delegate";
+			else if (typeof slot.subagent === "string" && slot.subagent.trim()) agent = slot.subagent.trim();
+			else {
+				errors.push(`Invalid ${label}: slot ${index + 1} requires "subagent" to be true or a non-empty string.`);
+				return undefined;
+			}
+		}
+		if (!agent) {
+			errors.push(`Invalid ${label}: slot ${index + 1} requires "agent" or "subagent".`);
+			return undefined;
+		}
+		const normalized: LineupOverrideSlot = { agent };
 		for (const key of ["model", "task", "taskSuffix", "cwd"] as const) {
 			if (slot[key] === undefined) continue;
 			if (typeof slot[key] !== "string" || !slot[key].trim()) {
