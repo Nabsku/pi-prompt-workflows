@@ -74,14 +74,17 @@ Fix defects found by the two independent reviews plus my verification. Do not re
 
 **Slice 2 handoff:** changed `best-of-n-worktree.ts` and `test/best-of-n.test.ts`. Git marker handling rejects lowercase `assume-unchanged` records and `S` `skip-worktree` records; only `.pi/subagents` and descendants are exempt from untracked rejection.
 
-### Slice 3 — Baseline + final-apply fence (M, 2.5–4 h)
+### Slice 3 — Baseline + final-apply fence (M, 2.5–4 h) — complete
 
-- [ ] Test: `HEAD` advances between `create()` calls → all worktrees use the same base commit
-- [ ] Test: source advances after workers finish → final-applier phase aborts fail-closed, candidate evidence preserved
-- [ ] Test: source unchanged → final applier runs normally
-- [ ] Capture `HEAD` + clean-state digest once per source cwd before first `create()`; create all worktrees from the pinned SHA
-- [ ] Revalidate before the final-applier phase
-- **Gate:** focused suite + full `npm run test`; no timing-dependent flakiness (deterministic `HEAD` advance via test seam, no sleeps)
+- [x] Test: `HEAD` advances between `create()` calls → all worktrees use the same base commit
+- [x] Test: source advances after workers finish → final-applier phase aborts fail-closed (candidate evidence preservation is verified in Slice 4)
+- [x] Test: source unchanged → final applier runs normally
+- [x] Capture `HEAD` + clean-state digest once per source cwd before first `create()`; create all worktrees from the pinned SHA
+- [x] Revalidate before the final-applier phase
+- [x] Ensure final-applier target cwd is the configured run target; do not let a phase slot silently replace it
+- **Gate:** `npx tsx --test --test-concurrency=1 test/best-of-n.test.ts` — **25/25 passed**; controller rerun passed; manual diff review passed. Read-only reviewer sandbox could not execute tests because `mkdtemp` returned `EPERM`.
+
+**Slice 3 handoff:** changed `best-of-n-worktree.ts`, `best-of-n.ts`, and `test/best-of-n.test.ts`. Each canonical source repository gets one pinned `HEAD` plus clean-state digest; all detached worktrees use that base, and final apply is fenced against source drift.
 
 ### Slice 4 — Candidate preservation + cancellation drain (M/L, 4–7 h)
 
