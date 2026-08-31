@@ -2572,6 +2572,35 @@ test("bestOfN rejects static request counts above the configured limit", () => {
 	});
 });
 
+test("bestOfN accepts comma-separated slot model declarations with spaces", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "compare.md"),
+			'---\nbestOfN:\n  workers:\n    - agent: delegate\n      model: "anthropic/missing, openai/configured"\n---\ncompare this',
+		);
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.has("compare"), true);
+		assert.equal(result.prompts.get("compare")?.bestOfN?.workers?.[0]?.model, "anthropic/missing, openai/configured");
+		assert.equal(result.diagnostics.some((item) => item.code === "invalid-workers"), false);
+	});
+});
+
+test("bestOfN rejects invalid slot model specs", () => {
+	withTempHome((root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "compare.md"),
+			'---\nbestOfN:\n  workers:\n    - agent: delegate\n      model: "bad spec"\n---\ncompare this',
+		);
+		const result = loadPromptsWithModel(cwd);
+		assert.equal(result.prompts.has("compare"), false);
+		assert.equal(result.diagnostics.some((item) => item.code === "invalid-workers" && /slot 1 has an invalid "model"/.test(item.message)), true);
+	});
+});
+
 test("bestOfN rejects inherited context because evidence must be explicit", () => {
 	withTempHome((root) => {
 		const cwd = join(root, "project");

@@ -311,6 +311,17 @@ function isValidModelSelectionSpec(spec: string): boolean {
 	return true;
 }
 
+function splitModelSelectionSpecs(value: string): string[] {
+	return value
+		.split(",")
+		.map((item) => item.trim())
+		.filter(Boolean);
+}
+
+function findInvalidModelSelectionSpec(models: string[]): string | undefined {
+	return models.find((model) => !isValidModelSelectionSpec(model));
+}
+
 function normalizeFrontmatterRecord(
 	value: unknown,
 	filePath: string,
@@ -351,10 +362,7 @@ function normalizeModelSpecs(
 		return undefined;
 	}
 
-	const models = value
-		.split(",")
-		.map((item) => item.trim())
-		.filter(Boolean);
+	const models = splitModelSelectionSpecs(value);
 
 	if (models.length === 0) {
 		diagnostics.push(
@@ -368,7 +376,7 @@ function normalizeModelSpecs(
 		return undefined;
 	}
 
-	const invalidSpec = models.find((model) => !isValidModelSelectionSpec(model));
+	const invalidSpec = findInvalidModelSelectionSpec(models);
 	if (invalidSpec) {
 		diagnostics.push(
 			createDiagnostic(
@@ -1135,7 +1143,8 @@ function normalizeLineupSlot(
 	}
 	const normalized: DelegationLineupSlot = { agent };
 	if (slot.model !== undefined) {
-		if (typeof slot.model !== "string" || !slot.model.trim() || !isValidModelSelectionSpec(slot.model.trim())) {
+		const models = typeof slot.model === "string" ? splitModelSelectionSpecs(slot.model) : [];
+		if (typeof slot.model !== "string" || models.length === 0 || findInvalidModelSelectionSpec(models)) {
 			diagnostics.push(createDiagnostic(`invalid-${field}`, filePath, source, `Ignoring invalid ${field} value in ${filePath}: slot ${index + 1} has an invalid "model".`));
 			return undefined;
 		}
