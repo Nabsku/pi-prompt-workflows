@@ -98,18 +98,19 @@ Fix defects found by the two independent reviews plus my verification. Do not re
 - **Gate:** focused lifecycle suite **68/68** + full `npm run test` **936/936**; no test sleeps longer than ~1s; existing cancellation tests updated for terminal-response draining
 - **Configured limits:** bridge drain defaults to **5,000 ms** and clamps at **60,000 ms**; candidate stat evidence is capped at **65,536 bytes** and unified diff evidence at **524,288 bytes** before result rendering.
 
-### Slice 5 — Docs + packaging (S, 1 h)
+### Slice 5 — Docs + packaging (S, 1 h) — complete
 
-- [ ] Document: runtime-state exemption, hidden-index rejection, baseline pinning + final fence, candidate diff preservation, cancellation drain, target-only `changed`, ignored-dependency limitation, `cwd`-is-not-a-sandbox wording
-- [ ] Replace the misleading "does not restore the removed parallel/task/worktree delegation transport" phrasing with the agreed upstream-comparison wording
-- [ ] `npm pack --dry-run --json` still lists `best-of-n-worktree.ts`; no unexpected new files
-- **Gate:** every documented claim matches implemented behavior
+- [x] Add a minimal fail-early check for a selected slot cwd under a Git-ignored path; do not provision or link ignored dependencies
+- [x] Document: runtime-state exemption, hidden-index rejection, baseline pinning + final fence, candidate diff preservation, cancellation drain, target-only `changed`, ignored-dependency limitation, `cwd`-is-not-a-sandbox wording
+- [x] Replace the misleading "does not restore the removed parallel/task/worktree delegation transport" phrasing with the agreed upstream-comparison wording
+- [x] `npm pack --dry-run --json` still lists `best-of-n-worktree.ts`; no unexpected new files
+- **Gate:** focused best-of-N/loader suite **178/178** + full `npm run test` **938/938**; package dry-run **53 files**, required worktree module present
 
-### Slice 6 — Progress UI (S, optional, 1–2 h)
+### Slice 6 — Progress UI (S, optional, 1–2 h) — skipped
 
 - [ ] Test: first worker finishes → global working message remains until phase end
 - [ ] Optional flag to skip global set/clear in `subagent-step.ts`
-- **Stop rule:** drop the slice if it needs more than `best-of-n.ts` + `subagent-step.ts`
+- **Stop rule:** drop the slice if it needs more than `best-of-n.ts` + `subagent-step.ts`; skipped because it is not required for the correctness/lifecycle pass and would add an independent UI contract.
 
 ## Verification gates
 

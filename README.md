@@ -57,7 +57,7 @@ This package is an enhanced fork of [`pi-prompt-template-model`](https://github.
 
 ### Breaking or migration notes
 
-- `pi-subagents` 0.44 removed its legacy parallel/task/worktree transport. This extension keeps the structured single-delegation contract and restores best-of-N by issuing one bounded structured request per worker, reviewer, or final applier. Templates that use legacy `parallel`, `worktree`, `commit`, or `preset` fields are rejected with `unsupported-legacy-delegation`; nested `bestOfN` is supported. Best-of-N creates one temporary detached Git worktree per worker and reviewer; the source worktree must be clean.
+- Upstream main still uses the legacy `tasks[]` parallel worktree payload for its best-of-N path. This fork intentionally keeps the installed `pi-subagents` structured single-request contract by issuing one bounded structured request per worker, reviewer, or final applier. Templates that use legacy `parallel`, `worktree`, `commit`, or `preset` fields are rejected with `unsupported-legacy-delegation`; nested `bestOfN` is supported. Best-of-N creates tracked-only temporary detached Git worktrees for workers and reviewers from a pinned source baseline; the source worktree must be clean.
 - `skills:` must be a list. Use `skill: name` for a single skill.
 - Some fields that upstream accepted loosely are now type-checked before registration, including prompt includes, chain declarations, loop values, cwd paths, and delegated skill selectors.
 
@@ -362,7 +362,23 @@ bestOfN:
     agent: synthesizer
 ```
 
-`agent` and `subagent` are accepted as slot names. A slot may set `model`, `task`, `taskSuffix`, `cwd`, and (for workers or reviewers) a positive `count`. Runtime replace/append overrides are available with `--workers=JSON`, `--workers-append=JSON`, `--reviewers=JSON`, `--reviewers-append=JSON`, and `--final-applier=JSON`. The total number of worker, reviewer, and final-applier requests is bounded at 32 per invocation. Each worker and reviewer runs in its own temporary detached Git worktree, so the source worktree must be clean. Their worktree paths are passed to later phases as evidence. The final applier runs in the effective target cwd and may apply a selected worker diff there; worktree cleanup is automatic and no commit is created automatically. Best-of-N does not restore the removed legacy parallel/task/worktree transport.
+`agent` and `subagent` are accepted as slot names. A slot may set `model`, `task`, `taskSuffix`, `cwd`, and (for workers or reviewers) a positive `count`. Runtime replace/append overrides are available with `--workers=JSON`, `--workers-append=JSON`, `--reviewers=JSON`, `--reviewers-append=JSON`, and `--final-applier=JSON`. The total number of worker, reviewer, and final-applier requests is bounded at 32 per invocation.
+
+Upstream main still uses the legacy `tasks[]` parallel worktree payload for best-of-N. This fork intentionally keeps one structured `pi-subagents` request per worker, reviewer, or final applier slot; it does not change `pi-subagents` or restore the legacy transport fields.
+
+Each worker and reviewer runs in its own tracked-only temporary detached Git worktree. The source worktree for each selected slot `cwd` must be clean and visible to Git: tracked edits, untracked files outside `.pi/subagents/**`, and hidden index entries marked `assume-unchanged` or `skip-worktree` are rejected before worker requests. Only bridge runtime state under `.pi/subagents/**` is exempt.
+
+Detached worktrees contain tracked files only. Ignored dependencies such as `node_modules`, `.venv`, or build output are not provisioned or linked into candidate worktrees. If a selected worker or reviewer slot `cwd` is itself under a Git-ignored path, best-of-N fails before any worker request.
+
+For every source repository, best-of-N pins one baseline commit and clean-state digest before creating candidate worktrees. Before the final applier runs, the source `HEAD` and clean state must still match that pinned baseline; otherwise the run fails closed instead of applying onto a drifted target.
+
+Before cleanup, worker and reviewer changes are preserved as bounded `git diff --stat` and unified diff evidence against the pinned baseline, including untracked non-runtime files. If a worker committed changes and left no working-tree diff, preservation falls back to the committed `base..HEAD` diff. Worktrees are removed after extraction unless cancellation drain times out.
+
+The final applier runs only in the effective target cwd and may apply a selected worker diff there; a final-applier slot `cwd` does not retarget the apply phase. The reported `changed` flag is final-target-only: worker and reviewer candidate diffs do not make the result changed. No commit is created automatically.
+
+Cancellation sends cancel events and drains for terminal bridge responses before cleanup. The default drain is 5 seconds, configurable with `PI_PROMPT_SUBAGENT_CANCEL_DRAIN_TIMEOUT_MS` and clamped to 60 seconds; on timeout, the active worktree is preserved and the warning includes its exact path, plus the temporary root when applicable.
+
+Worktree isolation is Git checkout isolation, not an OS sandbox. Delegated subprocesses still have whatever filesystem and network access the surrounding Pi process has.
 
 ## Model Format
 

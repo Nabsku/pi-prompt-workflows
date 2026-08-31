@@ -6,7 +6,7 @@ import type { SubagentOverride } from "./args.js";
 import { type LineupOverrideAction } from "./args.js";
 import { notify } from "./notifications.js";
 import { PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE, type DelegatedSubagentUsage } from "./subagent-runtime.js";
-import { captureBestOfNWorktreeChanges, createBestOfNWorktreeManager, type BestOfNWorktreeChanges, type BestOfNWorktreeManager, type IsolatedBestOfNWorktree } from "./best-of-n-worktree.js";
+import { assertBestOfNSourceCwdNotIgnored, captureBestOfNWorktreeChanges, createBestOfNWorktreeManager, type BestOfNWorktreeChanges, type BestOfNWorktreeManager, type IsolatedBestOfNWorktree } from "./best-of-n-worktree.js";
 
 export { MAX_BEST_OF_N_REQUESTS } from "./prompt-loader.js";
 
@@ -209,6 +209,17 @@ function sourceCwdForSlot(options: BestOfNRunOptions, slot: DelegationLineupSlot
 	return options.runtimeCwd ?? slot.cwd ?? options.prompt.cwd ?? options.ctx.cwd;
 }
 
+async function assertNonFinalSlotCwdsNotIgnored(
+	options: BestOfNRunOptions,
+	workerSlots: readonly DelegationLineupSlot[],
+	reviewerSlots: readonly DelegationLineupSlot[],
+): Promise<void> {
+	for (const sourceCwd of new Set([...workerSlots, ...reviewerSlots].map((slot) => sourceCwdForSlot(options, slot)))) {
+		const effectiveSourceCwd = await validateDelegatedCwd(options.ctx, sourceCwd);
+		assertBestOfNSourceCwdNotIgnored(effectiveSourceCwd);
+	}
+}
+
 async function runPhase(
 	options: BestOfNRunOptions,
 	phase: PhaseResult["phase"],
@@ -397,6 +408,7 @@ export async function executeBestOfNPrompt(options: BestOfNRunOptions): Promise<
 		const workerSlots = expandSlots(options.config.workers ?? [], "workers");
 		const reviewerSlots = options.config.reviewers ? expandSlots(options.config.reviewers, "reviewers") : [];
 		worktreeManager = createBestOfNWorktreeManager();
+		await assertNonFinalSlotCwdsNotIgnored(options, workerSlots, reviewerSlots);
 
 		const workerRun = await runPhase(options, "worker", workerSlots, options.runtimeModel, "", cancellation.controller, worktreeManager);
 		workers.push(...workerRun.results);

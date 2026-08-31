@@ -145,9 +145,15 @@ bestOfN:
 - A slot accepts `agent` or the documented `subagent` alias, plus `model`, `task`, `taskSuffix`, `cwd`, and a positive `count` for workers or reviewers.
 - Reviewers receive successful candidates and labelled worker failure summaries. The final applier receives those materials plus reviewer results and failure summaries.
 - The total worker, reviewer, and final-applier requests cannot exceed 32 per invocation.
-- Every worker and reviewer runs in its own temporary detached Git worktree. The source worktree for each slot must be clean. Their worktree paths are included in later-phase evidence; the final applier runs in the effective target cwd and no commit is created automatically.
+- Upstream main still uses the legacy `tasks[]` parallel worktree payload for best-of-N. This fork intentionally keeps one structured `pi-subagents` request per worker, reviewer, or final-applier slot; it does not change `pi-subagents` or restore the legacy transport fields.
+- Every worker and reviewer runs in its own tracked-only temporary detached Git worktree. The source worktree for each selected slot `cwd` must be clean and visible to Git: tracked edits, untracked files outside `.pi/subagents/**`, and hidden index entries marked `assume-unchanged` or `skip-worktree` are rejected before worker requests. Only bridge runtime state under `.pi/subagents/**` is exempt.
+- Detached worktrees contain tracked files only. Ignored dependencies such as `node_modules`, `.venv`, or build output are not provisioned or linked. A selected worker or reviewer slot `cwd` under a Git-ignored path fails before any worker request.
+- Best-of-N pins one source baseline commit and clean-state digest before candidate worktree creation. Before the final applier runs, the source `HEAD` and clean state must still match that pinned baseline.
+- Worker and reviewer changes are preserved before cleanup as bounded `git diff --stat` and unified diff evidence against the pinned baseline, including untracked non-runtime files. If a worker committed changes and left no working-tree diff, preservation falls back to the committed `base..HEAD` diff.
+- Cancellation sends cancel events and drains for terminal bridge responses before cleanup. The default drain is 5 seconds, configurable with `PI_PROMPT_SUBAGENT_CANCEL_DRAIN_TIMEOUT_MS` and clamped to 60 seconds; on timeout, the active worktree is preserved and the warning includes its exact path, plus the temporary root when applicable.
+- The final applier runs only in the effective target cwd; a final-applier slot `cwd` does not retarget the apply phase. The reported `changed` flag is final-target-only, and no commit is created automatically.
+- Worktree isolation is Git checkout isolation, not an OS sandbox. Delegated subprocesses still have the filesystem and network access of the surrounding Pi process.
 - Runtime lineup changes use `--workers=JSON`, `--workers-append=JSON`, `--reviewers=JSON`, `--reviewers-append=JSON`, and `--final-applier=JSON`.
-- This feature does not restore legacy worktree, parallel, automatic commit, or preset transport. Those fields are rejected instead of ignored.
 
 ## Loops
 
