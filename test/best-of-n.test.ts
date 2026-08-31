@@ -608,6 +608,78 @@ test("uses a runtime model override and includes each slot suffix once", async (
 	}
 });
 
+test("uses the first available model from a comma-separated slot model list", async () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-prompt-best-of-n-slot-model-list-"));
+	try {
+		const requests: any[] = [];
+		const pi = createPi(["candidate"], requests);
+		const context = createCtx(root);
+		const result = await executeBestOfNPrompt({
+			pi,
+			ctx: context,
+			prompt: { ...basePrompt, content: "Base candidate task." },
+			config: { workers: [{ agent: "worker", model: "anthropic/missing, openai/configured" }] },
+			args: [],
+			currentModel: context.model,
+		});
+		assert.equal(result, "completed");
+		assert.equal(requests.length, 1);
+		assert.equal(requests[0].model, "openai/configured");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("caps accumulated worker evidence before reviewer requests exceed one MiB", async () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-prompt-best-of-n-evidence-cap-"));
+	try {
+		const requests: any[] = [];
+		const largeOutput = "x".repeat(600 * 1024);
+		const pi = createPi([largeOutput, largeOutput, "review"], requests);
+		const context = createCtx(root);
+		const result = await executeBestOfNPrompt({
+			pi,
+			ctx: context,
+			prompt: basePrompt,
+			config: { workers: [{ agent: "worker", count: 2 }], reviewers: [{ agent: "reviewer" }] },
+			args: [],
+			currentModel: context.model,
+		});
+		assert.equal(result, "completed");
+		const reviewerRequest = requests.find((request) => request.agent === "reviewer");
+		assert.ok(reviewerRequest);
+		assert.ok(Buffer.byteLength(reviewerRequest.task, "utf8") < 1024 * 1024);
+		assert.match(reviewerRequest.task, /bestOfN evidence truncated/i);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("caps accumulated worker evidence before a final-applier request exceeds one MiB", async () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-prompt-best-of-n-final-evidence-cap-"));
+	try {
+		const requests: any[] = [];
+		const largeOutput = "x".repeat(600 * 1024);
+		const pi = createPi([largeOutput, largeOutput, "final"], requests);
+		const context = createCtx(root);
+		const result = await executeBestOfNPrompt({
+			pi,
+			ctx: context,
+			prompt: basePrompt,
+			config: { workers: [{ agent: "worker", count: 2 }], finalApplier: { agent: "applier" } },
+			args: [],
+			currentModel: context.model,
+		});
+		assert.equal(result, "completed");
+		const applierRequest = requests.find((request) => request.agent === "applier");
+		assert.ok(applierRequest);
+		assert.ok(Buffer.byteLength(applierRequest.task, "utf8") < 1024 * 1024);
+		assert.match(applierRequest.task, /bestOfN evidence truncated/i);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("rejects best-of-N fan-out above the configured request budget", async () => {
 	const root = mkdtempSync(join(tmpdir(), "pi-prompt-best-of-n-limit-"));
 	try {
