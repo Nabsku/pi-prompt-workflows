@@ -63,14 +63,16 @@ Fix defects found by the two independent reviews plus my verification. Do not re
 
 **Slice 1 handoff:** changed `index.ts`, `prompt-loader.ts`, `best-of-n.ts`, `test/best-of-n.test.ts`, `test/index-loop.test.ts`, and `test/prompt-loader.test.ts`. The evidence cap is `917,504` UTF-8 bytes (`1 MiB` transport limit minus `128 KiB` reserve) and truncates with an explicit marker. Commit after staging and diff review.
 
-### Slice 2 — Clean-source gate (S, 1.5–2 h)
+### Slice 2 — Clean-source gate (S, 1.5–2 h) — complete
 
-- [ ] Test: `--assume-unchanged` tracked edit → rejected
-- [ ] Test: `--skip-worktree` tracked edit → rejected
-- [ ] Test: untracked `.pi/subagents/run-state.json` only → accepted
-- [ ] Test: untracked non-runtime file → still rejected
-- [ ] Fix `best-of-n-worktree.ts:72-79`: detect hidden index flags (`ls-files -v` markers or raw snapshot reuse — pick smaller diff); scope runtime-state exemption to the exact bridge subtree
-- **Gate:** focused suite green; existing dirty-source tests unchanged
+- [x] Test: `--assume-unchanged` tracked edit → rejected
+- [x] Test: `--skip-worktree` tracked edit → rejected
+- [x] Test: untracked `.pi/subagents/run-state.json` only → accepted
+- [x] Test: untracked non-runtime file → still rejected
+- [x] Fix `best-of-n-worktree.ts:72-79`: detect hidden index flags (`ls-files -v` markers or raw snapshot reuse — pick smaller diff); scope runtime-state exemption to the exact bridge subtree
+- **Gate:** `npx tsx --test --test-concurrency=1 test/best-of-n.test.ts` — **22/22 passed**; controller rerun passed; independent read-only review returned **PASS**.
+
+**Slice 2 handoff:** changed `best-of-n-worktree.ts` and `test/best-of-n.test.ts`. Git marker handling rejects lowercase `assume-unchanged` records and `S` `skip-worktree` records; only `.pi/subagents` and descendants are exempt from untracked rejection.
 
 ### Slice 3 — Baseline + final-apply fence (M, 2.5–4 h)
 
