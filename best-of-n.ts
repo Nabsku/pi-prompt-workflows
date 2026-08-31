@@ -163,7 +163,7 @@ function slotPrompt(
 		content: phase === "worker" ? (slot.task ?? base.content) : base.content,
 		models,
 		subagent: slot.agent,
-		cwd: isolatedCwd ?? runtimeCwd ?? slot.cwd ?? base.cwd,
+		cwd: isolatedCwd ?? runtimeCwd ?? (phase === "final-applier" ? base.cwd : slot.cwd ?? base.cwd),
 		...(runtimeFork ? { inheritContext: true } : {}),
 		bestOfN: undefined,
 	};
@@ -327,9 +327,11 @@ export async function executeBestOfNPrompt(options: BestOfNRunOptions): Promise<
 			: [];
 		const reviewEvidence = appendEvidence("\n\nReviewer findings:", "Review", reviewers);
 		const finalEvidence = capEvidence(`${workerEvidence}${reviewEvidence}`);
-		const finalResults = options.config.finalApplier
-			? await runPhase(options, "final-applier", [options.config.finalApplier], options.runtimeModel, finalEvidence, cancellation.controller, worktreeManager)
-			: [];
+		const finalResults: PhaseResult[] = [];
+		if (options.config.finalApplier) {
+			worktreeManager.assertSourceBaselinesUnchanged();
+			finalResults.push(...await runPhase(options, "final-applier", [options.config.finalApplier], options.runtimeModel, finalEvidence, cancellation.controller, worktreeManager));
+		}
 		const finalText = resultText(finalResults, "Final answer");
 		if (options.config.finalApplier && finalText.length === 0) {
 			const failures = summarizeFailures(finalResults);
