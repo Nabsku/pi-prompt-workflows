@@ -86,16 +86,17 @@ Fix defects found by the two independent reviews plus my verification. Do not re
 
 **Slice 3 handoff:** changed `best-of-n-worktree.ts`, `best-of-n.ts`, and `test/best-of-n.test.ts`. Each canonical source repository gets one pinned `HEAD` plus clean-state digest; all detached worktrees use that base, and final apply is fenced against source drift.
 
-### Slice 4 — Candidate preservation + cancellation drain (M/L, 4–7 h)
+### Slice 4 — Candidate preservation + cancellation drain (M/L, 4–7 h) — complete
 
-- [ ] Test: final applier fails; worker wrote a file → result text contains the unified diff; worktree removed after extraction
-- [ ] Test: cancel during worker phase (delayed terminal response) → cleanup waits; worktree not removed before terminal response
-- [ ] Test: drain timeout expires → worktree kept, warning + path reported
-- [ ] Test: absent final applier with changed candidates → diff in result; `changed` false
-- [ ] Test: worker commits despite instruction → `git diff <base>..HEAD` fallback still extracts the diff
-- [ ] Extract `git -C <worktree> diff <pinnedBase>` (+ `--stat`) before cleanup when `outcome.changed === true`
-- [ ] Add bounded, env-overridable drain wait for the bridge terminal response in `requestDelegatedRun`; keep listeners alive during the wait; reuse for TUI Escape
-- **Gate:** focused suite + full `npm run test`; no test sleeps longer than ~1s; existing cancellation tests still pass
+- [x] Test: final applier fails; worker wrote a file → result text contains the unified diff; worktree removed after extraction
+- [x] Test: cancel during worker phase (delayed terminal response) → cleanup waits; worktree not removed before terminal response
+- [x] Test: drain timeout expires → worktree kept, warning + path reported
+- [x] Test: absent final applier with changed candidates → diff in result; `changed` false
+- [x] Test: worker commits despite instruction → `git diff <base>..HEAD` fallback still extracts the diff
+- [x] Extract `git -C <worktree> diff <pinnedBase>` (+ `--stat`) before cleanup; include untracked candidates and exclude bridge runtime state
+- [x] Add bounded, env-overridable drain wait for the bridge terminal response in `requestDelegatedRun`; keep listeners alive during the wait; reuse for TUI Escape
+- **Gate:** focused lifecycle suite **68/68** + full `npm run test` **936/936**; no test sleeps longer than ~1s; existing cancellation tests updated for terminal-response draining
+- **Configured limits:** bridge drain defaults to **5,000 ms** and clamps at **60,000 ms**; candidate stat evidence is capped at **65,536 bytes** and unified diff evidence at **524,288 bytes** before result rendering.
 
 ### Slice 5 — Docs + packaging (S, 1 h)
 
