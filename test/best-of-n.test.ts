@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyLineupOverrides, executeBestOfNPrompt, MAX_BEST_OF_N_REQUESTS } from "../best-of-n.ts";
+import { createBestOfNWorktreeManager } from "../best-of-n-worktree.ts";
 import { PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT, PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE, PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT } from "../subagent-runtime.ts";
 import { getLastAssistantText } from "../loop-utils.ts";
 
@@ -103,6 +104,17 @@ function createGitRepo(prefix: string): string {
 	return root;
 }
 
+function gitHead(cwd: string): string {
+	return execFileSync("git", ["rev-parse", "--verify", "HEAD^{commit}"], { cwd, encoding: "utf8" }).trim();
+}
+
+function commitTrackedFile(cwd: string, content: string, message: string): string {
+	writeFileSync(join(cwd, "tracked.txt"), content);
+	execFileSync("git", ["add", "tracked.txt"], { cwd });
+	execFileSync("git", ["commit", "-qm", message], { cwd });
+	return gitHead(cwd);
+}
+
 const basePrompt = {
 	name: "compare",
 	description: "",
@@ -121,6 +133,26 @@ test("applies lineup replacements and appends in command order", () => {
 		{ target: "finalApplier", mode: "replace", slots: [{ agent: "new-final" }] },
 	]);
 	assert.deepEqual(result, { workers: [{ agent: "one" }, { agent: "two" }], reviewers: [{ agent: "new-review" }], finalApplier: { agent: "new-final" } });
+});
+
+test("pins a source baseline before the first worktree and reuses it for later worktrees", () => {
+	const root = createGitRepo("pi-prompt-best-of-n-pinned-base-");
+	const manager = createBestOfNWorktreeManager();
+	try {
+		const pinnedHead = gitHead(root);
+		const first = manager.create(root, "first");
+		const advancedHead = commitTrackedFile(root, "advanced\n", "advance source");
+		const second = manager.create(root, "second");
+
+		assert.notEqual(advancedHead, pinnedHead);
+		assert.equal(first.baseCommit, pinnedHead);
+		assert.equal(second.baseCommit, pinnedHead);
+		assert.equal(gitHead(first.root), pinnedHead);
+		assert.equal(gitHead(second.root), pinnedHead);
+	} finally {
+		manager.cleanup();
+		rmSync(root, { recursive: true, force: true });
+	}
 });
 
 test("isolates concurrent workers in separate worktrees", async () => {
@@ -335,6 +367,70 @@ test("runs worker, reviewer, and final-applier phases through individual structu
 		assert.equal(requests.length, 4);
 		assert.equal(new Set(requests.slice(0, 3).map((request) => request.cwd)).size, 3);
 		assert.equal(requests[3].cwd, realpathSync(root));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("aborts before final applier when a source baseline advances after workers finish", async () => {
+	const root = createGitRepo("pi-prompt-best-of-n-final-drift-");
+	try {
+		const requests: any[] = [];
+		const notifications: Array<{ message: string; type: string }> = [];
+		let advanced = false;
+		const pi = createPi(["candidate", "final"], requests, [], [], (data) => {
+			if (data.agent === "worker" && !advanced) {
+				advanced = true;
+				commitTrackedFile(root, "advanced\n", "advance source");
+			}
+		});
+		const context = createCtx(root);
+		context.hasUI = true;
+		context.ui.notify = (message: string, type: string) => notifications.push({ message, type });
+		const result = await executeBestOfNPrompt({
+			pi,
+			ctx: context,
+			prompt: basePrompt,
+			config: { workers: [{ agent: "worker" }], finalApplier: { agent: "applier" } },
+			args: [],
+			currentModel: context.model,
+		});
+
+		assert.equal(result, "failed");
+		assert.deepEqual(requests.map((request) => request.agent), ["worker"]);
+		assert.equal(pi.customMessages.length, 0);
+		assert.equal(notifications.at(-1)?.type, "error");
+		assert.match(notifications.at(-1)?.message ?? "", /source baseline.*changed|HEAD.*changed|drift/i);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("runs final applier in the context cwd when source is unchanged and final slot has a cwd", async () => {
+	const root = createGitRepo("pi-prompt-best-of-n-final-target-");
+	try {
+		writeFileSync(join(root, ".gitignore"), "applier-slot/\n");
+		execFileSync("git", ["add", ".gitignore"], { cwd: root });
+		execFileSync("git", ["commit", "-qm", "ignore applier slot"], { cwd: root });
+		const finalSlotCwd = join(root, "applier-slot");
+		mkdirSync(finalSlotCwd);
+
+		const requests: any[] = [];
+		const pi = createPi(["candidate", "final answer"], requests);
+		const context = createCtx(root);
+		const result = await executeBestOfNPrompt({
+			pi,
+			ctx: context,
+			prompt: basePrompt,
+			config: { workers: [{ agent: "worker" }], finalApplier: { agent: "applier", cwd: finalSlotCwd } },
+			args: [],
+			currentModel: context.model,
+		});
+
+		assert.equal(result, "completed");
+		assert.deepEqual(requests.map((request) => request.agent), ["worker", "applier"]);
+		assert.equal(requests[1].cwd, realpathSync(root));
+		assert.notEqual(requests[1].cwd, realpathSync(finalSlotCwd));
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

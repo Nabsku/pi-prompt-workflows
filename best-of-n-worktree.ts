@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
@@ -31,11 +32,26 @@ export interface IsolatedBestOfNWorktree {
 	readonly root: string;
 	readonly cwd: string;
 	readonly sourceCwd: string;
+	readonly baseCommit: string;
 }
 
 export interface BestOfNWorktreeManager {
 	create(sourceCwd: string, label: string): IsolatedBestOfNWorktree;
+	assertSourceBaselinesUnchanged(): void;
 	cleanup(): void;
+}
+
+interface SourceCleanState {
+	readonly hiddenIndexFlagPaths: readonly string[];
+	readonly trackedChanges: readonly string[];
+	readonly untrackedChanges: readonly string[];
+	readonly digest: string;
+}
+
+interface SourceBaseline {
+	readonly repositoryRoot: string;
+	readonly baseCommit: string;
+	readonly cleanState: SourceCleanState;
 }
 
 function runGit(cwd: string, args: readonly string[]): string {
@@ -84,6 +100,14 @@ function formatPathList(paths: readonly string[]): string {
 	return remaining > 0 ? `${visible}, and ${remaining} more` : visible;
 }
 
+function digestCleanState(state: Omit<SourceCleanState, "digest">): string {
+	const hash = createHash("sha256");
+	for (const path of state.hiddenIndexFlagPaths) hash.update("hidden").update("\0").update(path).update("\0");
+	for (const path of state.trackedChanges) hash.update("tracked").update("\0").update(path).update("\0");
+	for (const path of state.untrackedChanges) hash.update("untracked").update("\0").update(path).update("\0");
+	return hash.digest("hex");
+}
+
 function hiddenIndexFlagPaths(sourceCwd: string): string[] {
 	const entries = splitNulRecords(runGit(sourceCwd, ["ls-files", "-v", "-z"]));
 	return entries.flatMap((entry) => {
@@ -96,19 +120,51 @@ function hiddenIndexFlagPaths(sourceCwd: string): string[] {
 	});
 }
 
-function cleanRepository(sourceCwd: string): void {
+function captureCleanState(sourceCwd: string): SourceCleanState {
 	const flaggedIndexPaths = hiddenIndexFlagPaths(sourceCwd);
+	const trackedChanges = splitNulRecords(runGit(sourceCwd, ["diff-index", "--name-only", "-z", "--no-ext-diff", "--no-textconv", "HEAD", "--"]));
+	const untrackedChanges = splitNulRecords(runGit(sourceCwd, ["ls-files", "--others", "--exclude-standard", "-z"]))
+		.filter((path) => !isBridgeRuntimeSubagentsPath(path));
+	const state = { hiddenIndexFlagPaths: flaggedIndexPaths, trackedChanges, untrackedChanges };
+	return { ...state, digest: digestCleanState(state) };
+}
+
+function assertCleanState(sourceCwd: string, state: SourceCleanState): void {
+	const flaggedIndexPaths = state.hiddenIndexFlagPaths;
 	if (flaggedIndexPaths.length > 0) {
 		throw new BestOfNWorktreeError(
 			`Best-of-N worker isolation requires tracked files to be visible to Git at \`${sourceCwd}\`. Clear assume-unchanged/skip-worktree index flags for ${formatPathList(flaggedIndexPaths)} before retrying.`,
 		);
 	}
-	const trackedChanges = runGit(sourceCwd, ["diff-index", "--name-only", "--no-ext-diff", "--no-textconv", "HEAD", "--"]);
-	const untrackedChanges = splitNulRecords(runGit(sourceCwd, ["ls-files", "--others", "--exclude-standard", "-z"]))
-		.filter((path) => !isBridgeRuntimeSubagentsPath(path));
+	const trackedChanges = state.trackedChanges;
+	const untrackedChanges = state.untrackedChanges;
 	if (trackedChanges.length > 0 || untrackedChanges.length > 0) {
 		throw new BestOfNWorktreeError(
 			`Best-of-N worker isolation requires a clean Git worktree at \`${sourceCwd}\`. Commit or stash changes before retrying.`,
+		);
+	}
+}
+
+function captureSourceBaseline(repositoryRoot: string): SourceBaseline {
+	const cleanState = captureCleanState(repositoryRoot);
+	assertCleanState(repositoryRoot, cleanState);
+	const baseCommit = runGit(repositoryRoot, ["rev-parse", "--verify", "HEAD^{commit}"]).trim();
+	if (!baseCommit) throw new BestOfNWorktreeError(`Git repository at \`${repositoryRoot}\` has no commit to isolate.`);
+	return { repositoryRoot, baseCommit, cleanState };
+}
+
+function assertSourceBaselineUnchanged(baseline: SourceBaseline): void {
+	const currentState = captureCleanState(baseline.repositoryRoot);
+	assertCleanState(baseline.repositoryRoot, currentState);
+	const currentHead = runGit(baseline.repositoryRoot, ["rev-parse", "--verify", "HEAD^{commit}"]).trim();
+	if (currentHead !== baseline.baseCommit) {
+		throw new BestOfNWorktreeError(
+			`Best-of-N source baseline changed at \`${baseline.repositoryRoot}\`: HEAD changed from ${baseline.baseCommit} to ${currentHead}. Re-run best-of-N from a stable source workspace.`,
+		);
+	}
+	if (currentState.digest !== baseline.cleanState.digest) {
+		throw new BestOfNWorktreeError(
+			`Best-of-N source baseline changed at \`${baseline.repositoryRoot}\`: source clean-state digest changed before final apply. Re-run best-of-N from a stable source workspace.`,
 		);
 	}
 }
@@ -121,27 +177,30 @@ function safeDirectoryName(label: string): string {
 export function createBestOfNWorktreeManager(): BestOfNWorktreeManager {
 	const runRoot = mkdtempSync(join(tmpdir(), "pi-prompt-best-of-n-worktrees-"));
 	const created: IsolatedBestOfNWorktree[] = [];
+	const baselines = new Map<string, SourceBaseline>();
 	let cleaned = false;
 
 	return {
 		create(sourceCwd, label) {
 			if (cleaned) throw new BestOfNWorktreeError("Best-of-N worker worktree manager was already cleaned up.");
 			const canonicalSourceCwd = canonicalPath(sourceCwd, "worker cwd");
-			cleanRepository(canonicalSourceCwd);
 			const repositoryRoot = canonicalPath(runGit(canonicalSourceCwd, ["rev-parse", "--show-toplevel"]).trim(), "Git repository root");
 			const sourceRelativeCwd = relative(repositoryRoot, canonicalSourceCwd);
 			if (!isWithin(repositoryRoot, canonicalSourceCwd)) {
 				throw new BestOfNWorktreeError(`Worker cwd \`${canonicalSourceCwd}\` is outside its Git repository root.`);
 			}
-			const head = runGit(canonicalSourceCwd, ["rev-parse", "--verify", "HEAD^{commit}"]).trim();
-			if (!head) throw new BestOfNWorktreeError(`Git repository at \`${canonicalSourceCwd}\` has no commit to isolate.`);
+			let baseline = baselines.get(repositoryRoot);
+			if (!baseline) {
+				baseline = captureSourceBaseline(repositoryRoot);
+				baselines.set(repositoryRoot, baseline);
+			}
 
 			const target = join(runRoot, `${created.length + 1}-${safeDirectoryName(label)}`);
 			try {
-				runGit(canonicalSourceCwd, ["worktree", "add", "--detach", target, head]);
+				runGit(repositoryRoot, ["worktree", "add", "--detach", target, baseline.baseCommit]);
 				const root = canonicalPath(target, "created worker worktree");
 				const cwd = canonicalPath(join(root, sourceRelativeCwd), "created worker cwd");
-				const workspace = { root, cwd, sourceCwd: canonicalSourceCwd };
+				const workspace = { root, cwd, sourceCwd: canonicalSourceCwd, baseCommit: baseline.baseCommit };
 				created.push(workspace);
 				return workspace;
 			} catch (error) {
@@ -152,6 +211,11 @@ export function createBestOfNWorktreeManager(): BestOfNWorktreeManager {
 				}
 				throw error;
 			}
+		},
+
+		assertSourceBaselinesUnchanged() {
+			if (cleaned) throw new BestOfNWorktreeError("Best-of-N worker worktree manager was already cleaned up.");
+			for (const baseline of baselines.values()) assertSourceBaselineUnchanged(baseline);
 		},
 
 		cleanup() {
