@@ -1,12 +1,12 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
-import { executeSubagentPromptStep, DelegatedPromptCancelledError, validateDelegatedCwd, type DelegatedPromptOutcome } from "./subagent-step.js";
+import { executeSubagentPromptStep, DelegatedPromptCancellationDrainTimeoutError, DelegatedPromptCancelledError, validateDelegatedCwd, type DelegatedPromptOutcome } from "./subagent-step.js";
 import { MAX_BEST_OF_N_REQUESTS, type BestOfNConfig, type DelegationLineupSlot, type PromptWithModel } from "./prompt-loader.js";
 import type { SubagentOverride } from "./args.js";
 import { type LineupOverrideAction } from "./args.js";
 import { notify } from "./notifications.js";
 import { PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE, type DelegatedSubagentUsage } from "./subagent-runtime.js";
-import { createBestOfNWorktreeManager, type BestOfNWorktreeManager, type IsolatedBestOfNWorktree } from "./best-of-n-worktree.js";
+import { captureBestOfNWorktreeChanges, createBestOfNWorktreeManager, type BestOfNWorktreeChanges, type BestOfNWorktreeManager, type IsolatedBestOfNWorktree } from "./best-of-n-worktree.js";
 
 export { MAX_BEST_OF_N_REQUESTS } from "./prompt-loader.js";
 
@@ -50,6 +50,14 @@ interface PhaseResult {
 	outcome?: DelegatedPromptOutcome;
 	error?: string;
 	workspace?: IsolatedBestOfNWorktree;
+	candidateChanges?: BestOfNWorktreeChanges | { error: string };
+	preserveWorkspace?: boolean;
+}
+
+interface PhaseRunResult {
+	results: PhaseResult[];
+	cancellationError?: DelegatedPromptCancelledError;
+	drainTimeoutError?: DelegatedPromptCancellationDrainTimeoutError;
 }
 
 const SUBAGENT_TASK_BYTE_LIMIT = 1024 * 1024;
@@ -104,16 +112,32 @@ function capEvidence(value: string): string {
 	return `${truncateUtf8(value, availableBytes).trimEnd()}${BEST_OF_N_EVIDENCE_TRUNCATION_MARKER}`;
 }
 
+function formatCandidateChanges(result: PhaseResult): string {
+	if (!result.candidateChanges) return "";
+	if ("error" in result.candidateChanges) {
+		return `\n\nPreserved ${result.phase} worktree changes could not be captured before cleanup:\n${result.candidateChanges.error}`;
+	}
+	const stat = result.candidateChanges.stat.trim() || "(no stat)";
+	const diff = result.candidateChanges.diff.trim() || "(no unified diff)";
+	const truncated = result.candidateChanges.truncated ? "\n\n[bestOfN candidate change evidence was truncated.]" : "";
+	return `\n\nPreserved ${result.phase} worktree change stat:\n${stat}\n\nPreserved ${result.phase} worktree unified diff:\n${diff}${truncated}`;
+}
+
+function hasCandidateChangeEvidence(results: readonly PhaseResult[]): boolean {
+	return results.some((result) => result.candidateChanges !== undefined);
+}
+
 function appendEvidence(preamble: string, label: string, results: PhaseResult[]): string {
 	const evidence = results
 		.map((result) => {
 			const agent = result.outcome?.agent ?? result.slot.agent;
 			const workspace = result.workspace ? `\nWorktree: ${result.workspace.root}` : "";
+			const candidateChanges = formatCandidateChanges(result);
 			if (result.outcome && !result.error && result.outcome.text.trim()) {
-				return `\n\n--- ${label} ${result.index + 1} (${agent})${workspace} ---\n${result.outcome.text.trim()}`;
+				return `\n\n--- ${label} ${result.index + 1} (${agent})${workspace} ---\n${result.outcome.text.trim()}${candidateChanges}`;
 			}
 			if (result.error) {
-				return `\n\n--- ${label} ${result.index + 1} (${agent})${workspace} failed ---\n${result.error}`;
+				return `\n\n--- ${label} ${result.index + 1} (${agent})${workspace} failed ---\n${result.error}${candidateChanges}`;
 			}
 			return "";
 		})
@@ -193,8 +217,9 @@ async function runPhase(
 	evidence: string,
 	cancellation: AbortController,
 	worktreeManager: BestOfNWorktreeManager,
-): Promise<PhaseResult[]> {
+): Promise<PhaseRunResult> {
 	let cancellationError: DelegatedPromptCancelledError | undefined;
+	let drainTimeoutError: DelegatedPromptCancellationDrainTimeoutError | undefined;
 	if (phase !== "final-applier") {
 		for (const sourceCwd of new Set(slots.map((slot) => sourceCwdForSlot(options, slot)))) {
 			await validateDelegatedCwd(options.ctx, sourceCwd);
@@ -226,7 +251,10 @@ async function runPhase(
 			});
 			return { phase, slot, index, outcome, workspace };
 		} catch (error) {
-			if (error instanceof DelegatedPromptCancelledError) {
+			if (error instanceof DelegatedPromptCancellationDrainTimeoutError) {
+				drainTimeoutError ??= error;
+				cancellation.abort();
+			} else if (error instanceof DelegatedPromptCancelledError) {
 				cancellationError ??= error;
 				cancellation.abort();
 			}
@@ -236,11 +264,11 @@ async function runPhase(
 				index,
 				error: error instanceof Error ? error.message : String(error),
 				workspace,
+				preserveWorkspace: error instanceof DelegatedPromptCancellationDrainTimeoutError,
 			};
 		}
 	}));
-	if (cancellationError) throw cancellationError;
-	return results;
+	return { results, cancellationError, drainTimeoutError };
 }
 
 function resultText(results: PhaseResult[], title: string): string {
@@ -249,7 +277,7 @@ function resultText(results: PhaseResult[], title: string): string {
 	return successful
 		.map((result) => {
 			const outcome = result.outcome!;
-			return `### ${title} ${result.index + 1} — ${result.slot.agent}\n\n${outcome.text.trim()}`;
+			return `### ${title} ${result.index + 1} — ${result.slot.agent}\n\n${outcome.text.trim()}${formatCandidateChanges(result)}`;
 		})
 		.join("\n\n");
 }
@@ -258,6 +286,58 @@ function summarizeFailures(results: PhaseResult[]): string[] {
 	return results
 		.filter((result) => result.error)
 		.map((result) => `${result.phase} ${result.index + 1} (${result.slot.agent}): ${result.error}`);
+}
+
+function captureCandidateChangeEvidence(results: PhaseResult[]): void {
+	for (const result of results) {
+		if (!result.workspace || result.preserveWorkspace || result.candidateChanges) continue;
+		try {
+			const changes = captureBestOfNWorktreeChanges(result.workspace);
+			if (changes) result.candidateChanges = changes;
+		} catch (error) {
+			result.candidateChanges = { error: error instanceof Error ? error.message : String(error) };
+		}
+	}
+}
+
+function addPreservedWorkspaceRoots(results: readonly PhaseResult[], roots: Set<string>): void {
+	for (const result of results) {
+		if (result.preserveWorkspace && result.workspace) roots.add(result.workspace.root);
+	}
+}
+
+function nonFinalResultBody(workers: PhaseResult[], reviewers: PhaseResult[]): string {
+	const reviewText = resultText(reviewers, "Review");
+	const workerText = resultText(workers, "Candidate");
+	if (reviewText && workerText && hasCandidateChangeEvidence([...workers, ...reviewers])) return `${reviewText}\n\n${workerText}`;
+	return reviewText || workerText;
+}
+
+function notifyPreservedCandidateResult(
+	options: BestOfNRunOptions,
+	workers: PhaseResult[],
+	reviewers: PhaseResult[],
+	finalResults: PhaseResult[] = [],
+): void {
+	const nonFinalResults = [...workers, ...reviewers];
+	if (!hasCandidateChangeEvidence(nonFinalResults)) return;
+	const completedBody = nonFinalResultBody(workers, reviewers);
+	const failedCandidateEvidence = nonFinalResults
+		.filter((result) => (!result.outcome || result.error) && result.candidateChanges)
+		.map(formatCandidateChanges)
+		.join("");
+	const body = `${completedBody}${failedCandidateEvidence}` || "bestOfN candidate change evidence preserved.";
+	const failures = [...summarizeFailures(workers), ...summarizeFailures(reviewers), ...summarizeFailures(finalResults)];
+	const suffix = failures.length > 0 ? `\n\n> Partial result. Failed slots:\n> ${failures.join("\n> ")}` : "";
+	const allResults = [...nonFinalResults, ...finalResults];
+	const usage = aggregateUsage(allResults);
+	const model = aggregateModel(allResults);
+	notifyResult(options, `${body}${suffix}`, {
+		text: body,
+		changed: false,
+		...(model ? { model } : {}),
+		...(usage ? { usage } : {}),
+	});
 }
 
 function aggregateUsage(results: PhaseResult[]): DelegatedSubagentUsage | undefined {
@@ -301,6 +381,10 @@ function notifyResult(options: BestOfNRunOptions, body: string, details?: { mode
 export async function executeBestOfNPrompt(options: BestOfNRunOptions): Promise<"completed" | "failed" | "cancelled"> {
 	const cancellation = createCancellationScope(options.signal);
 	let worktreeManager: BestOfNWorktreeManager | undefined;
+	const workers: PhaseResult[] = [];
+	const reviewers: PhaseResult[] = [];
+	const finalResults: PhaseResult[] = [];
+	const preservedWorkspaceRoots = new Set<string>();
 	try {
 		const workerCount = requestedSlotCount(options.config.workers ?? []);
 		const reviewerCount = options.config.reviewers ? requestedSlotCount(options.config.reviewers) : 0;
@@ -314,33 +398,63 @@ export async function executeBestOfNPrompt(options: BestOfNRunOptions): Promise<
 		const reviewerSlots = options.config.reviewers ? expandSlots(options.config.reviewers, "reviewers") : [];
 		worktreeManager = createBestOfNWorktreeManager();
 
-		const workers = await runPhase(options, "worker", workerSlots, options.runtimeModel, "", cancellation.controller, worktreeManager);
+		const workerRun = await runPhase(options, "worker", workerSlots, options.runtimeModel, "", cancellation.controller, worktreeManager);
+		workers.push(...workerRun.results);
+		addPreservedWorkspaceRoots(workerRun.results, preservedWorkspaceRoots);
+		captureCandidateChangeEvidence(workers);
+		if (workerRun.cancellationError || workerRun.drainTimeoutError || cancellation.controller.signal.aborted) {
+			notifyPreservedCandidateResult(options, workers, reviewers, finalResults);
+			notify(options.ctx, "bestOfN delegation cancelled.", "warning");
+			return "cancelled";
+		}
 		const workerEvidence = appendEvidence("\n\nCandidate answers:", "Candidate", workers);
 		const workerSuccesses = workers.filter((result) => result.outcome && !result.error);
 		if (workerSuccesses.length === 0) {
+			notifyPreservedCandidateResult(options, workers, reviewers, finalResults);
 			notify(options.ctx, `bestOfN produced no successful worker result.\n${summarizeFailures(workers).join("\n")}`, "error");
 			return "failed";
 		}
 
-		const reviewers = reviewerSlots.length > 0
-			? await runPhase(options, "reviewer", reviewerSlots, options.runtimeModel, workerEvidence, cancellation.controller, worktreeManager)
-			: [];
+		if (reviewerSlots.length > 0) {
+			const reviewerRun = await runPhase(options, "reviewer", reviewerSlots, options.runtimeModel, workerEvidence, cancellation.controller, worktreeManager);
+			reviewers.push(...reviewerRun.results);
+			addPreservedWorkspaceRoots(reviewerRun.results, preservedWorkspaceRoots);
+			captureCandidateChangeEvidence(reviewers);
+			if (reviewerRun.cancellationError || reviewerRun.drainTimeoutError || cancellation.controller.signal.aborted) {
+				notifyPreservedCandidateResult(options, workers, reviewers, finalResults);
+				notify(options.ctx, "bestOfN delegation cancelled.", "warning");
+				return "cancelled";
+			}
+		}
 		const reviewEvidence = appendEvidence("\n\nReviewer findings:", "Review", reviewers);
 		const finalEvidence = capEvidence(`${workerEvidence}${reviewEvidence}`);
-		const finalResults: PhaseResult[] = [];
 		if (options.config.finalApplier) {
-			worktreeManager.assertSourceBaselinesUnchanged();
-			finalResults.push(...await runPhase(options, "final-applier", [options.config.finalApplier], options.runtimeModel, finalEvidence, cancellation.controller, worktreeManager));
+			try {
+				worktreeManager.assertSourceBaselinesUnchanged();
+			} catch (error) {
+				notifyPreservedCandidateResult(options, workers, reviewers, finalResults);
+				notify(options.ctx, `bestOfN failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+				return "failed";
+			}
+			const finalRun = await runPhase(options, "final-applier", [options.config.finalApplier], options.runtimeModel, finalEvidence, cancellation.controller, worktreeManager);
+			finalResults.push(...finalRun.results);
+			addPreservedWorkspaceRoots(finalRun.results, preservedWorkspaceRoots);
+			if (finalRun.cancellationError || finalRun.drainTimeoutError || cancellation.controller.signal.aborted) {
+				notifyPreservedCandidateResult(options, workers, reviewers, finalResults);
+				notify(options.ctx, "bestOfN delegation cancelled.", "warning");
+				return "cancelled";
+			}
 		}
 		const finalText = resultText(finalResults, "Final answer");
 		if (options.config.finalApplier && finalText.length === 0) {
 			const failures = summarizeFailures(finalResults);
+			notifyPreservedCandidateResult(options, workers, reviewers, finalResults);
 			notify(options.ctx, `bestOfN final applier produced no successful result.${failures.length > 0 ? `\n${failures.join("\n")}` : ""}`, "error");
 			return "failed";
 		}
 		const reviewText = resultText(reviewers, "Review");
 		const workerText = resultText(workers, "Candidate");
-		const body = finalText || reviewText || workerText;
+		const body = finalText || (hasCandidateChangeEvidence([...workers, ...reviewers]) ? nonFinalResultBody(workers, reviewers) : reviewText || workerText);
 		const failures = [...summarizeFailures(workers), ...summarizeFailures(reviewers), ...summarizeFailures(finalResults)];
 		const suffix = failures.length > 0 ? `\n\n> Partial result. Failed slots:\n> ${failures.join("\n> ")}` : "";
 		const allResults = [...workers, ...reviewers, ...finalResults];
@@ -348,22 +462,33 @@ export async function executeBestOfNPrompt(options: BestOfNRunOptions): Promise<
 		const model = aggregateModel(allResults);
 		notifyResult(options, `${body}${suffix}`, {
 			text: body,
-			changed: allResults.some((result) => result.outcome?.changed === true),
+			changed: finalResults.some((result) => !result.error && result.outcome?.changed === true),
 			...(model ? { model } : {}),
 			...(usage ? { usage } : {}),
 		});
 		return "completed";
 	} catch (error) {
-		if (error instanceof DelegatedPromptCancelledError || options.signal?.aborted) {
+		captureCandidateChangeEvidence([...workers, ...reviewers]);
+		if (error instanceof DelegatedPromptCancelledError || error instanceof DelegatedPromptCancellationDrainTimeoutError || options.signal?.aborted) {
+			notifyPreservedCandidateResult(options, workers, reviewers, finalResults);
 			notify(options.ctx, "bestOfN delegation cancelled.", "warning");
 			return "cancelled";
 		}
+		notifyPreservedCandidateResult(options, workers, reviewers, finalResults);
 		notify(options.ctx, `bestOfN failed: ${error instanceof Error ? error.message : String(error)}`, "error");
 		return "failed";
 	} finally {
 		if (worktreeManager) {
 			try {
-				worktreeManager.cleanup();
+				captureCandidateChangeEvidence([...workers, ...reviewers]);
+				const cleanupResult = worktreeManager.cleanup({ preserveRoots: [...preservedWorkspaceRoots] });
+				for (const preservedWorktree of cleanupResult.preservedWorktrees) {
+					notify(
+						options.ctx,
+						`bestOfN cancellation drain timed out; preserved active worker worktree at \`${preservedWorktree}\`${cleanupResult.preservedRunRoot ? ` and left temporary root \`${cleanupResult.preservedRunRoot}\`` : ""}.`,
+						"warning",
+					);
+				}
 			} catch (error) {
 				notify(options.ctx, `bestOfN worker worktree cleanup failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
 			}

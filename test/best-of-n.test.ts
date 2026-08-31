@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { applyLineupOverrides, executeBestOfNPrompt, MAX_BEST_OF_N_REQUESTS } from "../best-of-n.ts";
 import { createBestOfNWorktreeManager } from "../best-of-n-worktree.ts";
 import { PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT, PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE, PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT } from "../subagent-runtime.ts";
@@ -59,6 +59,54 @@ function createPi(
 		});
 	});
 	return pi;
+}
+
+function createEventPi() {
+	const bus = new Map<string, Array<(data: unknown) => void>>();
+	const customMessages: unknown[] = [];
+	return {
+		customMessages,
+		events: {
+			emit(channel: string, data: unknown) {
+				for (const handler of bus.get(channel) ?? []) handler(data);
+			},
+			on(channel: string, handler: (data: unknown) => void) {
+				const handlers = bus.get(channel) ?? [];
+				handlers.push(handler);
+				bus.set(channel, handlers);
+				return () => bus.set(channel, (bus.get(channel) ?? []).filter((entry) => entry !== handler));
+			},
+		},
+		sendMessage(message: unknown) {
+			customMessages.push(message);
+		},
+	} as any;
+}
+
+function emitStarted(pi: any, request: any): void {
+	pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, {
+		requestId: request.requestId,
+		ownerRunId: request.ownerRunId,
+		nodeId: request.nodeId,
+	});
+}
+
+function emitResponse(pi: any, request: any, status: "completed" | "failed" | "cancelled", text?: string, error?: string): void {
+	pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+		requestId: request.requestId,
+		ownerRunId: request.ownerRunId,
+		nodeId: request.nodeId,
+		status,
+		agent: request.agent,
+		model: request.model,
+		...(status === "completed" ? { result: { kind: "text", text: text ?? "done" } } : {}),
+		...(error ? { error } : {}),
+		usage: { input: 10, output: 5, cacheRead: 1, cacheWrite: 2, cost: 0.01, turns: 1, toolCalls: 1, durationMs: 100 },
+	});
+}
+
+function delay(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function createCtx(cwd: string) {
@@ -335,6 +383,7 @@ test("runs worker, reviewer, and final-applier phases through individual structu
 					assert.equal(workerCwds.length, 2);
 					assert.equal(workerCwds.every((cwd) => existsSync(cwd)), true);
 					assert.match(data.task, /Worktree:/);
+					writeFileSync(join(data.cwd, "final-marker.txt"), "applied\n");
 				}
 			},
 		);
@@ -367,6 +416,7 @@ test("runs worker, reviewer, and final-applier phases through individual structu
 		assert.equal(requests.length, 4);
 		assert.equal(new Set(requests.slice(0, 3).map((request) => request.cwd)).size, 3);
 		assert.equal(requests[3].cwd, realpathSync(root));
+		assert.equal(existsSync(join(root, "final-marker.txt")), true);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -575,6 +625,111 @@ test("fails when a configured final applier produces no successful result", asyn
 	}
 });
 
+test("preserves worker diff when final applier fails and removes the finished worktree", async () => {
+	const root = createGitRepo("pi-prompt-best-of-n-final-fail-diff-");
+	try {
+		const requests: any[] = [];
+		const pi = createPi(["candidate"], requests, [], ["applier"], (data) => {
+			if (data.agent === "worker") writeFileSync(join(data.cwd, "candidate-marker.txt"), "candidate change\n");
+		});
+		const context = createCtx(root);
+		const result = await executeBestOfNPrompt({
+			pi,
+			ctx: context,
+			prompt: basePrompt,
+			config: { workers: [{ agent: "worker" }], finalApplier: { agent: "applier" } },
+			args: [],
+			currentModel: context.model,
+		});
+
+		assert.equal(result, "failed");
+		const workerRequest = requests.find((request) => request.agent === "worker");
+		assert.ok(workerRequest);
+		assert.equal(existsSync(workerRequest.cwd), false);
+		assert.equal(pi.customMessages.length, 1);
+		const message = pi.customMessages[0] as any;
+		assert.equal(message.customType, PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE);
+		assert.equal(message.details.changed, false);
+		assert.doesNotMatch(message.content, /run-state/);
+		assert.match(message.content, /candidate-marker\.txt/);
+		assert.match(message.content, /diff --git/);
+		assert.match(message.content, /new file mode/);
+		assert.match(message.content, /\+candidate change/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("preserves worker diff without a final applier and reports target changed false", async () => {
+	const root = createGitRepo("pi-prompt-best-of-n-no-final-diff-");
+	try {
+		const requests: any[] = [];
+		const pi = createPi(["candidate"], requests, [], [], (data) => {
+			if (data.agent !== "worker") return;
+			writeFileSync(join(data.cwd, "candidate-marker.txt"), "candidate change\n");
+			mkdirSync(join(data.cwd, ".pi", "subagents"), { recursive: true });
+			writeFileSync(join(data.cwd, ".pi", "subagents", "run-state.json"), "bridge runtime\n");
+		});
+		const context = createCtx(root);
+		const result = await executeBestOfNPrompt({
+			pi,
+			ctx: context,
+			prompt: basePrompt,
+			config: { workers: [{ agent: "worker" }] },
+			args: [],
+			currentModel: context.model,
+		});
+
+		assert.equal(result, "completed");
+		assert.equal(requests.length, 1);
+		assert.equal(existsSync(requests[0].cwd), false);
+		assert.equal(pi.customMessages.length, 1);
+		const message = pi.customMessages[0] as any;
+		assert.equal(message.details.changed, false);
+		assert.doesNotMatch(message.content, /run-state/);
+		assert.match(message.content, /candidate-marker\.txt/);
+		assert.match(message.content, /diff --git/);
+		assert.match(message.content, /\+candidate change/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("preserves committed worker diff using the base-to-head fallback", async () => {
+	const root = createGitRepo("pi-prompt-best-of-n-committed-worker-");
+	try {
+		const requests: any[] = [];
+		const pi = createPi(["candidate"], requests, [], [], (data) => {
+			if (data.agent !== "worker") return;
+			const base = gitHead(data.cwd);
+			writeFileSync(join(data.cwd, "tracked.txt"), "committed candidate\n");
+			execFileSync("git", ["add", "tracked.txt"], { cwd: data.cwd });
+			execFileSync("git", ["commit", "-qm", "worker candidate"], { cwd: data.cwd });
+			execFileSync("git", ["checkout", base, "--", "tracked.txt"], { cwd: data.cwd });
+		});
+		const context = createCtx(root);
+		const result = await executeBestOfNPrompt({
+			pi,
+			ctx: context,
+			prompt: basePrompt,
+			config: { workers: [{ agent: "worker" }] },
+			args: [],
+			currentModel: context.model,
+		});
+
+		assert.equal(result, "completed");
+		assert.equal(pi.customMessages.length, 1);
+		const message = pi.customMessages[0] as any;
+		assert.equal(message.details.changed, false);
+		assert.doesNotMatch(message.content, /run-state/);
+		assert.match(message.content, /tracked\.txt/);
+		assert.match(message.content, /committed candidate/);
+		assert.match(message.content, /diff --git/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("preserves original slot labels when an earlier worker fails", async () => {
 	const root = mkdtempSync(join(tmpdir(), "pi-prompt-best-of-n-slot-labels-"));
 	try {
@@ -634,6 +789,37 @@ test("preserves original slot labels when an earlier worker fails", async () => 
 	}
 });
 
+test("preserves candidate diff when a worker edits then fails", async () => {
+	const root = createGitRepo("pi-prompt-best-of-n-failed-candidate-");
+	try {
+		const requests: any[] = [];
+		const pi = createPi(["unused"], requests, [], ["worker"], (data) => {
+			if (data.agent === "worker") writeFileSync(join(data.cwd, "failed-marker.txt"), "failed candidate\n");
+		});
+		const context = createCtx(root);
+		const result = await executeBestOfNPrompt({
+			pi,
+			ctx: context,
+			prompt: basePrompt,
+			config: { workers: [{ agent: "worker" }] },
+			args: [],
+			currentModel: context.model,
+		});
+
+		assert.equal(result, "failed");
+		assert.equal(requests.length, 1);
+		assert.equal(existsSync(requests[0].cwd), false);
+		assert.equal(pi.customMessages.length, 1);
+		const message = pi.customMessages[0] as any;
+		assert.equal(message.details.changed, false);
+		assert.doesNotMatch(message.content, /run-state/);
+		assert.match(message.content, /failed-marker/);
+		assert.match(message.content, /failed candidate/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("cancels sibling best-of-N requests when a child response is cancelled", async () => {
 	const root = mkdtempSync(join(tmpdir(), "pi-prompt-best-of-n-child-cancel-"));
 	try {
@@ -678,6 +864,8 @@ test("cancels sibling best-of-N requests when a child response is cancelled", as
 			cancelEvents.push(data.requestId);
 			const timer = timers.get(data.requestId);
 			if (timer) clearTimeout(timer);
+			const request = requests.find((candidate) => candidate.requestId === data.requestId);
+			if (request) setTimeout(() => emitResponse(pi, request, "cancelled"), 0);
 		});
 		const context = createCtx(root);
 		const result = await executeBestOfNPrompt({
@@ -751,6 +939,8 @@ test("cancels sibling best-of-N requests when the parent is cancelled", async ()
 			cancelEvents.push(data.requestId);
 			const timer = timers.get(data.requestId);
 			if (timer) clearTimeout(timer);
+			const request = requests.find((candidate) => candidate.requestId === data.requestId);
+			if (request) setTimeout(() => emitResponse(pi, request, "cancelled"), 0);
 		});
 		const context = createCtx(root);
 		const result = await executeBestOfNPrompt({
@@ -767,6 +957,120 @@ test("cancels sibling best-of-N requests when the parent is cancelled", async ()
 		assert.equal(cancelEvents.length, 3);
 		assert.equal(new Set(cancelEvents).size, 3);
 	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("waits for delayed terminal cancellation before cleaning best-of-N worktrees", async () => {
+	const root = createGitRepo("pi-prompt-best-of-n-cancel-drain-");
+	try {
+		const requests: any[] = [];
+		const controller = new AbortController();
+		const pi = createEventPi();
+		let abortScheduled = false;
+		let existedBeforeTerminal = false;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data: any) => {
+			requests.push(data);
+			emitStarted(pi, data);
+			if (requests.length === 1) {
+				writeFileSync(join(data.cwd, "candidate-marker.txt"), "completed candidate\n");
+				emitResponse(pi, data, "completed", "candidate one");
+				return;
+			}
+			if (!abortScheduled) {
+				abortScheduled = true;
+				setTimeout(() => controller.abort(), 0);
+			}
+		});
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT, (data: any) => {
+			const request = requests.find((candidate) => candidate.requestId === data.requestId);
+			assert.ok(request);
+			setTimeout(() => {
+				existedBeforeTerminal = existsSync(request.cwd);
+				emitResponse(pi, request, "cancelled");
+			}, 30);
+		});
+		const context = createCtx(root);
+		const result = await executeBestOfNPrompt({
+			pi,
+			ctx: context,
+			prompt: basePrompt,
+			config: { workers: [{ agent: "worker", count: 2 }], finalApplier: { agent: "applier" } },
+			args: [],
+			currentModel: context.model,
+			signal: controller.signal,
+		});
+
+		assert.equal(result, "cancelled");
+		assert.equal(requests.length, 2);
+		assert.equal(existedBeforeTerminal, true);
+		assert.equal(requests.every((request) => !existsSync(request.cwd)), true);
+		assert.equal(pi.customMessages.length, 1);
+		const message = pi.customMessages[0] as any;
+		assert.equal(message.details.changed, false);
+		assert.doesNotMatch(message.content, /run-state/);
+		assert.match(message.content, /candidate-marker\.txt/);
+		assert.match(message.content, /\+completed candidate/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("keeps a drain-timed-out active worktree and reports its exact path", async () => {
+	const root = createGitRepo("pi-prompt-best-of-n-drain-timeout-");
+	const previousTimeout = process.env.PI_PROMPT_SUBAGENT_CANCEL_DRAIN_TIMEOUT_MS;
+	let preservedTempRoot: string | undefined;
+	try {
+		process.env.PI_PROMPT_SUBAGENT_CANCEL_DRAIN_TIMEOUT_MS = "25";
+		const requests: any[] = [];
+		const notifications: Array<{ message: string; type: string }> = [];
+		const controller = new AbortController();
+		const pi = createEventPi();
+		let abortScheduled = false;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data: any) => {
+			requests.push(data);
+			emitStarted(pi, data);
+			if (requests.length === 1) {
+				writeFileSync(join(data.cwd, "candidate-marker.txt"), "completed candidate\n");
+				emitResponse(pi, data, "completed", "candidate one");
+				return;
+			}
+			if (!abortScheduled) {
+				abortScheduled = true;
+				setTimeout(() => controller.abort(), 0);
+			}
+		});
+		const context = createCtx(root);
+		context.hasUI = true;
+		context.ui.notify = (message: string, type: string) => notifications.push({ message, type });
+
+		const result = await executeBestOfNPrompt({
+			pi,
+			ctx: context,
+			prompt: basePrompt,
+			config: { workers: [{ agent: "worker", count: 2 }], finalApplier: { agent: "applier" } },
+			args: [],
+			currentModel: context.model,
+			signal: controller.signal,
+		});
+
+		assert.equal(result, "cancelled");
+		assert.equal(requests.length, 2);
+		const finishedWorktree = requests[0].cwd;
+		const activeWorktree = requests[1].cwd;
+		preservedTempRoot = dirname(activeWorktree);
+		assert.equal(existsSync(finishedWorktree), false);
+		assert.equal(existsSync(activeWorktree), true);
+		assert.equal(existsSync(preservedTempRoot), true);
+		assert.equal(pi.customMessages.length, 1);
+		assert.match((pi.customMessages[0] as any).content, /candidate-marker\.txt/);
+		const warning = notifications.find((entry) => entry.type === "warning" && entry.message.includes(activeWorktree));
+		assert.ok(warning);
+		assert.match(warning.message, /timed out/i);
+	} finally {
+		if (previousTimeout === undefined) delete process.env.PI_PROMPT_SUBAGENT_CANCEL_DRAIN_TIMEOUT_MS;
+		else process.env.PI_PROMPT_SUBAGENT_CANCEL_DRAIN_TIMEOUT_MS = previousTimeout;
+		if (preservedTempRoot) rmSync(preservedTempRoot, { recursive: true, force: true });
 		rmSync(root, { recursive: true, force: true });
 	}
 });

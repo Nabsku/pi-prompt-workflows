@@ -7,6 +7,9 @@ import { sanitizedGitEnvironment } from "./git-environment.js";
 
 const GIT_COMMAND_TIMEOUT_MS = 120_000;
 const GIT_MAX_OUTPUT_BYTES = 1024 * 1024;
+const CANDIDATE_CHANGE_STAT_BYTE_LIMIT = 64 * 1024;
+const CANDIDATE_CHANGE_DIFF_BYTE_LIMIT = 512 * 1024;
+const CANDIDATE_CHANGE_TRUNCATION_MARKER = "\n[bestOfN candidate change evidence truncated.]\n";
 const BRIDGE_RUNTIME_SUBAGENTS_PATH = ".pi/subagents";
 const GIT_SAFE_ARGS = [
 	"--no-optional-locks",
@@ -35,10 +38,21 @@ export interface IsolatedBestOfNWorktree {
 	readonly baseCommit: string;
 }
 
+export interface BestOfNWorktreeChanges {
+	readonly stat: string;
+	readonly diff: string;
+	readonly truncated: boolean;
+}
+
+export interface BestOfNWorktreeCleanupResult {
+	readonly preservedWorktrees: readonly string[];
+	readonly preservedRunRoot?: string;
+}
+
 export interface BestOfNWorktreeManager {
 	create(sourceCwd: string, label: string): IsolatedBestOfNWorktree;
 	assertSourceBaselinesUnchanged(): void;
-	cleanup(): void;
+	cleanup(options?: { preserveRoots?: readonly string[] }): BestOfNWorktreeCleanupResult;
 }
 
 interface SourceCleanState {
@@ -65,6 +79,29 @@ function runGit(cwd: string, args: readonly string[]): string {
 			stdio: ["ignore", "pipe", "pipe"],
 		});
 	} catch (cause: any) {
+		const stderr = typeof cause?.stderr === "string" ? cause.stderr.trim().split(/\r?\n/, 1)[0] : "";
+		throw new BestOfNWorktreeError(
+			`Git worktree operation failed${stderr ? `: ${stderr.slice(0, 400)}` : ""}.`,
+			{ cause },
+		);
+	}
+}
+
+function runGitAllowingExit(cwd: string, args: readonly string[], allowedStatuses: readonly number[]): string {
+	try {
+		return execFileSync("git", [...GIT_SAFE_ARGS, ...args], {
+			cwd,
+			encoding: "utf8",
+			env: sanitizedGitEnvironment(),
+			maxBuffer: GIT_MAX_OUTPUT_BYTES,
+			timeout: GIT_COMMAND_TIMEOUT_MS,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+	} catch (cause: any) {
+		const status = typeof cause?.status === "number" ? cause.status : undefined;
+		if (status !== undefined && allowedStatuses.includes(status)) {
+			return typeof cause.stdout === "string" ? cause.stdout : "";
+		}
 		const stderr = typeof cause?.stderr === "string" ? cause.stderr.trim().split(/\r?\n/, 1)[0] : "";
 		throw new BestOfNWorktreeError(
 			`Git worktree operation failed${stderr ? `: ${stderr.slice(0, 400)}` : ""}.`,
@@ -174,6 +211,60 @@ function safeDirectoryName(label: string): string {
 	return normalized || "slot";
 }
 
+function utf8Bytes(value: string): number {
+	return Buffer.byteLength(value, "utf8");
+}
+
+function truncateUtf8(value: string, maxBytes: number): { text: string; truncated: boolean } {
+	if (utf8Bytes(value) <= maxBytes) return { text: value, truncated: false };
+	const markerBytes = utf8Bytes(CANDIDATE_CHANGE_TRUNCATION_MARKER);
+	const availableBytes = Math.max(0, maxBytes - markerBytes);
+	let low = 0;
+	let high = value.length;
+	while (low < high) {
+		const mid = Math.ceil((low + high) / 2);
+		if (utf8Bytes(value.slice(0, mid)) <= availableBytes) low = mid;
+		else high = mid - 1;
+	}
+	return { text: `${value.slice(0, low).trimEnd()}${CANDIDATE_CHANGE_TRUNCATION_MARKER}`, truncated: true };
+}
+
+function joinGitOutputs(outputs: readonly string[]): string {
+	return outputs.map((output) => output.trimEnd()).filter((output) => output.length > 0).join("\n");
+}
+
+function untrackedDiffArgs(path: string, stat: boolean): string[] {
+	const nullFile = process.platform === "win32" ? "NUL" : "/dev/null";
+	return ["diff", "--no-index", "--no-ext-diff", ...(stat ? ["--stat"] : []), "--", nullFile, path];
+}
+
+export function captureBestOfNWorktreeChanges(workspace: IsolatedBestOfNWorktree): BestOfNWorktreeChanges | undefined {
+	const currentHead = runGit(workspace.root, ["rev-parse", "--verify", "HEAD^{commit}"]).trim();
+	let trackedStat = runGit(workspace.root, ["diff", "--stat", "--no-ext-diff", "--no-textconv", workspace.baseCommit, "--"]);
+	let trackedDiff = runGit(workspace.root, ["diff", "--no-ext-diff", "--no-textconv", workspace.baseCommit, "--"]);
+	if (!trackedDiff.trim() && currentHead !== workspace.baseCommit) {
+		const baseToHead = `${workspace.baseCommit}..HEAD`;
+		trackedStat = runGit(workspace.root, ["diff", "--stat", "--no-ext-diff", "--no-textconv", baseToHead, "--"]);
+		trackedDiff = runGit(workspace.root, ["diff", "--no-ext-diff", "--no-textconv", baseToHead, "--"]);
+	}
+
+	const untracked = splitNulRecords(runGit(workspace.root, ["ls-files", "--others", "--exclude-standard", "-z"]))
+		.filter((path) => !isBridgeRuntimeSubagentsPath(path));
+	const untrackedStats = untracked.map((path) => runGitAllowingExit(workspace.root, untrackedDiffArgs(path, true), [0, 1]));
+	const untrackedDiffs = untracked.map((path) => runGitAllowingExit(workspace.root, untrackedDiffArgs(path, false), [0, 1]));
+	const rawStat = joinGitOutputs([trackedStat, ...untrackedStats]);
+	const rawDiff = joinGitOutputs([trackedDiff, ...untrackedDiffs]);
+	if (!rawStat && !rawDiff) return undefined;
+
+	const stat = truncateUtf8(rawStat, CANDIDATE_CHANGE_STAT_BYTE_LIMIT);
+	const diff = truncateUtf8(rawDiff, CANDIDATE_CHANGE_DIFF_BYTE_LIMIT);
+	return {
+		stat: stat.text,
+		diff: diff.text,
+		truncated: stat.truncated || diff.truncated,
+	};
+}
+
 export function createBestOfNWorktreeManager(): BestOfNWorktreeManager {
 	const runRoot = mkdtempSync(join(tmpdir(), "pi-prompt-best-of-n-worktrees-"));
 	const created: IsolatedBestOfNWorktree[] = [];
@@ -218,11 +309,17 @@ export function createBestOfNWorktreeManager(): BestOfNWorktreeManager {
 			for (const baseline of baselines.values()) assertSourceBaselineUnchanged(baseline);
 		},
 
-		cleanup() {
-			if (cleaned) return;
+		cleanup(options: { preserveRoots?: readonly string[] } = {}) {
+			if (cleaned) return { preservedWorktrees: [] };
 			cleaned = true;
 			const errors: unknown[] = [];
+			const preserveRoots = new Set(options.preserveRoots ?? []);
+			const preservedWorktrees: string[] = [];
 			for (const workspace of [...created].reverse()) {
+				if (preserveRoots.has(workspace.root)) {
+					preservedWorktrees.push(workspace.root);
+					continue;
+				}
 				try {
 					runGit(workspace.sourceCwd, ["worktree", "remove", "--force", workspace.root]);
 				} catch (error) {
@@ -235,14 +332,20 @@ export function createBestOfNWorktreeManager(): BestOfNWorktreeManager {
 				}
 			}
 			created.length = 0;
-			try {
-				rmSync(runRoot, { recursive: true, force: true });
-			} catch (error) {
-				errors.push(error);
+			if (preservedWorktrees.length === 0) {
+				try {
+					rmSync(runRoot, { recursive: true, force: true });
+				} catch (error) {
+					errors.push(error);
+				}
 			}
 			if (errors.length > 0) {
 				throw new BestOfNWorktreeError(`Failed to clean up ${errors.length} best-of-N worker worktree operation(s).`, { cause: errors[0] });
 			}
+			return {
+				preservedWorktrees: preservedWorktrees.reverse(),
+				...(preservedWorktrees.length > 0 ? { preservedRunRoot: runRoot } : {}),
+			};
 		},
 	};
 }

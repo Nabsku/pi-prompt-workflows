@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseSubagentDelegationRequest } from "../node_modules/pi-subagents/src/slash/delegation-request.ts";
-import { DelegatedPromptCancelledError, executeSubagentPromptStep, executeSubagentPromptStepOutcome } from "../subagent-step.ts";
+import { DelegatedPromptCancellationDrainTimeoutError, DelegatedPromptCancelledError, executeSubagentPromptStep, executeSubagentPromptStepOutcome } from "../subagent-step.ts";
 import {
 	PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT,
 	PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT,
@@ -21,6 +21,10 @@ function withDelegationBridge(run: (root: string) => Promise<void>) {
 	return run(root).finally(() => {
 		rmSync(root, { recursive: true, force: true });
 	});
+}
+
+function delay(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function createPi() {
@@ -85,6 +89,16 @@ function emitFailed(pi: any, request: any, error: string): void {
 		nodeId: request.nodeId,
 		status: "failed",
 		error,
+	});
+}
+
+function emitCancelled(pi: any, request: any): void {
+	pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+		requestId: request.requestId,
+		ownerRunId: request.ownerRunId,
+		nodeId: request.nodeId,
+		status: "cancelled",
+		agent: request.agent,
 	});
 }
 
@@ -893,13 +907,16 @@ test("executeSubagentPromptStep emits cancel on escape in UI mode", async () => 
 		const pi = createPi();
 		const { ctx, sendInput } = createInteractiveCtx(root);
 		let cancelPayload: Record<string, unknown> | undefined;
+		let activeRequest: any;
 
 		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT, (data) => {
 			cancelPayload = data as Record<string, unknown>;
+			if (activeRequest) setTimeout(() => emitCancelled(pi, activeRequest), 0);
 		});
 
 		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
 			const request = data as any;
+			activeRequest = request;
 			emitStarted(pi, request);
 			setTimeout(() => sendInput("\x1b"), 0);
 		});
@@ -927,13 +944,16 @@ test("executeSubagentPromptStep emits cancel on abort signal", async () => {
 		const ctx = createCtx(root);
 		const controller = new AbortController();
 		let cancelPayload: Record<string, unknown> | undefined;
+		let activeRequest: any;
 
 		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT, (data) => {
 			cancelPayload = data as Record<string, unknown>;
+			if (activeRequest) setTimeout(() => emitCancelled(pi, activeRequest), 0);
 		});
 
 		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
 			const request = data as any;
+			activeRequest = request;
 			emitStarted(pi, request);
 			setTimeout(() => controller.abort(), 0);
 		});
@@ -954,6 +974,88 @@ test("executeSubagentPromptStep emits cancel on abort signal", async () => {
 		assert.equal(cancelPayload?.ownerRunId, cancelPayload?.requestId);
 		assert.equal(cancelPayload?.nodeId, "single");
 	});
+});
+
+test("executeSubagentPromptStep waits for terminal response after abort signal", async () => {
+	await withDelegationBridge(async (root) => {
+		const pi = createPi();
+		const ctx = createCtx(root);
+		const controller = new AbortController();
+		let activeRequest: any;
+		let settled = false;
+		let settledBeforeTerminal: boolean | undefined;
+
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+			activeRequest = data;
+			emitStarted(pi, activeRequest);
+			setTimeout(() => controller.abort(), 0);
+		});
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT, () => {
+			setTimeout(() => {
+				settledBeforeTerminal = settled;
+				emitCancelled(pi, activeRequest);
+			}, 30);
+		});
+
+		const run = executeSubagentPromptStep({
+			pi,
+			prompt,
+			args: [],
+			ctx,
+			currentModel: ctx.model,
+			signal: controller.signal,
+		});
+		run.finally(() => { settled = true; }).catch(() => {});
+
+		await assert.rejects(
+			() => run,
+			(error: Error) => error instanceof DelegatedPromptCancelledError,
+		);
+		await delay(40);
+		assert.equal(settledBeforeTerminal, false);
+	});
+});
+
+test("executeSubagentPromptStep reports a distinct cancellation drain timeout", async () => {
+	const previousTimeout = process.env.PI_PROMPT_SUBAGENT_CANCEL_DRAIN_TIMEOUT_MS;
+	try {
+		process.env.PI_PROMPT_SUBAGENT_CANCEL_DRAIN_TIMEOUT_MS = "25";
+		await withDelegationBridge(async (root) => {
+			const pi = createPi();
+			const ctx = createCtx(root);
+			const controller = new AbortController();
+			let cancels = 0;
+
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT, () => {
+				cancels += 1;
+			});
+			pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (data) => {
+				const request = data as any;
+				emitStarted(pi, request);
+				setTimeout(() => controller.abort(), 0);
+			});
+
+			await assert.rejects(
+				() => executeSubagentPromptStep({
+					pi,
+					prompt,
+					args: [],
+					ctx,
+					currentModel: ctx.model,
+					signal: controller.signal,
+				}),
+				(error: Error) => {
+					assert.ok(error instanceof DelegatedPromptCancellationDrainTimeoutError);
+					assert.match(error.message, /acknowledge cancellation/i);
+					return true;
+				},
+			);
+			assert.equal(cancels, 1);
+		});
+	} finally {
+		if (previousTimeout === undefined) delete process.env.PI_PROMPT_SUBAGENT_CANCEL_DRAIN_TIMEOUT_MS;
+		else process.env.PI_PROMPT_SUBAGENT_CANCEL_DRAIN_TIMEOUT_MS = previousTimeout;
+	}
 });
 
 test("executeSubagentPromptStep emits no bridge events when its signal is already aborted", async () => {

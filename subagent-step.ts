@@ -67,6 +67,22 @@ export class DelegatedPromptCancelledError extends Error {
 	}
 }
 
+export class DelegatedPromptCancellationDrainTimeoutError extends Error {
+	constructor(message = "Delegated prompt cancellation acknowledgement timed out.") {
+		super(message);
+		this.name = "DelegatedPromptCancellationDrainTimeoutError";
+	}
+}
+
+const DEFAULT_DELEGATED_CANCEL_DRAIN_TIMEOUT_MS = 5_000;
+const MAX_DELEGATED_CANCEL_DRAIN_TIMEOUT_MS = 60_000;
+
+function delegatedCancelDrainTimeoutMs(): number {
+	const configured = Number(process.env.PI_PROMPT_SUBAGENT_CANCEL_DRAIN_TIMEOUT_MS);
+	if (!Number.isFinite(configured) || configured <= 0) return DEFAULT_DELEGATED_CANCEL_DRAIN_TIMEOUT_MS;
+	return Math.min(Math.round(configured), MAX_DELEGATED_CANCEL_DRAIN_TIMEOUT_MS);
+}
+
 function extractTextFromBlocks(content: AssistantMessage["content"]): string {
 	for (let i = content.length - 1; i >= 0; i--) {
 		const block = content[i];
@@ -407,6 +423,8 @@ async function requestDelegatedRun(
 		let widgetSet = false;
 		let refreshTimer: ReturnType<typeof setInterval> | null = null;
 		let startTimeout: ReturnType<typeof setTimeout>;
+		let cancelDrainTimer: ReturnType<typeof setTimeout> | null = null;
+		let cancellationRequested = false;
 		let onAbort: (() => void) | undefined;
 		let onTerminalInput: (() => void) | undefined;
 		const progressKey = `${DELEGATED_WIDGET_KEY}:${request.requestId}`;
@@ -429,6 +447,10 @@ async function requestDelegatedRun(
 			if (done) return;
 			done = true;
 			clearTimeout(startTimeout);
+			if (cancelDrainTimer) {
+				clearTimeout(cancelDrainTimer);
+				cancelDrainTimer = null;
+			}
 			unsubscribeStarted();
 			unsubscribeResponse();
 			unsubscribeUpdate();
@@ -436,6 +458,23 @@ async function requestDelegatedRun(
 			clearWidget();
 			if (signal && onAbort) signal.removeEventListener("abort", onAbort);
 			next();
+		};
+
+		const beginCancellationDrain = () => {
+			if (done || cancellationRequested) return;
+			cancellationRequested = true;
+			clearTimeout(startTimeout);
+			const drainTimeoutMs = delegatedCancelDrainTimeoutMs();
+			cancelDrainTimer = setTimeout(() => {
+				finish(() => reject(new DelegatedPromptCancellationDrainTimeoutError(
+					`Delegated subagent \`${requestLabel}\` did not acknowledge cancellation within ${drainTimeoutMs}ms.`,
+				)));
+			}, drainTimeoutMs);
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT, delegatedCancelPayload(request));
+			updateDelegatedLiveState(request.requestId, {
+				status: "cancelling...",
+			});
+			if (ctx.hasUI) ctx.ui.setStatus(progressKey, `delegating to ${requestLabel} · cancelling...`);
 		};
 
 		const startTimeoutMs = Number(process.env.PI_PROMPT_SUBAGENT_START_TIMEOUT_MS ?? "15000");
@@ -489,6 +528,10 @@ async function requestDelegatedRun(
 				status: payload.failed ? "failed" : "completed",
 			});
 			clearWidget();
+			if (cancellationRequested) {
+				finish(() => reject(new DelegatedPromptCancelledError()));
+				return;
+			}
 			finish(() => resolve(payload));
 		};
 
@@ -524,8 +567,7 @@ async function requestDelegatedRun(
 		onTerminalInput = ctx.mode === "tui"
 			? ctx.ui.onTerminalInput((input) => {
 				if (!matchesKey(input, Key.escape)) return undefined;
-				pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT, delegatedCancelPayload(request));
-				finish(() => reject(new DelegatedPromptCancelledError()));
+				beginCancellationDrain();
 				return { consume: true };
 			})
 			: undefined;
@@ -535,8 +577,7 @@ async function requestDelegatedRun(
 		unsubscribeUpdate = pi.events.on(PROMPT_TEMPLATE_SUBAGENT_UPDATE_EVENT, onUpdate);
 
 		onAbort = () => {
-			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT, delegatedCancelPayload(request));
-			finish(() => reject(new DelegatedPromptCancelledError()));
+			beginCancellationDrain();
 		};
 		if (signal) {
 			if (signal.aborted) {
@@ -642,7 +683,7 @@ export async function executeSubagentPromptStep(options: DelegatedPromptOptions)
 			...(response.model ? { model: response.model } : {}),
 		};
 	} catch (error) {
-		if (error instanceof DelegatedPromptCancelledError) throw error;
+		if (error instanceof DelegatedPromptCancelledError || error instanceof DelegatedPromptCancellationDrainTimeoutError) throw error;
 		const cause = error instanceof Error ? error : new Error(String(error));
 		throw new Error(`Prompt \`${preparedTask.promptName}\` delegated subagent \`${preparedTask.agent}\` failed: ${cause.message}`, { cause });
 	} finally {

@@ -294,7 +294,19 @@ test("delegated Escape cancellation emits a cancelled prompt lifecycle", async (
 		(ctx as any).ui.setWidget = () => {};
 		let cancelPayload: any;
 		let finishedPayload: any;
-		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT, (payload) => { cancelPayload = payload; });
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT, (payload) => {
+			cancelPayload = payload;
+			const request = payload as any;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				requestId: request.requestId,
+				ownerRunId: request.ownerRunId,
+				nodeId: request.nodeId,
+				status: "cancelled",
+				agent: request.agent,
+				model: request.model,
+				result: { kind: "text", text: "Cancelled" },
+			});
+		});
 		pi.events.on(PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT, (payload) => { finishedPayload = payload; });
 		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
 			const request = payload as any;
@@ -317,7 +329,7 @@ test("delegated Escape cancellation emits a cancelled prompt lifecycle", async (
 	});
 });
 
-test("session shutdown settles a delegated request when the bridge emits no terminal response", async () => {
+test("session shutdown drains until the bridge emits a terminal cancellation response", async () => {
 	await withTempHome(async (root) => {
 		const cwd = join(root, "project");
 		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
@@ -328,6 +340,18 @@ test("session shutdown settles a delegated request when the bridge emits no term
 		let requestStarted!: () => void;
 		const started = new Promise<void>((resolve) => { requestStarted = resolve; });
 		let finishedPayload: any;
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT, (payload) => {
+			const request = payload as any;
+			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, {
+				requestId: request.requestId,
+				ownerRunId: request.ownerRunId,
+				nodeId: request.nodeId,
+				status: "cancelled",
+				agent: request.agent,
+				model: request.model,
+				result: { kind: "text", text: "Cancelled" },
+			});
+		});
 		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
 			const request = payload as any;
 			pi.events.emit(PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT, {
