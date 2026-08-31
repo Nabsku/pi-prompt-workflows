@@ -1,11 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { applyLineupOverrides, executeBestOfNPrompt, MAX_BEST_OF_N_REQUESTS } from "../best-of-n.ts";
-import { createBestOfNWorktreeManager } from "../best-of-n-worktree.ts";
+import { captureBestOfNWorktreeChanges, createBestOfNWorktreeManager } from "../best-of-n-worktree.ts";
 import { PROMPT_TEMPLATE_SUBAGENT_CANCEL_EVENT, PROMPT_TEMPLATE_SUBAGENT_MESSAGE_TYPE, PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, PROMPT_TEMPLATE_SUBAGENT_STARTED_EVENT } from "../subagent-runtime.ts";
 import { getLastAssistantText } from "../loop-utils.ts";
 
@@ -521,6 +521,44 @@ test("aborts before final applier when a source baseline advances after workers 
 	}
 });
 
+test("aborts before final applier when the separate final target advances after workers finish", async () => {
+	const workerRoot = createGitRepo("pi-prompt-best-of-n-final-target-worker-");
+	const finalRoot = createGitRepo("pi-prompt-best-of-n-final-target-drift-");
+	try {
+		const requests: any[] = [];
+		const notifications: Array<{ message: string; type: string }> = [];
+		let advanced = false;
+		const pi = createPi(["candidate", "final"], requests, [], [], (data) => {
+			if (data.agent === "worker" && !advanced) {
+				advanced = true;
+				commitTrackedFile(finalRoot, "advanced final target\n", "advance final target");
+			}
+		});
+		const context = createCtx(workerRoot);
+		context.cwd = realpathSync(tmpdir());
+		context.hasUI = true;
+		context.ui.confirm = async () => true;
+		context.ui.notify = (message: string, type: string) => notifications.push({ message, type });
+		const result = await executeBestOfNPrompt({
+			pi,
+			ctx: context,
+			prompt: { ...basePrompt, cwd: finalRoot },
+			config: { workers: [{ agent: "worker", cwd: workerRoot }], finalApplier: { agent: "applier", cwd: workerRoot } },
+			args: [],
+			currentModel: context.model,
+		});
+
+		assert.equal(result, "failed");
+		assert.deepEqual(requests.map((request) => request.agent), ["worker"]);
+		assert.equal(pi.customMessages.length, 0);
+		assert.equal(notifications.at(-1)?.type, "error");
+		assert.match(notifications.at(-1)?.message ?? "", /source baseline.*changed|HEAD.*changed|drift/i);
+	} finally {
+		rmSync(finalRoot, { recursive: true, force: true });
+		rmSync(workerRoot, { recursive: true, force: true });
+	}
+});
+
 test("runs final applier in the context cwd when source is unchanged and final slot has a cwd", async () => {
 	const root = createGitRepo("pi-prompt-best-of-n-final-target-");
 	try {
@@ -548,6 +586,48 @@ test("runs final applier in the context cwd when source is unchanged and final s
 		assert.notEqual(requests[1].cwd, realpathSync(finalSlotCwd));
 	} finally {
 		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("binds final applier to the canonical target across a symlink retarget", async () => {
+	const workerRoot = createGitRepo("pi-prompt-best-of-n-final-target-link-worker-");
+	const finalRootA = createGitRepo("pi-prompt-best-of-n-final-target-link-a-");
+	const finalRootB = createGitRepo("pi-prompt-best-of-n-final-target-link-b-");
+	const linkRoot = mkdtempSync(join(tmpdir(), "pi-prompt-best-of-n-final-target-link-"));
+	const finalLink = join(linkRoot, "target");
+	symlinkSync(finalRootA, finalLink);
+	try {
+		const requests: any[] = [];
+		const pi = createPi(["candidate", "final answer"], requests, [], [], (data) => {
+			if (data.agent === "worker") {
+				rmSync(finalLink, { force: true });
+				symlinkSync(finalRootB, finalLink);
+			}
+			if (data.agent === "applier") writeFileSync(join(data.cwd, "final-applier-marker.txt"), "applied\n");
+		});
+		const context = createCtx(workerRoot);
+		context.cwd = realpathSync(tmpdir());
+		context.hasUI = true;
+		context.ui.confirm = async () => true;
+		const result = await executeBestOfNPrompt({
+			pi,
+			ctx: context,
+			prompt: { ...basePrompt, cwd: finalLink },
+			config: { workers: [{ agent: "worker", cwd: workerRoot }], finalApplier: { agent: "applier", cwd: finalRootB } },
+			args: [],
+			currentModel: context.model,
+		});
+
+		assert.equal(result, "completed");
+		assert.deepEqual(requests.map((request) => request.agent), ["worker", "applier"]);
+		assert.equal(requests[1].cwd, realpathSync(finalRootA));
+		assert.equal(existsSync(join(finalRootA, "final-applier-marker.txt")), true);
+		assert.equal(existsSync(join(finalRootB, "final-applier-marker.txt")), false);
+	} finally {
+		rmSync(linkRoot, { recursive: true, force: true });
+		rmSync(finalRootB, { recursive: true, force: true });
+		rmSync(finalRootA, { recursive: true, force: true });
+		rmSync(workerRoot, { recursive: true, force: true });
 	}
 });
 
@@ -880,6 +960,164 @@ test("preserves candidate diff when a worker edits then fails", async () => {
 		assert.doesNotMatch(message.content, /run-state/);
 		assert.match(message.content, /failed-marker/);
 		assert.match(message.content, /failed candidate/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("redacts secret-like candidate values at the worktree capture boundary", async () => {
+	const root = createGitRepo("pi-prompt-best-of-n-secret-capture-");
+	const oldAssignment = "synthetic-old-assignment-7f31";
+	const newAssignment = "synthetic-new-assignment-8a42";
+	const oldJsonToken = "synthetic-old-json-token-9b53";
+	const newJsonToken = "synthetic-new-json-token-ac64";
+	const oldStripeSecretKey = "synthetic-old-stripe-secret-key-11aa";
+	const newStripeSecretKey = "synthetic-new-stripe-secret-key-22bb";
+	const oldAwsSecretAccessKey = "synthetic-old-aws-secret-access-key-33cc";
+	const newAwsSecretAccessKey = "synthetic-new-aws-secret-access-key-44dd";
+	const oldGoogleApiKey = "synthetic-old-google-api-key-55ee";
+	const newGoogleApiKey = "synthetic-new-google-api-key-66ff";
+	const oldDatabasePassword = "synthetic-old-database-password-77aa";
+	const newDatabasePassword = "synthetic-new-database-password-88bb";
+	const oldJwtSecret = "synthetic-old-jwt-secret-99cc";
+	const newJwtSecret = "synthetic-new-jwt-secret-aadd";
+	const oldYamlPassword = "synthetic-old-yaml-password-bd75";
+	const newYamlPassword = "synthetic-new-yaml-password-ce86";
+	const oldBearer = "synthetic-old-bearer-df97";
+	const newBearer = "synthetic-new-bearer-ea08";
+	const oldUrlCredential = "synthetic-old-url-credential-fb19";
+	const newUrlCredential = "synthetic-new-url-credential-0c2a";
+	const oldContextToken = "synthetic-context-token-1d3b";
+	const newContextToken = "synthetic-context-token-2e4c";
+	const oldPem = "synthetic-old-pem-material-3f5d";
+	const newPem = "synthetic-new-pem-material-4a6e";
+	const envSecret = "synthetic-env-payload-5b7f";
+	const deletedEnvSecret = "synthetic-deleted-env-payload-9fb3";
+	const credentialsSecret = "synthetic-credentials-payload-6c80";
+	const secretsSecret = "synthetic-secrets-payload-7d91";
+	const pemFileSecret = "synthetic-pem-file-payload-8ea2";
+	const candidateFile = join(root, "candidate-config.txt");
+	writeFileSync(candidateFile, [
+		`api_key: ${oldAssignment}`,
+		`json: {"token":"${oldJsonToken}"}`,
+		`STRIPE_SECRET_KEY: ${oldStripeSecretKey}`,
+		`AWS_SECRET_ACCESS_KEY=${oldAwsSecretAccessKey}`,
+		`GOOGLE_API_KEY: ${oldGoogleApiKey}`,
+		`DATABASE_PASSWORD: ${oldDatabasePassword}`,
+		`JWT_SECRET=${oldJwtSecret}`,
+		`yaml_password: ${oldYamlPassword}`,
+		`authorization: Bearer ${oldBearer}`,
+		`connection_url: https://synthetic-user:${oldUrlCredential}@example.invalid/service`,
+		`unchanged_token: ${oldContextToken}`,
+		"-----BEGIN PRIVATE KEY-----",
+		oldPem,
+		"-----END PRIVATE KEY-----",
+		"stable context",
+	].join("\n") + "\n");
+	writeFileSync(join(root, ".env"), `context payload ${envSecret}\ndeleted payload ${deletedEnvSecret}\nold line\n`);
+	execFileSync("git", ["add", "candidate-config.txt", ".env"], { cwd: root });
+	execFileSync("git", ["commit", "-qm", "add candidate config"], { cwd: root });
+	const manager = createBestOfNWorktreeManager();
+	try {
+		const workspace = manager.create(root, "secret-capture");
+		writeFileSync(join(workspace.root, "candidate-config.txt"), [
+			`api_key: ${newAssignment}`,
+			`json: {"token":"${newJsonToken}"}`,
+			`STRIPE_SECRET_KEY: ${newStripeSecretKey}`,
+			`AWS_SECRET_ACCESS_KEY=${newAwsSecretAccessKey}`,
+			`GOOGLE_API_KEY: ${newGoogleApiKey}`,
+			`DATABASE_PASSWORD: ${newDatabasePassword}`,
+			`JWT_SECRET=${newJwtSecret}`,
+			`yaml_password: ${newYamlPassword}`,
+			`authorization: Bearer ${newBearer}`,
+			`connection_url: https://synthetic-user:${newUrlCredential}@example.invalid/service`,
+			`unchanged_token: ${newContextToken}`,
+			"-----BEGIN PRIVATE KEY-----",
+			newPem,
+			"-----END PRIVATE KEY-----",
+			"stable context",
+		].join("\n") + "\n");
+		execFileSync("git", ["mv", ".env", "config.txt"], { cwd: workspace.root });
+		writeFileSync(join(workspace.root, "config.txt"), [
+			`context payload ${envSecret}`,
+			`deleted payload ${deletedEnvSecret}`,
+			"old line",
+			"new line",
+		].join("\n") + "\n");
+		writeFileSync(join(workspace.root, "credentials.json"), `unlabelled credentials payload ${credentialsSecret}\n`);
+		writeFileSync(join(workspace.root, "secrets.yaml"), `unlabelled secrets payload: ${secretsSecret}\n`);
+		writeFileSync(join(workspace.root, "private.pem"), `-----BEGIN PRIVATE KEY-----\n${pemFileSecret}\n-----END PRIVATE KEY-----\n`);
+
+		const changes = await captureBestOfNWorktreeChanges(workspace);
+		assert.ok(changes);
+		const rawValues = [
+			oldAssignment, newAssignment, oldJsonToken, newJsonToken, oldYamlPassword, newYamlPassword,
+			oldStripeSecretKey, newStripeSecretKey, oldAwsSecretAccessKey, newAwsSecretAccessKey,
+			oldGoogleApiKey, newGoogleApiKey, oldDatabasePassword, newDatabasePassword, oldJwtSecret, newJwtSecret,
+			oldBearer, newBearer, oldUrlCredential, newUrlCredential, oldContextToken, newContextToken,
+			oldPem, newPem, envSecret, deletedEnvSecret, credentialsSecret, secretsSecret, pemFileSecret,
+		];
+		for (const rawValue of rawValues) {
+			assert.equal(changes.stat.includes(rawValue), false, `raw secret leaked in stat: ${rawValue}`);
+			assert.equal(changes.diff.includes(rawValue), false, `raw secret leaked in diff: ${rawValue}`);
+		}
+		assert.match(changes.diff, /\[REDACTED\]/);
+	} finally {
+		manager.cleanup();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("does not forward secret-like candidate values to final-applier task evidence", async () => {
+	const root = createGitRepo("pi-prompt-best-of-n-secret-forwarding-");
+	const rawValues = [
+		"synthetic-forward-api-key-1a2b",
+		"synthetic-forward-token-2b3c",
+		"synthetic-forward-password-3c4d",
+		"synthetic-forward-bearer-4d5e",
+		"synthetic-forward-url-credential-5e6f",
+		"synthetic-forward-pem-6f70",
+		"synthetic-forward-env-7081",
+		"synthetic-forward-stripe-secret-key-8192",
+		"synthetic-forward-aws-secret-access-key-92a3",
+		"synthetic-forward-google-api-key-a3b4",
+		"synthetic-forward-jwt-secret-b4c5",
+	];
+	try {
+		const requests: any[] = [];
+		const pi = createPi(["candidate", "final"], requests, [], [], (data) => {
+			if (data.agent !== "worker") return;
+			writeFileSync(join(data.cwd, "candidate-secrets.txt"), [
+				`api_key: ${rawValues[0]}`,
+				`token: ${rawValues[1]}`,
+				`password: ${rawValues[2]}`,
+				`authorization: Bearer ${rawValues[3]}`,
+				`url: https://synthetic-user:${rawValues[4]}@example.invalid/forward`,
+				`STRIPE_SECRET_KEY: ${rawValues[7]}`,
+				`AWS_SECRET_ACCESS_KEY=${rawValues[8]}`,
+				`GOOGLE_API_KEY: ${rawValues[9]}`,
+				`JWT_SECRET=${rawValues[10]}`,
+				"-----BEGIN PRIVATE KEY-----",
+				rawValues[5],
+				"-----END PRIVATE KEY-----",
+			].join("\n") + "\n");
+			writeFileSync(join(data.cwd, ".env"), `UNLABELLED_ENV_PAYLOAD=${rawValues[6]}\n`);
+		});
+		const context = createCtx(root);
+		const result = await executeBestOfNPrompt({
+			pi,
+			ctx: context,
+			prompt: basePrompt,
+			config: { workers: [{ agent: "worker" }], finalApplier: { agent: "applier" } },
+			args: [],
+			currentModel: context.model,
+		});
+
+		assert.equal(result, "completed");
+		const applierRequest = requests.find((request) => request.agent === "applier");
+		assert.ok(applierRequest);
+		for (const rawValue of rawValues) assert.equal(applierRequest.task.includes(rawValue), false, `raw secret leaked to final task: ${rawValue}`);
+		assert.match(applierRequest.task, /\[REDACTED\]/);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -1232,6 +1470,89 @@ test("caps accumulated worker evidence before a final-applier request exceeds on
 		assert.ok(Buffer.byteLength(applierRequest.task, "utf8") < 1024 * 1024);
 		assert.match(applierRequest.task, /bestOfN evidence truncated/i);
 	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("bounds oversized candidate Git output without converting it into a capture error", async () => {
+	const root = createGitRepo("pi-prompt-best-of-n-large-capture-");
+	const manager = createBestOfNWorktreeManager();
+	try {
+		const workspace = manager.create(root, "large-capture");
+		writeFileSync(join(workspace.root, "tracked.txt"), `candidate\n${"x".repeat(2 * 1024 * 1024)}\n`);
+
+		const changes = await captureBestOfNWorktreeChanges(workspace);
+		assert.ok(changes);
+		assert.equal(changes.truncated, true);
+		assert.ok(Buffer.byteLength(changes.stat, "utf8") <= 64 * 1024);
+		assert.ok(Buffer.byteLength(changes.diff, "utf8") <= 512 * 1024);
+		assert.match(`${changes.stat}\n${changes.diff}`, /bestOfN candidate change evidence truncated/i);
+	} finally {
+		manager.cleanup();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("bounds oversized untracked listings and aggregate candidate evidence", async () => {
+	const root = createGitRepo("pi-prompt-best-of-n-untracked-capture-");
+	const manager = createBestOfNWorktreeManager();
+	try {
+		const workspace = manager.create(root, "untracked-capture");
+		const longDirectory = join(
+			workspace.root,
+			"untracked",
+			"a".repeat(200),
+			"b".repeat(200),
+			"c".repeat(200),
+		);
+		mkdirSync(longDirectory, { recursive: true });
+		const fileCount = 1_800;
+		const content = `candidate\n${"x".repeat(8 * 1024)}\n`;
+		let listingBytes = 0;
+		for (let index = 0; index < fileCount; index += 1) {
+			const relativePath = join("untracked", "a".repeat(200), "b".repeat(200), "c".repeat(200), `candidate-${String(index).padStart(4, "0")}.txt`);
+			listingBytes += Buffer.byteLength(`${relativePath}\0`, "utf8");
+			writeFileSync(join(longDirectory, `candidate-${String(index).padStart(4, "0")}.txt`), content);
+		}
+		assert.ok(listingBytes > 1024 * 1024);
+
+		const changes = await captureBestOfNWorktreeChanges(workspace);
+		assert.ok(changes);
+		assert.equal(changes.truncated, true);
+		assert.ok(Buffer.byteLength(changes.stat, "utf8") <= 64 * 1024);
+		assert.ok(Buffer.byteLength(changes.diff, "utf8") <= 512 * 1024);
+		assert.match(`${changes.stat}\n${changes.diff}`, /bestOfN candidate change evidence truncated/i);
+	} finally {
+		manager.cleanup();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("does not run configured textconv while capturing an untracked candidate", async () => {
+	const root = createGitRepo("pi-prompt-best-of-n-no-textconv-");
+	const scriptRoot = mkdtempSync(join(tmpdir(), "pi-prompt-best-of-n-textconv-script-"));
+	try {
+		const marker = join(scriptRoot, "textconv-ran");
+		const script = join(scriptRoot, "textconv.sh");
+		writeFileSync(script, `#!/bin/sh\nprintf ran > ${marker}\ncat\n`);
+		chmodSync(script, 0o755);
+		execFileSync("git", ["config", "diff.candidate.textconv", script], { cwd: root });
+		writeFileSync(join(root, ".gitattributes"), "untracked-candidate.txt diff=candidate\n");
+		execFileSync("git", ["add", ".gitattributes"], { cwd: root });
+		execFileSync("git", ["commit", "-qm", "configure candidate diff driver"], { cwd: root });
+
+		const manager = createBestOfNWorktreeManager();
+		try {
+			const workspace = manager.create(root, "no-textconv");
+			writeFileSync(join(workspace.root, "untracked-candidate.txt"), "candidate text\n");
+			const changes = await captureBestOfNWorktreeChanges(workspace);
+			assert.ok(changes);
+			assert.equal(existsSync(marker), false);
+		} finally {
+			manager.cleanup();
+		}
+	} finally {
+		rmSync(scriptRoot, { recursive: true, force: true });
 		rmSync(root, { recursive: true, force: true });
 	}
 });

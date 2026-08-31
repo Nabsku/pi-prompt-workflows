@@ -106,6 +106,15 @@ Fix defects found by the two independent reviews plus my verification. Do not re
 - [x] `npm pack --dry-run --json` still lists `best-of-n-worktree.ts`; no unexpected new files
 - **Gate:** focused best-of-N/loader suite **178/178** + full `npm run test` **938/938**; package dry-run **53 files**, required worktree module present
 
+### Follow-up — close independent-review blockers (M, final hardening) — complete
+
+- [x] Bind the final-applier request to the canonical realpath registered before worker requests; reject source/target drift before apply and prevent symlink retargeting.
+- [x] Redact candidate evidence at capture time for sensitive old/new rename paths, compound secret-bearing assignments, deleted/context lines, PEM material, bearer/URL credentials, and sensitive files.
+- [x] Bound tracked and untracked Git capture before subprocess output can grow; preserve explicit truncation markers within the `65,536`-byte stat and `524,288`-byte diff limits without unbounded per-file fan-out.
+- [x] Preserve `--no-ext-diff` and `--no-textconv` for untracked capture.
+- [x] Add focused regressions for canonical target binding, secret redaction/forwarding, oversized tracked and untracked evidence, and textconv suppression.
+- **Gate:** focused best-of-N suite **40/40** + full `npm run test` **945/945**; `git diff --check` passed; package dry-run **53 files** with required worktree modules present; exact-diff blocker review found no blocker. A separate read-only reviewer completed targeted regressions but did not return prose before its timeout.
+
 ### Slice 6 — Progress UI (S, optional, 1–2 h) — skipped
 
 - [ ] Test: first worker finishes → global working message remains until phase end
