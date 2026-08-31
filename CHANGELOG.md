@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.19.0](https://github.com/Nabsku/pi-prompt-workflows/compare/v0.18.2...v0.19.0) (2026-08-31)
+
+
+### Features
+
+* restore structured best-of-n delegation ([47a0e9c](https://github.com/Nabsku/pi-prompt-workflows/commit/47a0e9ce148e19ded5f50b54caa36d3de23e6093))
+
+
+### Bug Fixes
+
+* close best-of-n review gaps ([a4f36c8](https://github.com/Nabsku/pi-prompt-workflows/commit/a4f36c8cd13859dfb3a469a5360b5ecb92efd952))
+* close best-of-n target and evidence gaps ([7e5e3f5](https://github.com/Nabsku/pi-prompt-workflows/commit/7e5e3f5d1adfcf61d3a0b6a46eccb2703f045578))
+* close remaining best-of-n review gaps ([2200e78](https://github.com/Nabsku/pi-prompt-workflows/commit/2200e782066c6743f813cb080497ec48a6d87bcf))
+* close remaining best-of-n review gaps ([35a33f1](https://github.com/Nabsku/pi-prompt-workflows/commit/35a33f19f9ba79dceaed8d7441f2376547a622b7))
+* fence best-of-n source baseline ([aba3163](https://github.com/Nabsku/pi-prompt-workflows/commit/aba316307d91167c7b4aca9ec136b65da7d7dd84))
+* finish best-of-n review corrections ([a430d97](https://github.com/Nabsku/pi-prompt-workflows/commit/a430d97e2f2a1e03df29b2904467cd8541536576))
+* harden best-of-n delegation contracts ([363d19f](https://github.com/Nabsku/pi-prompt-workflows/commit/363d19f81e261bff28d1fbd1f7b6c294ea3f5ec5))
+* harden best-of-n request inputs ([ddfe47f](https://github.com/Nabsku/pi-prompt-workflows/commit/ddfe47fae23c571219cae84b1831521d2475f374))
+* isolate best-of-n delegated workspaces ([6648790](https://github.com/Nabsku/pi-prompt-workflows/commit/6648790280b959090d0982cb19d56162b8c3c681))
+* preserve best-of-n candidates on cancellation ([1eb8951](https://github.com/Nabsku/pi-prompt-workflows/commit/1eb89516851f588a60293abf8e78a162ec1501c6))
+* preserve best-of-n slot identity ([2a1652e](https://github.com/Nabsku/pi-prompt-workflows/commit/2a1652eca3dc89cbdd444250b6f3dabefc6ea051))
+* reject hidden best-of-n source state ([ad39f57](https://github.com/Nabsku/pi-prompt-workflows/commit/ad39f577394c583dd61b82633da39bde495bcae3))
+* reject inherited context in best-of-n prompts ([90de586](https://github.com/Nabsku/pi-prompt-workflows/commit/90de58647083d97209b16edb2536ff37f82ccbe9))
+* **subagent:** defer model resolution for model-less prompts ([08419ed](https://github.com/Nabsku/pi-prompt-workflows/commit/08419ed8f670c675d7a9a638b6e6341bccafbb60))
+* **subagent:** defer model-less prompt rendering ([e97f6cb](https://github.com/Nabsku/pi-prompt-workflows/commit/e97f6cb0c659a54cfdc874749613c52c7bac9dd7))
+
 ## [0.18.2](https://github.com/Nabsku/pi-prompt-workflows/compare/v0.18.1...v0.18.2) (2026-08-25)
 
 
