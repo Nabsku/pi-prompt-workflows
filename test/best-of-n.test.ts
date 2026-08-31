@@ -253,6 +253,71 @@ test("rejects a dirty source worktree before launching workers", async () => {
 	}
 });
 
+test("rejects a Git-ignored worker source cwd before launching workers or linking a worktree", async () => {
+	const root = createGitRepo("pi-prompt-best-of-n-ignored-cwd-");
+	try {
+		writeFileSync(join(root, ".gitignore"), "ignored-deps/\n");
+		execFileSync("git", ["add", ".gitignore"], { cwd: root });
+		execFileSync("git", ["commit", "-qm", "ignore dependencies"], { cwd: root });
+		const ignoredCwd = join(root, "ignored-deps", "package");
+		mkdirSync(ignoredCwd, { recursive: true });
+		const requests: any[] = [];
+		const notifications: Array<{ message: string; type: string }> = [];
+		const pi = createPi(["candidate"], requests);
+		const context = createCtx(root);
+		context.hasUI = true;
+		context.ui.notify = (message: string, type: string) => notifications.push({ message, type });
+		const result = await executeBestOfNPrompt({
+			pi,
+			ctx: context,
+			prompt: basePrompt,
+			config: { workers: [{ agent: "worker", cwd: ignoredCwd }] },
+			args: [],
+			currentModel: context.model,
+		});
+		assert.equal(result, "failed");
+		assert.equal(requests.length, 0);
+		assert.equal(existsSync(join(root, ".git", "worktrees")), false);
+		assert.equal(notifications.at(-1)?.type, "error");
+		assert.match(notifications.at(-1)?.message ?? "", /ignored Git path/i);
+		assert.match(notifications.at(-1)?.message ?? "", /tracked files only/i);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("rejects a Git-ignored reviewer source cwd before launching workers", async () => {
+	const root = createGitRepo("pi-prompt-best-of-n-ignored-reviewer-cwd-");
+	try {
+		writeFileSync(join(root, ".gitignore"), "ignored-deps/\n");
+		execFileSync("git", ["add", ".gitignore"], { cwd: root });
+		execFileSync("git", ["commit", "-qm", "ignore dependencies"], { cwd: root });
+		const ignoredCwd = join(root, "ignored-deps", "package");
+		mkdirSync(ignoredCwd, { recursive: true });
+		const requests: any[] = [];
+		const notifications: Array<{ message: string; type: string }> = [];
+		const pi = createPi(["candidate"], requests);
+		const context = createCtx(root);
+		context.hasUI = true;
+		context.ui.notify = (message: string, type: string) => notifications.push({ message, type });
+		const result = await executeBestOfNPrompt({
+			pi,
+			ctx: context,
+			prompt: basePrompt,
+			config: { workers: [{ agent: "worker" }], reviewers: [{ agent: "reviewer", cwd: ignoredCwd }] },
+			args: [],
+			currentModel: context.model,
+		});
+		assert.equal(result, "failed");
+		assert.equal(requests.length, 0);
+		assert.equal(existsSync(join(root, ".git", "worktrees")), false);
+		assert.equal(notifications.at(-1)?.type, "error");
+		assert.match(notifications.at(-1)?.message ?? "", /ignored Git path/i);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("rejects an assume-unchanged tracked source edit before launching workers", async () => {
 	const root = createGitRepo("pi-prompt-best-of-n-assume-unchanged-");
 	try {

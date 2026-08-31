@@ -68,6 +68,12 @@ interface SourceBaseline {
 	readonly cleanState: SourceCleanState;
 }
 
+interface SourceCwdContext {
+	readonly canonicalSourceCwd: string;
+	readonly repositoryRoot: string;
+	readonly sourceRelativeCwd: string;
+}
+
 function runGit(cwd: string, args: readonly string[]): string {
 	try {
 		return execFileSync("git", [...GIT_SAFE_ARGS, ...args], {
@@ -121,6 +127,10 @@ function canonicalPath(path: string, label: string): string {
 function isWithin(root: string, candidate: string): boolean {
 	const childPath = relative(root, candidate);
 	return childPath === "" || (childPath !== ".." && !childPath.startsWith(`..${sep}`) && !isAbsolute(childPath));
+}
+
+function gitPath(path: string): string {
+	return path.split(sep).join("/");
 }
 
 function splitNulRecords(output: string): string[] {
@@ -180,6 +190,47 @@ function assertCleanState(sourceCwd: string, state: SourceCleanState): void {
 			`Best-of-N worker isolation requires a clean Git worktree at \`${sourceCwd}\`. Commit or stash changes before retrying.`,
 		);
 	}
+}
+
+function assertSourceCwdIsTrackedByWorktree(repositoryRoot: string, canonicalSourceCwd: string, sourceRelativeCwd: string): void {
+	if (!sourceRelativeCwd) return;
+	const relativeGitPath = gitPath(sourceRelativeCwd);
+	try {
+		execFileSync("git", [...GIT_SAFE_ARGS, "check-ignore", "--quiet", "--no-index", "--", relativeGitPath], {
+			cwd: repositoryRoot,
+			encoding: "utf8",
+			env: sanitizedGitEnvironment(),
+			maxBuffer: GIT_MAX_OUTPUT_BYTES,
+			timeout: GIT_COMMAND_TIMEOUT_MS,
+			stdio: ["ignore", "ignore", "pipe"],
+		});
+		throw new BestOfNWorktreeError(
+			`Best-of-N worker isolation cannot use ignored Git path \`${canonicalSourceCwd}\` as a slot cwd. Worker worktrees contain tracked files only and do not provision or link ignored dependencies; choose a tracked cwd before retrying.`,
+		);
+	} catch (cause: any) {
+		if (cause instanceof BestOfNWorktreeError) throw cause;
+		if (cause?.status === 1) return;
+		const stderr = typeof cause?.stderr === "string" ? cause.stderr.trim().split(/\r?\n/, 1)[0] : "";
+		throw new BestOfNWorktreeError(
+			`Git worktree operation failed${stderr ? `: ${stderr.slice(0, 400)}` : ""}.`,
+			{ cause },
+		);
+	}
+}
+
+function resolveSourceCwdContext(sourceCwd: string): SourceCwdContext {
+	const canonicalSourceCwd = canonicalPath(sourceCwd, "worker cwd");
+	const repositoryRoot = canonicalPath(runGit(canonicalSourceCwd, ["rev-parse", "--show-toplevel"]).trim(), "Git repository root");
+	const sourceRelativeCwd = relative(repositoryRoot, canonicalSourceCwd);
+	if (!isWithin(repositoryRoot, canonicalSourceCwd)) {
+		throw new BestOfNWorktreeError(`Worker cwd \`${canonicalSourceCwd}\` is outside its Git repository root.`);
+	}
+	return { canonicalSourceCwd, repositoryRoot, sourceRelativeCwd };
+}
+
+export function assertBestOfNSourceCwdNotIgnored(sourceCwd: string): void {
+	const { canonicalSourceCwd, repositoryRoot, sourceRelativeCwd } = resolveSourceCwdContext(sourceCwd);
+	assertSourceCwdIsTrackedByWorktree(repositoryRoot, canonicalSourceCwd, sourceRelativeCwd);
 }
 
 function captureSourceBaseline(repositoryRoot: string): SourceBaseline {
@@ -274,12 +325,8 @@ export function createBestOfNWorktreeManager(): BestOfNWorktreeManager {
 	return {
 		create(sourceCwd, label) {
 			if (cleaned) throw new BestOfNWorktreeError("Best-of-N worker worktree manager was already cleaned up.");
-			const canonicalSourceCwd = canonicalPath(sourceCwd, "worker cwd");
-			const repositoryRoot = canonicalPath(runGit(canonicalSourceCwd, ["rev-parse", "--show-toplevel"]).trim(), "Git repository root");
-			const sourceRelativeCwd = relative(repositoryRoot, canonicalSourceCwd);
-			if (!isWithin(repositoryRoot, canonicalSourceCwd)) {
-				throw new BestOfNWorktreeError(`Worker cwd \`${canonicalSourceCwd}\` is outside its Git repository root.`);
-			}
+			const { canonicalSourceCwd, repositoryRoot, sourceRelativeCwd } = resolveSourceCwdContext(sourceCwd);
+			assertSourceCwdIsTrackedByWorktree(repositoryRoot, canonicalSourceCwd, sourceRelativeCwd);
 			let baseline = baselines.get(repositoryRoot);
 			if (!baseline) {
 				baseline = captureSourceBaseline(repositoryRoot);
