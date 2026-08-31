@@ -170,6 +170,7 @@ function slotPrompt(
 	runtimeCwd: string | undefined,
 	runtimeFork: boolean,
 	isolatedCwd: string | undefined,
+	finalTargetCwd: string | undefined,
 ): PromptWithModel {
 	const slotModels = slot.model
 		? slot.model.split(",").map((model) => model.trim()).filter(Boolean)
@@ -187,7 +188,7 @@ function slotPrompt(
 		content: phase === "worker" ? (slot.task ?? base.content) : base.content,
 		models,
 		subagent: slot.agent,
-		cwd: isolatedCwd ?? runtimeCwd ?? (phase === "final-applier" ? base.cwd : slot.cwd ?? base.cwd),
+		cwd: phase === "final-applier" ? finalTargetCwd ?? base.cwd : isolatedCwd ?? runtimeCwd ?? slot.cwd ?? base.cwd,
 		...(runtimeFork ? { inheritContext: true } : {}),
 		bestOfN: undefined,
 	};
@@ -209,6 +210,10 @@ function sourceCwdForSlot(options: BestOfNRunOptions, slot: DelegationLineupSlot
 	return options.runtimeCwd ?? slot.cwd ?? options.prompt.cwd ?? options.ctx.cwd;
 }
 
+function finalTargetCwd(options: BestOfNRunOptions): string {
+	return options.runtimeCwd ?? options.prompt.cwd ?? options.ctx.cwd;
+}
+
 async function assertNonFinalSlotCwdsNotIgnored(
 	options: BestOfNRunOptions,
 	workerSlots: readonly DelegationLineupSlot[],
@@ -228,6 +233,7 @@ async function runPhase(
 	evidence: string,
 	cancellation: AbortController,
 	worktreeManager: BestOfNWorktreeManager,
+	finalTargetCwd: string | undefined = undefined,
 ): Promise<PhaseRunResult> {
 	let cancellationError: DelegatedPromptCancelledError | undefined;
 	let drainTimeoutError: DelegatedPromptCancellationDrainTimeoutError | undefined;
@@ -244,6 +250,8 @@ async function runPhase(
 		try {
 			const effectivePrompt = workspace
 				? { ...options.prompt, cwd: workspace.cwd }
+				: phase === "final-applier" && finalTargetCwd
+					? { ...options.prompt, cwd: finalTargetCwd }
 				: options.runtimeCwd
 					? { ...options.prompt, cwd: options.runtimeCwd }
 					: options.prompt;
@@ -251,7 +259,7 @@ async function runPhase(
 				pi: options.pi,
 				ctx: options.ctx,
 				currentModel: options.currentModel,
-				prompt: slotPrompt(effectivePrompt, slot, phase, runtimeModel, options.runtimeCwd, options.runtimeFork === true, workspace?.cwd),
+				prompt: slotPrompt(effectivePrompt, slot, phase, runtimeModel, options.runtimeCwd, options.runtimeFork === true, workspace?.cwd, finalTargetCwd),
 				args: options.args,
 				signal: cancellation.signal,
 				override: options.runtimeOverride,
@@ -299,16 +307,16 @@ function summarizeFailures(results: PhaseResult[]): string[] {
 		.map((result) => `${result.phase} ${result.index + 1} (${result.slot.agent}): ${result.error}`);
 }
 
-function captureCandidateChangeEvidence(results: PhaseResult[]): void {
-	for (const result of results) {
-		if (!result.workspace || result.preserveWorkspace || result.candidateChanges) continue;
+async function captureCandidateChangeEvidence(results: PhaseResult[]): Promise<void> {
+	await Promise.all(results.map(async (result) => {
+		if (!result.workspace || result.preserveWorkspace || result.candidateChanges) return;
 		try {
-			const changes = captureBestOfNWorktreeChanges(result.workspace);
+			const changes = await captureBestOfNWorktreeChanges(result.workspace);
 			if (changes) result.candidateChanges = changes;
 		} catch (error) {
 			result.candidateChanges = { error: error instanceof Error ? error.message : String(error) };
 		}
-	}
+	}));
 }
 
 function addPreservedWorkspaceRoots(results: readonly PhaseResult[], roots: Set<string>): void {
@@ -396,6 +404,7 @@ export async function executeBestOfNPrompt(options: BestOfNRunOptions): Promise<
 	const reviewers: PhaseResult[] = [];
 	const finalResults: PhaseResult[] = [];
 	const preservedWorkspaceRoots = new Set<string>();
+	let registeredFinalTargetCwd: string | undefined;
 	try {
 		const workerCount = requestedSlotCount(options.config.workers ?? []);
 		const reviewerCount = options.config.reviewers ? requestedSlotCount(options.config.reviewers) : 0;
@@ -408,12 +417,17 @@ export async function executeBestOfNPrompt(options: BestOfNRunOptions): Promise<
 		const workerSlots = expandSlots(options.config.workers ?? [], "workers");
 		const reviewerSlots = options.config.reviewers ? expandSlots(options.config.reviewers, "reviewers") : [];
 		worktreeManager = createBestOfNWorktreeManager();
+		if (options.config.finalApplier) {
+			const targetCwd = await validateDelegatedCwd(options.ctx, finalTargetCwd(options));
+			assertBestOfNSourceCwdNotIgnored(targetCwd);
+			registeredFinalTargetCwd = worktreeManager.registerFinalTarget(targetCwd);
+		}
 		await assertNonFinalSlotCwdsNotIgnored(options, workerSlots, reviewerSlots);
 
 		const workerRun = await runPhase(options, "worker", workerSlots, options.runtimeModel, "", cancellation.controller, worktreeManager);
 		workers.push(...workerRun.results);
 		addPreservedWorkspaceRoots(workerRun.results, preservedWorkspaceRoots);
-		captureCandidateChangeEvidence(workers);
+		await captureCandidateChangeEvidence(workers);
 		if (workerRun.cancellationError || workerRun.drainTimeoutError || cancellation.controller.signal.aborted) {
 			notifyPreservedCandidateResult(options, workers, reviewers, finalResults);
 			notify(options.ctx, "bestOfN delegation cancelled.", "warning");
@@ -431,7 +445,7 @@ export async function executeBestOfNPrompt(options: BestOfNRunOptions): Promise<
 			const reviewerRun = await runPhase(options, "reviewer", reviewerSlots, options.runtimeModel, workerEvidence, cancellation.controller, worktreeManager);
 			reviewers.push(...reviewerRun.results);
 			addPreservedWorkspaceRoots(reviewerRun.results, preservedWorkspaceRoots);
-			captureCandidateChangeEvidence(reviewers);
+			await captureCandidateChangeEvidence(reviewers);
 			if (reviewerRun.cancellationError || reviewerRun.drainTimeoutError || cancellation.controller.signal.aborted) {
 				notifyPreservedCandidateResult(options, workers, reviewers, finalResults);
 				notify(options.ctx, "bestOfN delegation cancelled.", "warning");
@@ -448,7 +462,7 @@ export async function executeBestOfNPrompt(options: BestOfNRunOptions): Promise<
 				notify(options.ctx, `bestOfN failed: ${error instanceof Error ? error.message : String(error)}`, "error");
 				return "failed";
 			}
-			const finalRun = await runPhase(options, "final-applier", [options.config.finalApplier], options.runtimeModel, finalEvidence, cancellation.controller, worktreeManager);
+			const finalRun = await runPhase(options, "final-applier", [options.config.finalApplier], options.runtimeModel, finalEvidence, cancellation.controller, worktreeManager, registeredFinalTargetCwd);
 			finalResults.push(...finalRun.results);
 			addPreservedWorkspaceRoots(finalRun.results, preservedWorkspaceRoots);
 			if (finalRun.cancellationError || finalRun.drainTimeoutError || cancellation.controller.signal.aborted) {
@@ -480,7 +494,7 @@ export async function executeBestOfNPrompt(options: BestOfNRunOptions): Promise<
 		});
 		return "completed";
 	} catch (error) {
-		captureCandidateChangeEvidence([...workers, ...reviewers]);
+		await captureCandidateChangeEvidence([...workers, ...reviewers]);
 		if (error instanceof DelegatedPromptCancelledError || error instanceof DelegatedPromptCancellationDrainTimeoutError || options.signal?.aborted) {
 			notifyPreservedCandidateResult(options, workers, reviewers, finalResults);
 			notify(options.ctx, "bestOfN delegation cancelled.", "warning");
@@ -492,7 +506,7 @@ export async function executeBestOfNPrompt(options: BestOfNRunOptions): Promise<
 	} finally {
 		if (worktreeManager) {
 			try {
-				captureCandidateChangeEvidence([...workers, ...reviewers]);
+				await captureCandidateChangeEvidence([...workers, ...reviewers]);
 				const cleanupResult = worktreeManager.cleanup({ preserveRoots: [...preservedWorkspaceRoots] });
 				for (const preservedWorktree of cleanupResult.preservedWorktrees) {
 					notify(

@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -51,6 +51,7 @@ export interface BestOfNWorktreeCleanupResult {
 
 export interface BestOfNWorktreeManager {
 	create(sourceCwd: string, label: string): IsolatedBestOfNWorktree;
+	registerFinalTarget(targetCwd: string): string;
 	assertSourceBaselinesUnchanged(): void;
 	cleanup(options?: { preserveRoots?: readonly string[] }): BestOfNWorktreeCleanupResult;
 }
@@ -93,27 +94,80 @@ function runGit(cwd: string, args: readonly string[]): string {
 	}
 }
 
-function runGitAllowingExit(cwd: string, args: readonly string[], allowedStatuses: readonly number[]): string {
-	try {
-		return execFileSync("git", [...GIT_SAFE_ARGS, ...args], {
+interface BoundedGitOutput {
+	readonly output: string;
+	readonly truncated: boolean;
+}
+
+function runGitBounded(
+	cwd: string,
+	args: readonly string[],
+	maxBytes: number,
+	allowedStatuses: readonly number[] = [],
+): Promise<BoundedGitOutput> {
+	return new Promise((resolve, reject) => {
+		const chunks: Buffer[] = [];
+		let outputBytes = 0;
+		let truncated = false;
+		let killRequested = false;
+		let timedOut = false;
+		let settled = false;
+		let stderr = "";
+		const child = spawn("git", [...GIT_SAFE_ARGS, ...args], {
 			cwd,
-			encoding: "utf8",
 			env: sanitizedGitEnvironment(),
-			maxBuffer: GIT_MAX_OUTPUT_BYTES,
-			timeout: GIT_COMMAND_TIMEOUT_MS,
 			stdio: ["ignore", "pipe", "pipe"],
 		});
-	} catch (cause: any) {
-		const status = typeof cause?.status === "number" ? cause.status : undefined;
-		if (status !== undefined && allowedStatuses.includes(status)) {
-			return typeof cause.stdout === "string" ? cause.stdout : "";
-		}
-		const stderr = typeof cause?.stderr === "string" ? cause.stderr.trim().split(/\r?\n/, 1)[0] : "";
-		throw new BestOfNWorktreeError(
-			`Git worktree operation failed${stderr ? `: ${stderr.slice(0, 400)}` : ""}.`,
-			{ cause },
-		);
-	}
+		const timeout = setTimeout(() => {
+			timedOut = true;
+			child.kill("SIGTERM");
+		}, GIT_COMMAND_TIMEOUT_MS);
+		const fail = (cause: unknown): void => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timeout);
+			reject(new BestOfNWorktreeError("Git worktree operation failed.", { cause }));
+		};
+
+		child.stdout?.on("data", (chunk: Buffer | string) => {
+			const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+			if (outputBytes < maxBytes) {
+				const remaining = maxBytes - outputBytes;
+				const kept = bytes.subarray(0, remaining);
+				if (kept.length > 0) {
+					chunks.push(kept);
+					outputBytes += kept.length;
+				}
+				if (kept.length < bytes.length) truncated = true;
+			} else if (bytes.length > 0) {
+				truncated = true;
+			}
+			if (truncated && !killRequested) {
+				killRequested = true;
+				child.kill("SIGTERM");
+			}
+		});
+		child.stderr?.on("data", (chunk: Buffer | string) => {
+			if (stderr.length < 4096) stderr += String(chunk).slice(0, 4096 - stderr.length);
+		});
+		child.once("error", (cause: unknown) => fail(cause));
+		child.once("close", (status: number | null, signal: string | null) => {
+			clearTimeout(timeout);
+			if (settled) return;
+			if (timedOut) {
+				fail(new Error(`Git worktree operation timed out after ${GIT_COMMAND_TIMEOUT_MS}ms.`));
+				return;
+			}
+			if (status === 0 || (status !== null && allowedStatuses.includes(status)) || (truncated && killRequested)) {
+				settled = true;
+				resolve({ output: Buffer.concat(chunks).toString("utf8"), truncated });
+				return;
+			}
+			const detail = stderr.trim().split(/\r?\n/, 1)[0];
+			const cause = new Error(`git exited with ${signal ? `signal ${signal}` : `status ${status}`}${detail ? `: ${detail}` : ""}`);
+			fail(cause);
+		});
+	});
 }
 
 function canonicalPath(path: string, label: string): string {
@@ -133,8 +187,10 @@ function gitPath(path: string): string {
 	return path.split(sep).join("/");
 }
 
-function splitNulRecords(output: string): string[] {
-	return output.split("\0").filter((record) => record.length > 0);
+function splitNulRecords(output: string, dropIncompleteTrailingRecord = false): string[] {
+	const records = output.split("\0");
+	if (dropIncompleteTrailingRecord && !output.endsWith("\0")) records.pop();
+	return records.filter((record) => record.length > 0);
 }
 
 function isBridgeRuntimeSubagentsPath(path: string): boolean {
@@ -241,6 +297,20 @@ function captureSourceBaseline(repositoryRoot: string): SourceBaseline {
 	return { repositoryRoot, baseCommit, cleanState };
 }
 
+function registerSourceBaseline(
+	sourceCwd: string,
+	baselines: Map<string, SourceBaseline>,
+): { canonicalSourceCwd: string; repositoryRoot: string; sourceRelativeCwd: string; baseline: SourceBaseline } {
+	const { canonicalSourceCwd, repositoryRoot, sourceRelativeCwd } = resolveSourceCwdContext(sourceCwd);
+	assertSourceCwdIsTrackedByWorktree(repositoryRoot, canonicalSourceCwd, sourceRelativeCwd);
+	let baseline = baselines.get(repositoryRoot);
+	if (!baseline) {
+		baseline = captureSourceBaseline(repositoryRoot);
+		baselines.set(repositoryRoot, baseline);
+	}
+	return { canonicalSourceCwd, repositoryRoot, sourceRelativeCwd, baseline };
+}
+
 function assertSourceBaselineUnchanged(baseline: SourceBaseline): void {
 	const currentState = captureCleanState(baseline.repositoryRoot);
 	assertCleanState(baseline.repositoryRoot, currentState);
@@ -266,49 +336,188 @@ function utf8Bytes(value: string): number {
 	return Buffer.byteLength(value, "utf8");
 }
 
-function truncateUtf8(value: string, maxBytes: number): { text: string; truncated: boolean } {
-	if (utf8Bytes(value) <= maxBytes) return { text: value, truncated: false };
-	const markerBytes = utf8Bytes(CANDIDATE_CHANGE_TRUNCATION_MARKER);
-	const availableBytes = Math.max(0, maxBytes - markerBytes);
+function truncateUtf8Prefix(value: string, maxBytes: number): string {
+	if (maxBytes <= 0) return "";
+	if (utf8Bytes(value) <= maxBytes) return value;
 	let low = 0;
 	let high = value.length;
 	while (low < high) {
 		const mid = Math.ceil((low + high) / 2);
-		if (utf8Bytes(value.slice(0, mid)) <= availableBytes) low = mid;
+		if (utf8Bytes(value.slice(0, mid)) <= maxBytes) low = mid;
 		else high = mid - 1;
 	}
-	return { text: `${value.slice(0, low).trimEnd()}${CANDIDATE_CHANGE_TRUNCATION_MARKER}`, truncated: true };
+	return value.slice(0, low);
 }
 
-function joinGitOutputs(outputs: readonly string[]): string {
-	return outputs.map((output) => output.trimEnd()).filter((output) => output.length > 0).join("\n");
+function truncateUtf8(value: string, maxBytes: number): { text: string; truncated: boolean } {
+	if (utf8Bytes(value) <= maxBytes) return { text: value, truncated: false };
+	const markerBytes = utf8Bytes(CANDIDATE_CHANGE_TRUNCATION_MARKER);
+	const availableBytes = Math.max(0, maxBytes - markerBytes);
+	return { text: `${truncateUtf8Prefix(value, availableBytes).trimEnd()}${CANDIDATE_CHANGE_TRUNCATION_MARKER}`, truncated: true };
+}
+
+const REDACTED_MARKER = "[REDACTED]";
+const SENSITIVE_ASSIGNMENT_KEY = "(?:api[_-]?(?:key|token|secret)|access[_-]?(?:token|key|secret)|auth(?:entication)?[_-]?(?:token|key|secret)?|authorization|bearer|client[_-]?(?:secret|token|key)|credential(?:s)?|password|passwd|passphrase|pass|pwd|private[_-]?key|secret(?:s)?(?:[_-]?(?:value|key|token|access))?|token(?:[_-]?(?:value|secret|key))?|signing[_-]?key|encryption[_-]?key|master[_-]?key|refresh[_-]?token|session[_-]?token|webhook[_-]?secret|key|token)";
+const SECRET_ASSIGNMENT = new RegExp(`((?:^|\\s|,|\\{|\\(|\\[|=|:|\\+|\\-)["']?(?:[A-Za-z_][A-Za-z0-9_.-]*?)?${SENSITIVE_ASSIGNMENT_KEY}[A-Za-z0-9_.-]*["']?\\s*[:=]\\s*)(.*)$`, "gi");
+const SENSITIVE_ASSIGNMENT_HINT = /(?:api|access|auth|bearer|client|credential|pass|private|secret|token|signing|encryption|master|refresh|session|webhook|key)/i;
+const URL_CREDENTIALS = /\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi;
+const AUTHORIZATION_CREDENTIALS = /\b(Bearer|Basic)\s+[^\s,;]+/gi;
+const KNOWN_API_TOKENS = /\b(?:sk-[A-Za-z0-9][A-Za-z0-9_-]{7,}|gh[pousr]_[A-Za-z0-9][A-Za-z0-9_-]{7,}|github_pat_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z_-]{20,}|AKIA[0-9A-Z]{12,}|xox[baprs]-[A-Za-z0-9-]{8,}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)/g;
+const PRIVATE_KEY_BEGIN = /-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----/i;
+const PRIVATE_KEY_END = /-----END(?: [A-Z0-9]+)* PRIVATE KEY-----/i;
+
+function isSensitiveCandidatePath(path: string): boolean {
+	const normalized = path.replace(/^"|"$/g, "").replaceAll("\\", "/");
+	const basename = normalized.slice(normalized.lastIndexOf("/") + 1).toLowerCase();
+	return basename === ".env"
+		|| basename.startsWith(".env.")
+		|| basename.includes("credential")
+		|| basename.includes("secret")
+		|| basename.includes("password")
+		|| basename.includes("token")
+		|| basename.endsWith(".pem")
+		|| basename.endsWith(".key")
+		|| basename === "id_rsa"
+		|| basename === "id_ed25519";
+}
+
+function diffPathsFromHeader(line: string): readonly [string, string] | undefined {
+	const diffHeader = line.match(/^diff --git a\/(.+) b\/(.+)$/);
+	return diffHeader ? [diffHeader[1], diffHeader[2]] : undefined;
+}
+
+function isDiffContentLine(line: string, inHunk: boolean): boolean {
+	return inHunk && (line.startsWith(" ") || line.startsWith("+") || line.startsWith("-"));
+}
+
+function redactDiffContentLine(line: string, inHunk: boolean): string {
+	return `${isDiffContentLine(line, inHunk) ? line[0] : ""}${REDACTED_MARKER}`;
+}
+
+function redactSensitiveLine(line: string): string {
+	let redacted = line.replace(URL_CREDENTIALS, `$1${REDACTED_MARKER}@`);
+	redacted = redacted.replace(AUTHORIZATION_CREDENTIALS, `$1 ${REDACTED_MARKER}`);
+	if (/[=:]/.test(redacted) && SENSITIVE_ASSIGNMENT_HINT.test(redacted)) {
+		redacted = redacted.replace(SECRET_ASSIGNMENT, `$1${REDACTED_MARKER}`);
+	}
+	return redacted.replace(KNOWN_API_TOKENS, REDACTED_MARKER);
+}
+
+function redactGitOutput(output: string): string {
+	let sensitiveFile = false;
+	let inPrivateKey = false;
+	let inHunk = false;
+	return output.split("\n").map((line) => {
+		const paths = diffPathsFromHeader(line);
+		if (paths !== undefined) {
+			sensitiveFile = paths.some((path) => isSensitiveCandidatePath(path));
+			inHunk = false;
+		}
+		if (line.startsWith("@@")) inHunk = true;
+		const contentLine = isDiffContentLine(line, inHunk);
+		const payload = contentLine ? line.slice(1) : line;
+		if (inPrivateKey) {
+			if (PRIVATE_KEY_END.test(payload)) inPrivateKey = false;
+			return redactDiffContentLine(line, inHunk);
+		}
+		if (contentLine && PRIVATE_KEY_BEGIN.test(payload)) {
+			inPrivateKey = !PRIVATE_KEY_END.test(payload);
+			return redactDiffContentLine(line, inHunk);
+		}
+		if (sensitiveFile && contentLine) return redactDiffContentLine(line, inHunk);
+		return redactSensitiveLine(line);
+	}).join("\n");
 }
 
 function untrackedDiffArgs(path: string, stat: boolean): string[] {
 	const nullFile = process.platform === "win32" ? "NUL" : "/dev/null";
-	return ["diff", "--no-index", "--no-ext-diff", ...(stat ? ["--stat"] : []), "--", nullFile, path];
+	return ["diff", "--no-index", "--no-ext-diff", "--no-textconv", ...(stat ? ["--stat"] : []), "--", nullFile, path];
 }
 
-export function captureBestOfNWorktreeChanges(workspace: IsolatedBestOfNWorktree): BestOfNWorktreeChanges | undefined {
+interface EvidenceAccumulator {
+	readonly maxBytes: number;
+	value: string;
+	truncated: boolean;
+}
+
+function evidenceAccumulator(maxBytes: number): EvidenceAccumulator {
+	return { maxBytes, value: "", truncated: false };
+}
+
+function evidenceRemainingBytes(accumulator: EvidenceAccumulator): number {
+	const separatorBytes = accumulator.value.length > 0 ? utf8Bytes("\n") : 0;
+	return Math.max(0, accumulator.maxBytes - utf8Bytes(accumulator.value) - separatorBytes);
+}
+
+function appendEvidenceOutput(accumulator: EvidenceAccumulator, output: string, sourceTruncated = false): void {
+	if (sourceTruncated) accumulator.truncated = true;
+	const normalized = output.trimEnd();
+	if (!normalized) return;
+	const separator = accumulator.value.length > 0 ? "\n" : "";
+	const availableBytes = accumulator.maxBytes - utf8Bytes(accumulator.value) - utf8Bytes(separator);
+	if (availableBytes <= 0) {
+		accumulator.truncated = true;
+		return;
+	}
+	if (utf8Bytes(normalized) > availableBytes) accumulator.truncated = true;
+	accumulator.value += `${separator}${truncateUtf8Prefix(normalized, availableBytes)}`;
+}
+
+async function appendUntrackedEvidence(
+	accumulator: EvidenceAccumulator,
+	workspaceRoot: string,
+	path: string,
+	stat: boolean,
+): Promise<void> {
+	if (accumulator.truncated) return;
+	const remainingBytes = evidenceRemainingBytes(accumulator);
+	if (remainingBytes <= 0) {
+		accumulator.truncated = true;
+		return;
+	}
+	const captured = await runGitBounded(workspaceRoot, untrackedDiffArgs(path, stat), remainingBytes, [0, 1]);
+	appendEvidenceOutput(accumulator, redactGitOutput(captured.output), captured.truncated);
+}
+
+function truncateCapturedEvidence(value: string, maxBytes: number, alreadyTruncated: boolean): { text: string; truncated: boolean } {
+	const truncated = truncateUtf8(value, maxBytes);
+	if (!alreadyTruncated || truncated.truncated) return truncated;
+	const markerBytes = utf8Bytes(CANDIDATE_CHANGE_TRUNCATION_MARKER);
+	const availableBytes = Math.max(0, maxBytes - markerBytes);
+	const prefix = truncateUtf8Prefix(value, availableBytes).trimEnd();
+	return { text: `${prefix}${CANDIDATE_CHANGE_TRUNCATION_MARKER}`, truncated: true };
+}
+
+export async function captureBestOfNWorktreeChanges(workspace: IsolatedBestOfNWorktree): Promise<BestOfNWorktreeChanges | undefined> {
 	const currentHead = runGit(workspace.root, ["rev-parse", "--verify", "HEAD^{commit}"]).trim();
-	let trackedStat = runGit(workspace.root, ["diff", "--stat", "--no-ext-diff", "--no-textconv", workspace.baseCommit, "--"]);
-	let trackedDiff = runGit(workspace.root, ["diff", "--no-ext-diff", "--no-textconv", workspace.baseCommit, "--"]);
-	if (!trackedDiff.trim() && currentHead !== workspace.baseCommit) {
+	let trackedStat = await runGitBounded(workspace.root, ["diff", "--stat", "--no-ext-diff", "--no-textconv", workspace.baseCommit, "--"], CANDIDATE_CHANGE_STAT_BYTE_LIMIT);
+	let trackedDiff = await runGitBounded(workspace.root, ["diff", "--no-ext-diff", "--no-textconv", workspace.baseCommit, "--"], CANDIDATE_CHANGE_DIFF_BYTE_LIMIT);
+	if (!trackedDiff.output.trim() && currentHead !== workspace.baseCommit) {
 		const baseToHead = `${workspace.baseCommit}..HEAD`;
-		trackedStat = runGit(workspace.root, ["diff", "--stat", "--no-ext-diff", "--no-textconv", baseToHead, "--"]);
-		trackedDiff = runGit(workspace.root, ["diff", "--no-ext-diff", "--no-textconv", baseToHead, "--"]);
+		trackedStat = await runGitBounded(workspace.root, ["diff", "--stat", "--no-ext-diff", "--no-textconv", baseToHead, "--"], CANDIDATE_CHANGE_STAT_BYTE_LIMIT);
+		trackedDiff = await runGitBounded(workspace.root, ["diff", "--no-ext-diff", "--no-textconv", baseToHead, "--"], CANDIDATE_CHANGE_DIFF_BYTE_LIMIT);
 	}
 
-	const untracked = splitNulRecords(runGit(workspace.root, ["ls-files", "--others", "--exclude-standard", "-z"]))
+	const untrackedListing = await runGitBounded(workspace.root, ["ls-files", "--others", "--exclude-standard", "-z"], GIT_MAX_OUTPUT_BYTES);
+	const untracked = splitNulRecords(untrackedListing.output, untrackedListing.truncated)
 		.filter((path) => !isBridgeRuntimeSubagentsPath(path));
-	const untrackedStats = untracked.map((path) => runGitAllowingExit(workspace.root, untrackedDiffArgs(path, true), [0, 1]));
-	const untrackedDiffs = untracked.map((path) => runGitAllowingExit(workspace.root, untrackedDiffArgs(path, false), [0, 1]));
-	const rawStat = joinGitOutputs([trackedStat, ...untrackedStats]);
-	const rawDiff = joinGitOutputs([trackedDiff, ...untrackedDiffs]);
-	if (!rawStat && !rawDiff) return undefined;
+	const statEvidence = evidenceAccumulator(CANDIDATE_CHANGE_STAT_BYTE_LIMIT);
+	const diffEvidence = evidenceAccumulator(CANDIDATE_CHANGE_DIFF_BYTE_LIMIT);
+	appendEvidenceOutput(statEvidence, redactGitOutput(trackedStat.output), trackedStat.truncated);
+	appendEvidenceOutput(diffEvidence, redactGitOutput(trackedDiff.output), trackedDiff.truncated);
+	for (const path of untracked) {
+		await appendUntrackedEvidence(statEvidence, workspace.root, path, true);
+		await appendUntrackedEvidence(diffEvidence, workspace.root, path, false);
+		if (statEvidence.truncated && diffEvidence.truncated) break;
+	}
+	if (untrackedListing.truncated) {
+		statEvidence.truncated = true;
+		diffEvidence.truncated = true;
+	}
+	if (!statEvidence.value && !diffEvidence.value && !statEvidence.truncated && !diffEvidence.truncated) return undefined;
 
-	const stat = truncateUtf8(rawStat, CANDIDATE_CHANGE_STAT_BYTE_LIMIT);
-	const diff = truncateUtf8(rawDiff, CANDIDATE_CHANGE_DIFF_BYTE_LIMIT);
+	const stat = truncateCapturedEvidence(statEvidence.value, CANDIDATE_CHANGE_STAT_BYTE_LIMIT, statEvidence.truncated);
+	const diff = truncateCapturedEvidence(diffEvidence.value, CANDIDATE_CHANGE_DIFF_BYTE_LIMIT, diffEvidence.truncated);
 	return {
 		stat: stat.text,
 		diff: diff.text,
@@ -320,18 +529,13 @@ export function createBestOfNWorktreeManager(): BestOfNWorktreeManager {
 	const runRoot = mkdtempSync(join(tmpdir(), "pi-prompt-best-of-n-worktrees-"));
 	const created: IsolatedBestOfNWorktree[] = [];
 	const baselines = new Map<string, SourceBaseline>();
+	let registeredFinalTargetCwd: string | undefined;
 	let cleaned = false;
 
 	return {
 		create(sourceCwd, label) {
 			if (cleaned) throw new BestOfNWorktreeError("Best-of-N worker worktree manager was already cleaned up.");
-			const { canonicalSourceCwd, repositoryRoot, sourceRelativeCwd } = resolveSourceCwdContext(sourceCwd);
-			assertSourceCwdIsTrackedByWorktree(repositoryRoot, canonicalSourceCwd, sourceRelativeCwd);
-			let baseline = baselines.get(repositoryRoot);
-			if (!baseline) {
-				baseline = captureSourceBaseline(repositoryRoot);
-				baselines.set(repositoryRoot, baseline);
-			}
+			const { canonicalSourceCwd, repositoryRoot, sourceRelativeCwd, baseline } = registerSourceBaseline(sourceCwd, baselines);
 
 			const target = join(runRoot, `${created.length + 1}-${safeDirectoryName(label)}`);
 			try {
@@ -349,6 +553,13 @@ export function createBestOfNWorktreeManager(): BestOfNWorktreeManager {
 				}
 				throw error;
 			}
+		},
+
+		registerFinalTarget(targetCwd) {
+			if (cleaned) throw new BestOfNWorktreeError("Best-of-N worker worktree manager was already cleaned up.");
+			const registration = registerSourceBaseline(targetCwd, baselines);
+			registeredFinalTargetCwd = registration.canonicalSourceCwd;
+			return registeredFinalTargetCwd;
 		},
 
 		assertSourceBaselinesUnchanged() {
