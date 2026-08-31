@@ -2133,7 +2133,7 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				return "failed";
 			}
 			if (!(await ensureProjectPromptLibraryApproved(prompt, ctx))) return "failed";
-			const compareArgs = [...parseCommandArgs(lineup.args), ...(boundary.after.length ? ["--", ...boundary.after] : [])];
+			const compareArgs = [...parseCommandArgs(argsWithoutSubagent), ...(boundary.after.length ? ["--", ...boundary.after] : [])];
 			return await executeBestOfNPrompt({
 				pi,
 				ctx,

@@ -52,6 +52,11 @@ interface PhaseResult {
 	workspace?: IsolatedBestOfNWorktree;
 }
 
+const SUBAGENT_TASK_BYTE_LIMIT = 1024 * 1024;
+const BEST_OF_N_EVIDENCE_BYTE_RESERVE = 128 * 1024;
+const BEST_OF_N_EVIDENCE_BYTE_LIMIT = SUBAGENT_TASK_BYTE_LIMIT - BEST_OF_N_EVIDENCE_BYTE_RESERVE;
+const BEST_OF_N_EVIDENCE_TRUNCATION_MARKER = "\n\n[bestOfN evidence truncated to stay below the pi-subagents 1 MiB task limit.]\n";
+
 function requestedSlotCount(slots: readonly DelegationLineupSlot[]): number {
 	let total = 0;
 	for (const slot of slots) {
@@ -76,6 +81,29 @@ function expandSlots(slots: DelegationLineupSlot[], label: string): DelegationLi
 	return expanded;
 }
 
+function utf8Bytes(value: string): number {
+	return Buffer.byteLength(value, "utf8");
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+	if (maxBytes <= 0) return "";
+	let low = 0;
+	let high = value.length;
+	while (low < high) {
+		const mid = Math.ceil((low + high) / 2);
+		if (utf8Bytes(value.slice(0, mid)) <= maxBytes) low = mid;
+		else high = mid - 1;
+	}
+	return value.slice(0, low);
+}
+
+function capEvidence(value: string): string {
+	if (utf8Bytes(value) <= BEST_OF_N_EVIDENCE_BYTE_LIMIT) return value;
+	const markerBytes = utf8Bytes(BEST_OF_N_EVIDENCE_TRUNCATION_MARKER);
+	const availableBytes = Math.max(0, BEST_OF_N_EVIDENCE_BYTE_LIMIT - markerBytes);
+	return `${truncateUtf8(value, availableBytes).trimEnd()}${BEST_OF_N_EVIDENCE_TRUNCATION_MARKER}`;
+}
+
 function appendEvidence(preamble: string, label: string, results: PhaseResult[]): string {
 	const evidence = results
 		.map((result) => {
@@ -90,7 +118,7 @@ function appendEvidence(preamble: string, label: string, results: PhaseResult[])
 			return "";
 		})
 		.join("");
-	return `${preamble}${evidence}`;
+	return capEvidence(`${preamble}${evidence}`);
 }
 
 function phasePreamble(
@@ -119,7 +147,16 @@ function slotPrompt(
 	runtimeFork: boolean,
 	isolatedCwd: string | undefined,
 ): PromptWithModel {
-	const models = runtimeModel ? [runtimeModel] : slot.model ? [slot.model] : base.models;
+	const slotModels = slot.model
+		? slot.model.split(",").map((model) => model.trim()).filter(Boolean)
+		: undefined;
+	const models = runtimeModel
+		? [runtimeModel]
+		: slotModels && slotModels.length > 0
+			? slotModels
+			: slot.model
+				? [slot.model]
+				: base.models;
 	return {
 		...base,
 		name: `${base.name}:${slot.agent}`,
@@ -289,8 +326,9 @@ export async function executeBestOfNPrompt(options: BestOfNRunOptions): Promise<
 			? await runPhase(options, "reviewer", reviewerSlots, options.runtimeModel, workerEvidence, cancellation.controller, worktreeManager)
 			: [];
 		const reviewEvidence = appendEvidence("\n\nReviewer findings:", "Review", reviewers);
+		const finalEvidence = capEvidence(`${workerEvidence}${reviewEvidence}`);
 		const finalResults = options.config.finalApplier
-			? await runPhase(options, "final-applier", [options.config.finalApplier], options.runtimeModel, `${workerEvidence}${reviewEvidence}`, cancellation.controller, worktreeManager)
+			? await runPhase(options, "final-applier", [options.config.finalApplier], options.runtimeModel, finalEvidence, cancellation.controller, worktreeManager)
 			: [];
 		const finalText = resultText(finalResults, "Final answer");
 		if (options.config.finalApplier && finalText.length === 0) {

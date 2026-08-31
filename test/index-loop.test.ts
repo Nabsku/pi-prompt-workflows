@@ -1334,6 +1334,87 @@ test("routes best-of-N runtime overrides through the registered command", async 
 	});
 });
 
+test("best-of-N command strips runtime flags from task substitutions", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "compare.md"),
+			`---\nmodel: ${MODEL_ID}\nbestOfN:\n  workers:\n    - agent: worker\n  reviewers:\n    - agent: reviewer\n  finalApplier:\n    agent: applier\n---\nArgs: $@\nFirst: $1`,
+		);
+		execFileSync("git", ["init", "-q"], { cwd });
+		execFileSync("git", ["config", "user.email", "test@example.com"], { cwd });
+		execFileSync("git", ["config", "user.name", "Test User"], { cwd });
+		writeFileSync(join(cwd, "tracked.txt"), "base\n");
+		execFileSync("git", ["add", "."], { cwd });
+		execFileSync("git", ["commit", "-qm", "initial"], { cwd });
+
+		const pi = new FakePi();
+		const requests: any[] = [];
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+			const request = payload as any;
+			requests.push(request);
+			emitSubagentStarted(pi, request);
+			emitSubagentCompleted(pi, request, `${request.agent} response`);
+		});
+		promptModelExtension(pi as never);
+		const configured = { provider: "openai", id: "configured" };
+		const { ctx, getNotifications } = createContext(cwd, pi, [ACTIVE_MODEL, configured]);
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("compare")!.handler(`--model=openai/configured --cwd=${cwd} --fork "task item"`, ctx);
+
+		assert.equal(requests.length, 3, getNotifications().join(" | "));
+		for (const request of requests) {
+			assert.equal(request.model, "openai/configured");
+			assert.equal(request.context, "fork");
+			assert.match(request.task, /Args: task item/);
+			assert.match(request.task, /First: task item/);
+			assert.doesNotMatch(request.task, /--model/);
+			assert.doesNotMatch(request.task, /--cwd/);
+			assert.doesNotMatch(request.task, /--fork/);
+		}
+	});
+});
+
+test("best-of-N command preserves literal arguments after runtime flags", async () => {
+	await withTempHome(async (root) => {
+		const cwd = join(root, "project");
+		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".pi", "prompts", "compare.md"),
+			`---\nmodel: ${MODEL_ID}\nbestOfN:\n  workers:\n    - agent: worker\n---\nArgs: $@`,
+		);
+		execFileSync("git", ["init", "-q"], { cwd });
+		execFileSync("git", ["config", "user.email", "test@example.com"], { cwd });
+		execFileSync("git", ["config", "user.name", "Test User"], { cwd });
+		writeFileSync(join(cwd, "tracked.txt"), "base\n");
+		execFileSync("git", ["add", "."], { cwd });
+		execFileSync("git", ["commit", "-qm", "initial"], { cwd });
+
+		const pi = new FakePi();
+		const requests: any[] = [];
+		pi.events.on(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, (payload) => {
+			const request = payload as any;
+			requests.push(request);
+			emitSubagentStarted(pi, request);
+			emitSubagentCompleted(pi, request, `${request.agent} response`);
+		});
+		promptModelExtension(pi as never);
+		const configured = { provider: "openai", id: "configured" };
+		const { ctx, getNotifications } = createContext(cwd, pi, [ACTIVE_MODEL, configured]);
+		await pi.emit("session_start", {}, ctx);
+
+		await pi.commands.get("compare")!.handler(`--model=openai/configured --cwd=${cwd} --fork "task item" -- --literal --model-value`, ctx);
+
+		assert.equal(requests.length, 1, getNotifications().join(" | "));
+		assert.match(requests[0].task, /Args: task item -- --literal --model-value/);
+		assert.doesNotMatch(requests[0].task, /--model=openai\/configured/);
+		assert.doesNotMatch(requests[0].task, /--cwd=/);
+		assert.doesNotMatch(requests[0].task, /--fork/);
+	});
+});
+
 test("direct prompt command waits for tracked compaction before sending a user message", async () => {
 	await withTempHome(async (root) => {
 		const cwd = join(root, "project");
