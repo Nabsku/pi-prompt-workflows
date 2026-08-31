@@ -6,6 +6,7 @@ import { sanitizedGitEnvironment } from "./git-environment.js";
 
 const GIT_COMMAND_TIMEOUT_MS = 120_000;
 const GIT_MAX_OUTPUT_BYTES = 1024 * 1024;
+const BRIDGE_RUNTIME_SUBAGENTS_PATH = ".pi/subagents";
 const GIT_SAFE_ARGS = [
 	"--no-optional-locks",
 	"--no-replace-objects",
@@ -69,9 +70,42 @@ function isWithin(root: string, candidate: string): boolean {
 	return childPath === "" || (childPath !== ".." && !childPath.startsWith(`..${sep}`) && !isAbsolute(childPath));
 }
 
+function splitNulRecords(output: string): string[] {
+	return output.split("\0").filter((record) => record.length > 0);
+}
+
+function isBridgeRuntimeSubagentsPath(path: string): boolean {
+	return path === BRIDGE_RUNTIME_SUBAGENTS_PATH || path.startsWith(`${BRIDGE_RUNTIME_SUBAGENTS_PATH}/`);
+}
+
+function formatPathList(paths: readonly string[]): string {
+	const visible = paths.slice(0, 3).map((path) => `\`${path}\``).join(", ");
+	const remaining = paths.length - Math.min(paths.length, 3);
+	return remaining > 0 ? `${visible}, and ${remaining} more` : visible;
+}
+
+function hiddenIndexFlagPaths(sourceCwd: string): string[] {
+	const entries = splitNulRecords(runGit(sourceCwd, ["ls-files", "-v", "-z"]));
+	return entries.flatMap((entry) => {
+		const marker = entry[0];
+		const path = entry.slice(2);
+		if (!marker || entry[1] !== " " || !path) {
+			throw new BestOfNWorktreeError(`Git returned an unexpected tracked-file record while checking \`${sourceCwd}\` for best-of-N worker isolation.`);
+		}
+		return marker === "S" || /^[a-z]$/.test(marker) ? [path] : [];
+	});
+}
+
 function cleanRepository(sourceCwd: string): void {
+	const flaggedIndexPaths = hiddenIndexFlagPaths(sourceCwd);
+	if (flaggedIndexPaths.length > 0) {
+		throw new BestOfNWorktreeError(
+			`Best-of-N worker isolation requires tracked files to be visible to Git at \`${sourceCwd}\`. Clear assume-unchanged/skip-worktree index flags for ${formatPathList(flaggedIndexPaths)} before retrying.`,
+		);
+	}
 	const trackedChanges = runGit(sourceCwd, ["diff-index", "--name-only", "--no-ext-diff", "--no-textconv", "HEAD", "--"]);
-	const untrackedChanges = runGit(sourceCwd, ["ls-files", "--others", "--exclude-standard", "-z"]);
+	const untrackedChanges = splitNulRecords(runGit(sourceCwd, ["ls-files", "--others", "--exclude-standard", "-z"]))
+		.filter((path) => !isBridgeRuntimeSubagentsPath(path));
 	if (trackedChanges.length > 0 || untrackedChanges.length > 0) {
 		throw new BestOfNWorktreeError(
 			`Best-of-N worker isolation requires a clean Git worktree at \`${sourceCwd}\`. Commit or stash changes before retrying.`,

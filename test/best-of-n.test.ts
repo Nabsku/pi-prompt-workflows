@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyLineupOverrides, executeBestOfNPrompt, MAX_BEST_OF_N_REQUESTS } from "../best-of-n.ts";
@@ -168,6 +168,97 @@ test("rejects a dirty source worktree before launching workers", async () => {
 		assert.equal(result, "failed");
 		assert.equal(requests.length, 0);
 		assert.equal(existsSync(join(root, "tracked.txt")), true);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("rejects an assume-unchanged tracked source edit before launching workers", async () => {
+	const root = createGitRepo("pi-prompt-best-of-n-assume-unchanged-");
+	try {
+		execFileSync("git", ["update-index", "--assume-unchanged", "tracked.txt"], { cwd: root });
+		writeFileSync(join(root, "tracked.txt"), "hidden dirty\n");
+		const requests: any[] = [];
+		const pi = createPi(["candidate"], requests);
+		const context = createCtx(root);
+		const result = await executeBestOfNPrompt({
+			pi,
+			ctx: context,
+			prompt: basePrompt,
+			config: { workers: [{ agent: "worker" }] },
+			args: [],
+			currentModel: context.model,
+		});
+		assert.equal(result, "failed");
+		assert.equal(requests.length, 0);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("rejects a skip-worktree tracked source edit before launching workers", async () => {
+	const root = createGitRepo("pi-prompt-best-of-n-skip-worktree-");
+	try {
+		execFileSync("git", ["update-index", "--skip-worktree", "tracked.txt"], { cwd: root });
+		writeFileSync(join(root, "tracked.txt"), "hidden dirty\n");
+		const requests: any[] = [];
+		const pi = createPi(["candidate"], requests);
+		const context = createCtx(root);
+		const result = await executeBestOfNPrompt({
+			pi,
+			ctx: context,
+			prompt: basePrompt,
+			config: { workers: [{ agent: "worker" }] },
+			args: [],
+			currentModel: context.model,
+		});
+		assert.equal(result, "failed");
+		assert.equal(requests.length, 0);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("allows untracked bridge runtime state under .pi/subagents", async () => {
+	const root = createGitRepo("pi-prompt-best-of-n-runtime-state-");
+	try {
+		mkdirSync(join(root, ".pi", "subagents"), { recursive: true });
+		writeFileSync(join(root, ".pi", "subagents", "run-state.json"), "{}\n");
+		const requests: any[] = [];
+		const pi = createPi(["candidate"], requests);
+		const context = createCtx(root);
+		const result = await executeBestOfNPrompt({
+			pi,
+			ctx: context,
+			prompt: basePrompt,
+			config: { workers: [{ agent: "worker" }] },
+			args: [],
+			currentModel: context.model,
+		});
+		assert.equal(result, "completed");
+		assert.equal(requests.length, 1);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("rejects untracked source files outside bridge runtime state before launching workers", async () => {
+	const root = createGitRepo("pi-prompt-best-of-n-untracked-");
+	try {
+		writeFileSync(join(root, "scratch.txt"), "untracked\n");
+		const requests: any[] = [];
+		const pi = createPi(["candidate"], requests);
+		const context = createCtx(root);
+		const result = await executeBestOfNPrompt({
+			pi,
+			ctx: context,
+			prompt: basePrompt,
+			config: { workers: [{ agent: "worker" }] },
+			args: [],
+			currentModel: context.model,
+		});
+		assert.equal(result, "failed");
+		assert.equal(requests.length, 0);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
