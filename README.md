@@ -16,6 +16,12 @@ Adds model selection, thinking levels, reusable prompt partials, and one-or-many
   → restores your previous model when finished
 ```
 
+## Compaction compatibility
+
+Workflow commands wait for Pi compaction to settle; this extension does not summarize the conversation. Both `session_compact` and `session_compact_failed` release that wait, including when another extension cancels compaction (for example, Codex Remote context management). Settlement does not imply successful compaction or workflow completion, and an already submitted prompt is never resent by this recovery.
+
+Hosts without the failure event retain abort-signal, accepted-prompt, and timeout recovery. The existing five-minute fallback is unchanged. After a timeout, signal abort, or overlapping attempt, untagged terminal events cannot safely identify an attempt; they remain fail-closed until Pi accepts another prompt or the extension reloads. Inspect host compaction hooks rather than increasing the timeout.
+
 ## Why?
 
 Each prompt template becomes a self-contained agent mode. `/quick-debug` spins up a cheap model with REPL skills. `/deep-analysis` brings in extended thinking with refactoring expertise. `/review` can include the same shared repo rules every time without copying them into every template. When the command finishes, you're back to your daily driver without touching anything.
