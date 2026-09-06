@@ -276,6 +276,8 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		ctx?: Pick<ExtensionContext, "hasUI" | "ui">,
 	): boolean {
 		if (activeCompactionGeneration !== null) {
+			// The refused attempt also emits an untagged failure terminal.
+			compactionTerminalCorrelationLost = true;
 			notify(ctx, "Compaction request refused because another compaction generation is still active.", "warning");
 			return false;
 		}
@@ -294,21 +296,25 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 				pendingCompactionFallbackTimer = null;
 				notify(
 					ctx,
-					`The host send remains owned after the compaction wait tripwire: budget ${COMPACTION_WAIT_FALLBACK_MS}ms, configured ${COMPACTION_WAIT_FALLBACK_MS}ms, observed ${observedMs}ms. Pi 0.84.1 does not expose cancellation for this fire-and-forget send, so the barrier remains active until session_compact, before_agent_start, session reset, or shutdown. Do not retry; inspect the host compaction logs.`,
+					`The host send remains owned after the compaction wait tripwire: budget ${COMPACTION_WAIT_FALLBACK_MS}ms, configured ${COMPACTION_WAIT_FALLBACK_MS}ms, observed ${observedMs}ms. Pi 0.84.1 does not expose cancellation for this fire-and-forget send, so the barrier remains active until a correlated session_compact or session_compact_failed, before_agent_start, session reset, or shutdown. Do not retry; inspect the host compaction logs.`,
 					"warning",
 				);
 				return;
 			}
 			notify(
 				ctx,
-				`Compaction barrier fallback released blocked work: budget ${COMPACTION_WAIT_FALLBACK_MS}ms, configured ${COMPACTION_WAIT_FALLBACK_MS}ms, observed ${observedMs}ms. A session_compact, before_agent_start, or abort signal did not arrive; pending commands were cancelled. Untagged compaction terminals remain fail-closed until the host accepts another prompt or this extension reloads. Inspect the compaction hooks before increasing the fallback.`,
+				`Compaction barrier fallback released blocked work: budget ${COMPACTION_WAIT_FALLBACK_MS}ms, configured ${COMPACTION_WAIT_FALLBACK_MS}ms, observed ${observedMs}ms. No correlated session_compact, session_compact_failed, before_agent_start, or abort signal settled the barrier. Commands blocked on this barrier will not proceed. Untagged compaction terminals remain fail-closed until the host accepts another prompt or this extension reloads. Inspect the compaction hooks before increasing the fallback.`,
 				"warning",
 			);
 			compactionTerminalCorrelationLost = true;
 			finishCompactionGeneration(generation, "fallback");
 		}, COMPACTION_WAIT_FALLBACK_MS);
 		if (signal) {
-			const onAbort = () => finishCompactionGeneration(generation, "abort");
+			const onAbort = () => {
+				// A later host failure terminal cannot be matched to this aborted attempt.
+				compactionTerminalCorrelationLost = true;
+				finishCompactionGeneration(generation, "abort");
+			};
 			signal.addEventListener("abort", onAbort, { once: true });
 			removeActiveCompactionAbortListener = () => signal.removeEventListener("abort", onAbort);
 		}
@@ -344,12 +350,12 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 		completeCompactionBarrier();
 	}
 
-	function handleCompactionTerminal(): void {
+	function handleCompactionTerminal(eventType: "session_compact" | "session_compact_failed"): void {
 		if (compactionTerminalCorrelationLost) {
 			if (activeCompactionGeneration !== null && invocationCtx) {
 				notify(
 					invocationCtx,
-					`Ignored an uncorrelated session_compact event while a compaction barrier is active: fallback budget ${COMPACTION_WAIT_FALLBACK_MS}ms, configured ${COMPACTION_WAIT_FALLBACK_MS}ms. Wait for the host to accept another prompt or reload this extension to restore terminal correlation.`,
+					`Ignored an uncorrelated ${eventType} event while a compaction barrier is active: fallback budget ${COMPACTION_WAIT_FALLBACK_MS}ms, configured ${COMPACTION_WAIT_FALLBACK_MS}ms. Wait for the host to accept another prompt or reload this extension to restore terminal correlation.`,
 					"warning",
 				);
 			}
@@ -2439,7 +2445,11 @@ export default function promptModelExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_compact", async () => {
-		handleCompactionTerminal();
+		handleCompactionTerminal("session_compact");
+	});
+
+	pi.on("session_compact_failed", async () => {
+		handleCompactionTerminal("session_compact_failed");
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
