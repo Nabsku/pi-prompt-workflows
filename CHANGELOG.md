@@ -4,6 +4,13 @@
 
 - Settle compaction barriers on Pi failure/cancellation events, including cancellations by other extensions. Preserve submitted-prompt ownership and reject ambiguous late terminals after timeout, abort, or overlapping attempts. Clarify fallback warnings without increasing the timeout.
 
+## [0.19.1](https://github.com/Nabsku/pi-prompt-workflows/compare/v0.19.0...v0.19.1) (2026-09-06)
+
+
+### Bug Fixes
+
+* settle cancelled compaction barriers ([f3eca44](https://github.com/Nabsku/pi-prompt-workflows/commit/f3eca444b34122ff9ac6bfe010e80e809b27e1b5))
+
 ## [0.19.0](https://github.com/Nabsku/pi-prompt-workflows/compare/v0.18.2...v0.19.0) (2026-08-31)
 
 
