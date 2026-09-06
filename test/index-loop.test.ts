@@ -5,6 +5,7 @@ import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import promptModelExtension from "../index.ts";
+import { AgentSession, ExtensionRunner } from "@earendil-works/pi-coding-agent";
 import {
 	PROMPT_TEMPLATE_PROMPT_FINISHED_EVENT,
 	PROMPT_TEMPLATE_PROMPT_INVOKE_ACK_EVENT,
@@ -542,7 +543,8 @@ test("accepted prompt invocation waits when an acknowledgement observer starts c
 	});
 });
 
-test("accepted invocation follows the original host send when compaction fails without a terminal event", async () => {
+for (const failureTerminal of [false, true]) {
+test(`accepted invocation follows the original host send when compaction fails (terminal=${failureTerminal})`, async () => {
 	await withTempHome(async (root) => {
 		const cwd = join(root, "project");
 		mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
@@ -573,6 +575,15 @@ test("accepted invocation follows the original host send when compaction fails w
 			name: "invoke",
 		});
 		await compactionStarted;
+		if (failureTerminal) {
+			await pi.emit("session_compact_failed", { aborted: true }, ctx);
+			const prematurelyFinished = await Promise.race([
+				finished.then(() => true),
+				new Promise<false>((resolve) => setImmediate(() => resolve(false))),
+			]);
+			assert.equal(prematurelyFinished, false);
+			assert.equal(sendCalls, 1);
+		}
 		await pi.emit("before_agent_start", { prompt: "invoked", systemPrompt: "BASE" }, ctx);
 		acceptedSend("invoked");
 		const settled = await Promise.race([
@@ -600,6 +611,8 @@ test("accepted invocation follows the original host send when compaction fails w
 		await pi.emit("session_shutdown", {}, ctx);
 	});
 });
+
+}
 
 test("session replacement cancels an invocation whose owned send is waiting for a missing compaction terminal", async () => {
 	await withTempHome(async (root) => {
@@ -1415,6 +1428,79 @@ test("best-of-N command preserves literal arguments after runtime flags", async 
 	});
 });
 
+for (const cancelFirst of [false, true]) {
+	test(`host compaction cancellation settles without a workflow (cancelFirst=${cancelFirst})`, async (t) => {
+		t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+		await withTempHome(async (cwd) => {
+			const pi = new FakePi();
+			promptModelExtension(pi as never);
+			const { ctx, getNotifications } = createContext(cwd, pi);
+			await pi.emit("session_start", {}, ctx);
+			let signal: AbortSignal | undefined;
+			const canceller = { handlers: new Map([["session_before_compact", [(event: any) => {
+				signal = event.signal;
+				return { cancel: true };
+			}]]]) };
+			const workflow = { handlers: pi.hooks };
+			const runner = new ExtensionRunner(
+				(cancelFirst ? [canceller, workflow] : [workflow, canceller]) as never,
+				{} as never, cwd, {} as never, {} as never,
+			);
+			runner.createContext = () => ctx;
+			const terminals: any[] = [];
+			pi.on("session_compact_failed", (event) => { terminals.push(event); });
+			// Run the real host cancellation path; auth and history are local fixtures, no provider request.
+			const host = {
+				model: ACTIVE_MODEL,
+				settingsManager: { getCompactionSettings: () => ({ enabled: true, reserveTokens: 1, keepRecentTokens: 1 }) },
+				sessionManager: { getBranch: () => [
+					{ type: "message", id: "first", parentId: null, message: { role: "user", content: "first turn", timestamp: 0 } },
+					{ type: "message", id: "second", parentId: "first", message: { role: "user", content: "second turn", timestamp: 1 } },
+				] },
+				_getSummarizationRequestAuth: async () => ({ model: ACTIVE_MODEL, apiKey: "fixture-not-used" }),
+				_extensionRunner: runner,
+				_emit: () => {},
+				_emitSessionCompactFailed: (AgentSession.prototype as any)._emitSessionCompactFailed,
+			};
+			assert.equal(await (AgentSession.prototype as any)._runAutoCompaction.call(host, "threshold", false), false);
+			assert.equal(signal?.aborted, false, "extension cancellation does not abort the hook signal");
+			assert.equal(terminals.length, 1);
+			assert.equal(terminals[0].aborted, true);
+			t.mock.timers.tick(300000); // Existing barrier fallback budget; a settled attempt has no timer.
+			assert.deepEqual(getNotifications(), []);
+			assert.deepEqual(pi.userMessages, []);
+			await pi.emit("session_shutdown", {}, ctx);
+		});
+	});
+}
+
+for (const reason of ["manual", "threshold", "overflow"]) {
+	for (const aborted of [true, false]) {
+		test(`compaction terminal failure releases ${reason} attempt (aborted=${aborted})`, async (t) => {
+			t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+			await withTempHome(async (root) => {
+				const cwd = join(root, "project");
+				mkdirSync(join(cwd, ".pi", "prompts"), { recursive: true });
+				writeFileSync(join(cwd, ".pi", "prompts", "deslop.md"), `---\nmodel: ${MODEL_ID}\n---\ndeslop task`);
+				const pi = new FakePi();
+				promptModelExtension(pi as never);
+				const { ctx, getNotifications } = createContext(cwd, pi);
+				await pi.emit("session_start", {}, ctx);
+				await pi.emit("session_before_compact", { reason, signal: new AbortController().signal }, ctx);
+				const command = pi.commands.get("deslop")!.handler("", ctx);
+				await pi.emit("session_compact_failed", { reason, aborted, willRetry: false, fromExtension: false }, ctx);
+				await new Promise((resolve) => setImmediate(resolve));
+				const sent = [...pi.userMessages];
+				// Advance the existing five-minute fallback budget, also cleaning up on failure.
+				t.mock.timers.tick(300000);
+				await command;
+				assert.deepEqual(sent, ["deslop task"]);
+				assert.equal(getNotifications().some((message) => message.includes("fallback released")), false);
+			});
+		});
+	}
+}
+
 test("direct prompt command waits for tracked compaction before sending a user message", async () => {
 	await withTempHome(async (root) => {
 		const cwd = join(root, "project");
@@ -1456,7 +1542,11 @@ test("a second compaction is refused without releasing the active generation", a
 		second.abort();
 		await new Promise((resolve) => setTimeout(resolve, 10));
 		const messagesBeforeFirstCompleted = [...pi.userMessages];
+		await pi.emit("session_compact_failed", { aborted: true }, ctx);
 		await pi.emit("session_compact", {}, ctx);
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.deepEqual(pi.userMessages, [], "untagged terminals cannot settle overlapping attempts");
+		first.abort();
 		await commandRun;
 
 		assert.deepEqual(secondResult, { cancel: true });
@@ -1542,7 +1632,9 @@ test("compaction fallback cancels blocked commands and reports its wait budget",
 	});
 });
 
-test("terminal correlation stays fail-closed after a fallback when the stale terminal arrives first", async (t) => {
+for (const release of ["fallback", "abort"]) {
+for (const terminal of ["session_compact", "session_compact_failed"]) {
+test(`terminal correlation stays fail-closed after ${release} when ${terminal} arrives first`, async (t) => {
 	t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
 	await withTempHome(async (root) => {
 		const cwd = join(root, "project");
@@ -1554,22 +1646,24 @@ test("terminal correlation stays fail-closed after a fallback when the stale ter
 		const { ctx, getNotifications } = createContext(cwd, pi);
 		await pi.emit("session_start", {}, ctx);
 
-		await pi.emit("session_before_compact", { signal: new AbortController().signal }, ctx);
-		t.mock.timers.tick(5 * 60 * 1000);
+		const previous = new AbortController();
+		await pi.emit("session_before_compact", { signal: previous.signal }, ctx);
+		if (release === "abort") previous.abort();
+		else t.mock.timers.tick(5 * 60 * 1000);
 		await Promise.resolve();
 
 		const nextCompaction = new AbortController();
 		await pi.emit("session_before_compact", { signal: nextCompaction.signal }, ctx);
 		const commandRun = pi.commands.get("deslop")!.handler("", ctx);
 		await Promise.resolve();
-		await pi.emit("session_compact", {}, ctx);
+		await pi.emit(terminal, {}, ctx);
 		const releasedByLateTerminal = await Promise.race([
 			commandRun.then(() => true),
 			new Promise<false>((resolve) => setImmediate(() => resolve(false))),
 		]);
 
 		assert.equal(releasedByLateTerminal, false);
-		const ignoredTerminalNotifications = getNotifications().filter((message) => message.includes("Ignored an uncorrelated session_compact"));
+		const ignoredTerminalNotifications = getNotifications().filter((message) => message.includes(`Ignored an uncorrelated ${terminal}`));
 		assert.equal(ignoredTerminalNotifications.length, 1);
 		assert.match(ignoredTerminalNotifications[0]!, /fallback budget 300000ms.*configured 300000ms/i);
 		assert.match(ignoredTerminalNotifications[0]!, /accept another prompt or reload/i);
@@ -1584,6 +1678,9 @@ test("terminal correlation stays fail-closed after a fallback when the stale ter
 		assert.deepEqual(pi.userMessages, ["deslop task"]);
 	});
 });
+}
+
+}
 
 test("terminal correlation stays fail-closed after a fallback when the current terminal arrives first", async (t) => {
 	t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
