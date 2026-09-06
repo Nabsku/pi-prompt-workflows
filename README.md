@@ -20,7 +20,7 @@ Adds model selection, thinking levels, reusable prompt partials, and one-or-many
 
 Workflow commands wait for Pi compaction to settle; this extension does not summarize the conversation. Both `session_compact` and `session_compact_failed` release that wait, including when another extension cancels compaction (for example, Codex Remote context management). Settlement does not imply successful compaction or workflow completion, and an already submitted prompt is never resent by this recovery.
 
-Hosts without the failure event retain abort-signal, accepted-prompt, and timeout recovery. The existing five-minute fallback is unchanged. After a timeout, signal abort, or overlapping attempt, untagged terminal events cannot safely identify an attempt; they remain fail-closed until Pi accepts another prompt or the extension reloads. Inspect host compaction hooks rather than increasing the timeout.
+Hosts without the failure event retain abort-signal, accepted-prompt, and timeout recovery. The existing five-minute fallback is unchanged. After a signal abort, the corresponding failure event restores correlation if it arrives before another attempt starts. After a timeout or overlapping attempt, or if another attempt starts before the abort terminal arrives, untagged terminal events remain fail-closed until Pi accepts another prompt or the extension reloads. Inspect host compaction hooks rather than increasing the timeout.
 
 ## Why?
 

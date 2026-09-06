@@ -1633,6 +1633,29 @@ test("compaction fallback cancels blocked commands and reports its wait budget",
 });
 
 for (const release of ["fallback", "abort"]) {
+test(`idle ${release} terminal recovery preserves the next compaction`, async (t) => {
+	t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+	await withTempHome(async (cwd) => {
+		const pi = new FakePi();
+		promptModelExtension(pi as never);
+		const { ctx, getNotifications } = createContext(cwd, pi);
+		await pi.emit("session_start", {}, ctx);
+		const first = new AbortController();
+		await pi.emit("session_before_compact", { signal: first.signal }, ctx);
+		if (release === "abort") first.abort();
+		else t.mock.timers.tick(300000);
+		await pi.emit("session_compact_failed", { aborted: true }, ctx);
+		const second = new AbortController();
+		await pi.emit("session_before_compact", { signal: second.signal }, ctx);
+		const before = getNotifications().length;
+		await pi.emit("session_compact", {}, ctx);
+		t.mock.timers.tick(300000);
+		const after = getNotifications().slice(before);
+		await pi.emit("session_shutdown", {}, ctx);
+		if (release === "abort") assert.deepEqual(after, [], "consumed abort terminal restores correlation");
+		else assert.ok(after.some((message) => message.includes("uncorrelated")), "timeout ambiguity remains fail-closed");
+	});
+});
 for (const terminal of ["session_compact", "session_compact_failed"]) {
 test(`terminal correlation stays fail-closed after ${release} when ${terminal} arrives first`, async (t) => {
 	t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
