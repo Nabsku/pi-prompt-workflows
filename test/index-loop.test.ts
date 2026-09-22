@@ -1463,6 +1463,7 @@ for (const cancelFirst of [false, true]) {
 				_extensionRunner: runner,
 				_emit: () => {},
 				_emitSessionCompactFailed: (AgentSession.prototype as any)._emitSessionCompactFailed,
+				_resolveIdleWaitIfIdle: () => {},
 			};
 			assert.equal(await (AgentSession.prototype as any)._runAutoCompaction.call(host, "threshold", false), false);
 			assert.equal(signal?.aborted, false, "extension cancellation does not abort the hook signal");
