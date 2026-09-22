@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Settle compaction barriers on Pi failure/cancellation events, including cancellations by other extensions. Preserve submitted-prompt ownership and reject ambiguous late terminals after timeout, abort, or overlapping attempts. Clarify fallback warnings without increasing the timeout.
+- Keep run-prompt discoverability and optional guidance in stable tool metadata instead of per-turn system-prompt overrides, preserving provider cache reuse across notification turns.
 
 ## [0.19.1](https://github.com/Nabsku/pi-prompt-workflows/compare/v0.19.0...v0.19.1) (2026-09-06)
 
